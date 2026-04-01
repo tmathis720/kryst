@@ -60,7 +60,7 @@ use kryst::context::ksp_context::{KspContext, SolverType};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::matrix::op::{CsrOp, DenseOp, LinOp};
+use kryst::matrix::op::{CsrOp, LinOp};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::sparse::CsrMatrix;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -116,6 +116,14 @@ struct AmgDecision {
 struct CgCompatibility {
     cg_safe: bool,
     reason: String,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+struct DirectReferenceComparison {
+    abs_error_norm: f64,
+    rel_error_norm: f64,
+    matches_verified_answer: bool,
+    note: String,
 }
 
 /// Get the optimal solver configuration for a specific matrix
@@ -196,6 +204,139 @@ fn true_residual_norm(op: &dyn LinOp<S = f64>, rhs: &[f64], solution: &[f64]) ->
     norm_sq.sqrt()
 }
 
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn solve_dense_lu(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    for k in 0..n {
+        let mut pivot = k;
+        let mut max_val = a[k][k].abs();
+        for (i, row) in a.iter().enumerate().skip(k + 1).take(n - (k + 1)) {
+            if row[k].abs() > max_val {
+                max_val = row[k].abs();
+                pivot = i;
+            }
+        }
+        if max_val <= 1e-15 || !max_val.is_finite() {
+            return None;
+        }
+        if pivot != k {
+            a.swap(k, pivot);
+            b.swap(k, pivot);
+        }
+        let piv = a[k][k];
+        for i in (k + 1)..n {
+            let factor = a[i][k] / piv;
+            a[i][k] = 0.0;
+            for j in (k + 1)..n {
+                a[i][j] -= factor * a[k][j];
+            }
+            b[i] -= factor * b[k];
+        }
+    }
+
+    let mut x = vec![0.0; n];
+    for i in (0..n).rev() {
+        let mut sum = b[i];
+        for (j, &xj) in x.iter().enumerate().skip(i + 1).take(n - (i + 1)) {
+            sum -= a[i][j] * xj;
+        }
+        if a[i][i].abs() <= 1e-15 || !a[i][i].is_finite() {
+            return None;
+        }
+        x[i] = sum / a[i][i];
+    }
+    Some(x)
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn direct_reference_policy(a_mat: &CsrMatrix<f64>) -> (bool, String) {
+    let small_matrix_gate = a_mat.nrows() <= 1024 && a_mat.ncols() <= 1024;
+    if !small_matrix_gate {
+        return (
+            false,
+            format!(
+                "skip: size gate failed ({}x{})",
+                a_mat.nrows(),
+                a_mat.ncols()
+            ),
+        );
+    }
+    let density = a_mat.nnz() as f64 / (a_mat.nrows() * a_mat.ncols()) as f64;
+    let dense_threshold = 0.10;
+    let env_override = std::env::var("KRYST_ENABLE_DIRECT_REFERENCE")
+        .ok()
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
+    match env_override {
+        Some(true) => (true, "env override: forced on".to_string()),
+        Some(false) => (false, "env override: forced off".to_string()),
+        None if density >= dense_threshold => (
+            true,
+            format!(
+                "auto: density {:.3e} >= {:.3e} and size gate passed",
+                density, dense_threshold
+            ),
+        ),
+        None => (
+            false,
+            format!(
+                "auto skip: density {:.3e} < {:.3e} (size gate passed)",
+                density, dense_threshold
+            ),
+        ),
+    }
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn compare_with_direct_reference(
+    a_mat: &CsrMatrix<f64>,
+    rhs: &[f64],
+    iterative_solution: &[f64],
+) -> Result<Option<DirectReferenceComparison>, Box<dyn std::error::Error>> {
+    let (enabled, policy_note) = direct_reference_policy(a_mat);
+    if !enabled {
+        return Ok(Some(DirectReferenceComparison {
+            abs_error_norm: f64::NAN,
+            rel_error_norm: f64::NAN,
+            matches_verified_answer: false,
+            note: policy_note,
+        }));
+    }
+
+    let dense = a_mat.to_dense()?;
+    let n = rhs.len();
+    let mut dense_rows = vec![vec![0.0; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            dense_rows[i][j] = dense[(i, j)];
+        }
+    }
+    let Some(reference_solution) = solve_dense_lu(dense_rows, rhs.to_vec()) else {
+        return Ok(Some(DirectReferenceComparison {
+            abs_error_norm: f64::NAN,
+            rel_error_norm: f64::NAN,
+            matches_verified_answer: false,
+            note: format!("{}; direct LU failed (near-singular pivot)", policy_note),
+        }));
+    };
+
+    let mut diff_sq = 0.0;
+    let mut ref_sq = 0.0;
+    for (&x_it, &x_ref) in iterative_solution.iter().zip(reference_solution.iter()) {
+        let d = x_it - x_ref;
+        diff_sq += d * d;
+        ref_sq += x_ref * x_ref;
+    }
+    let abs_error_norm = diff_sq.sqrt();
+    let rel_error_norm = abs_error_norm / ref_sq.sqrt().max(1e-32);
+    let matches_verified_answer = rel_error_norm <= 1e-6;
+    Ok(Some(DirectReferenceComparison {
+        abs_error_norm,
+        rel_error_norm,
+        matches_verified_answer,
+        note: policy_note,
+    }))
+}
+
 /// Test a solver configuration and return detailed results
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -204,30 +345,34 @@ fn test_optimal_solver(
     p_mat: Option<&CsrMatrix<f64>>,
     rhs: &[f64],
     decision: &SelectionDecision,
-    _matrix_name: &str,
+    matrix_name: &str,
     is_root_rank: bool,
-) -> Result<(String, String, String, f64, f64, usize, String, bool), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        String,
+        String,
+        String,
+        f64,
+        f64,
+        usize,
+        String,
+        bool,
+        Option<DirectReferenceComparison>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let _ = matrix_name;
     let mut solution = vec![0.0; rhs.len()];
 
     // Sparse-first path: keep A/P in CSR form so AMG/ILU/Jacobi comparisons reflect
     // actual sparse operator semantics used by iterative methods.
     let csr_a_matrix = Arc::new(a_mat.clone());
-    let mut a_op: Arc<dyn LinOp<S = f64>> = Arc::new(CsrOp::new(Arc::clone(&csr_a_matrix)));
+    let a_op: Arc<dyn LinOp<S = f64>> = Arc::new(CsrOp::new(Arc::clone(&csr_a_matrix)));
     // Optional repaired/scaled matrix for preconditioner construction only (also sparse).
     let p_op: Option<Arc<dyn LinOp<S = f64>>> = match p_mat {
         Some(p) => Some(Arc::new(CsrOp::new(Arc::new(p.clone())))),
         None => None,
     };
-    // Dense/direct reference path is intentionally opt-in and size-gated to avoid
-    // forcing densification in the normal iterative benchmark workflow.
-    let allow_direct_reference = std::env::var("KRYST_ENABLE_DIRECT_REFERENCE")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false);
-    let small_matrix_for_direct = a_mat.nrows() <= 1024 && a_mat.ncols() <= 1024;
-    if allow_direct_reference && small_matrix_for_direct {
-        let dense_a_matrix = Arc::new(a_mat.to_dense()?);
-        a_op = Arc::new(DenseOp::<f64>::new(dense_a_matrix));
-    }
     let rhs_vec = rhs.to_vec();
 
     // Try primary configuration
@@ -349,6 +494,8 @@ fn test_optimal_solver(
                             "primary {}: {}; fallback succeeded with {}",
                             primary_failure, primary_reason, fallback_method
                         );
+                        let direct_comparison =
+                            compare_with_direct_reference(a_mat, &rhs_vec, &solution_fallback)?;
                         let _ = solve_time_fallback;
                         Ok((
                             primary_method,
@@ -359,6 +506,7 @@ fn test_optimal_solver(
                             stats_fallback.iterations,
                             status,
                             converged,
+                            direct_comparison,
                         ))
                     }
                     Err(fallback_err) => {
@@ -381,11 +529,13 @@ fn test_optimal_solver(
                             0,
                             status,
                             false,
+                            None,
                         ))
                     }
                 }
             } else {
                 let status = "ok".to_string();
+                let direct_comparison = compare_with_direct_reference(a_mat, &rhs_vec, &solution)?;
                 Ok((
                     primary_method,
                     "-".to_string(),
@@ -395,6 +545,7 @@ fn test_optimal_solver(
                     stats.iterations,
                     status,
                     true,
+                    direct_comparison,
                 ))
             }
         }
@@ -440,6 +591,8 @@ fn test_optimal_solver(
                         "primary {}: {}; fallback succeeded with {}",
                         primary_failure, primary_reason, fallback_method
                     );
+                    let direct_comparison =
+                        compare_with_direct_reference(a_mat, &rhs_vec, &solution_fallback)?;
                     let _ = solve_time_fallback;
                     Ok((
                         primary_method,
@@ -450,6 +603,7 @@ fn test_optimal_solver(
                         stats_fallback.iterations,
                         status,
                         converged,
+                        direct_comparison,
                     ))
                 }
                 Err(fallback_err) => {
@@ -472,6 +626,7 @@ fn test_optimal_solver(
                         0,
                         status,
                         false,
+                        None,
                     ))
                 }
             }
@@ -917,7 +1072,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if is_root_rank {
         println!(
-            "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {}",
+            "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {:<10} {}",
             "Matrix",
             "Primary",
             "Fallback",
@@ -926,9 +1081,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "StatsRes",
             "Iterations",
             "Status",
+            "Verified?",
             "Performance vs Benchmark"
         );
-        println!("{}", "=".repeat(150));
+        println!("{}", "=".repeat(164));
     }
 
     for (matrix_name, _description) in test_matrices {
@@ -951,8 +1107,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {}",
-                        matrix_name, "-", "-", "files_missing", "N/A", "N/A", "N/A", "failed", "-"
+                        "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {:<10} {}",
+                        matrix_name,
+                        "-",
+                        "-",
+                        "files_missing",
+                        "N/A",
+                        "N/A",
+                        "N/A",
+                        "failed",
+                        "N/A",
+                        "-"
                     );
                 }
                 continue;
@@ -981,8 +1146,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if a_op.nrows() > 6000 {
             if is_root_rank {
                 println!(
-                    "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {}",
-                    matrix_name, "-", "-", "too_large", "N/A", "N/A", "SKIP", "failed", "-"
+                    "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {:<10} {}",
+                    matrix_name, "-", "-", "too_large", "N/A", "N/A", "SKIP", "failed", "N/A", "-"
                 );
             }
             continue;
@@ -1006,6 +1171,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 iters,
                 status,
                 converged,
+                direct_comparison,
             )) => {
                 // Compare with benchmark expectations
                 let iter_performance = if converged && iters <= decision.expected_iterations {
@@ -1018,9 +1184,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "-"
                 };
 
+                let verified = direct_comparison
+                    .as_ref()
+                    .map(|cmp| {
+                        if cmp.matches_verified_answer {
+                            "yes"
+                        } else if cmp.note.starts_with("auto skip")
+                            || cmp.note.contains("forced off")
+                        {
+                            "skip"
+                        } else {
+                            "no"
+                        }
+                    })
+                    .unwrap_or("N/A");
+
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<18} {:<12.2e} {:<12.2e} {:<10} {:<14} {}",
+                        "{:<15} {:<22} {:<22} {:<18} {:<12.2e} {:<12.2e} {:<10} {:<14} {:<10} {}",
                         matrix_name,
                         primary,
                         fallback,
@@ -1029,8 +1210,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         prec_residual,
                         iters,
                         status,
+                        verified,
                         iter_performance
                     );
+                    if let Some(cmp) = direct_comparison.as_ref() {
+                        println!(
+                            "    → Direct reference check: abs_err_norm={:.3e}, rel_diff={:.3e}, matches_verified_answer={}, policy={}",
+                            cmp.abs_error_norm,
+                            cmp.rel_error_norm,
+                            cmp.matches_verified_answer,
+                            cmp.note
+                        );
+                    }
                     println!(
                         "    → Screen: symmetry_hint={}, spd_like_hint={}, diagonal_healthy={}, density={:.3e}, size_class={}, cond_heuristic={:.2e}",
                         screen.symmetry_hint,
@@ -1073,8 +1264,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => {
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {}",
-                        matrix_name, "-", "-", "failed", "N/A", "N/A", "N/A", "failed", e
+                        "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {:<10} {}",
+                        matrix_name, "-", "-", "failed", "N/A", "N/A", "N/A", "failed", "N/A", e
                     );
                 }
             }
