@@ -557,12 +557,18 @@ fn test_optimal_solver(
                             classify_acceptance_status(stats_fallback.reason, true_residual, 1e-6);
                         let status = acceptance_status.as_str().to_string();
                         let converged = acceptance_status.is_accepted();
+                        let fallback_outcome = if acceptance_status.is_accepted() {
+                            "succeeded"
+                        } else {
+                            "completed"
+                        };
                         let solver_reason = stats_fallback.reason.petsc_reason().to_string();
                         let reason = format!(
-                            "solver_reason={} | primary {}: {}; fallback succeeded with {} (internal_classical_retry={})",
+                            "solver_reason={} | primary {}: {}; fallback {} with {} (internal_classical_retry={})",
                             solver_reason,
                             primary_failure,
                             primary_reason,
+                            fallback_outcome,
                             fallback_method,
                             stats_fallback.gmres_classical_retry
                         );
@@ -683,12 +689,18 @@ fn test_optimal_solver(
                         classify_acceptance_status(stats_fallback.reason, true_residual, 1e-6);
                     let status = acceptance_status.as_str().to_string();
                     let converged = acceptance_status.is_accepted();
+                    let fallback_outcome = if acceptance_status.is_accepted() {
+                        "succeeded"
+                    } else {
+                        "completed"
+                    };
                     let solver_reason = stats_fallback.reason.petsc_reason().to_string();
                     let reason = format!(
-                        "solver_reason={} | primary {}: {}; fallback succeeded with {} (internal_classical_retry={})",
+                        "solver_reason={} | primary {}: {}; fallback {} with {} (internal_classical_retry={})",
                         solver_reason,
                         primary_failure,
                         primary_reason,
+                        fallback_outcome,
                         fallback_method,
                         stats_fallback.gmres_classical_retry
                     );
