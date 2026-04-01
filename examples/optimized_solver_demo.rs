@@ -70,12 +70,11 @@ use kryst::matrix::sparse::CsrMatrix;
 ))]
 use kryst::solver::dense_lu;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::utils::conditioning::analyze_csr;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_market::read_matrix_market;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::matrix_screening::{
-    detect_diag_issues, has_positive_diagonal, is_approximately_symmetric, lookup_csr,
-    repair_diagonal_csr,
-};
+use kryst::utils::matrix_screening::{lookup_csr, repair_diagonal_csr};
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -771,49 +770,6 @@ fn test_optimal_solver(
     }
 }
 
-/// Analyze matrix properties for diagnostics
-#[cfg(not(feature = "complex"))]
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-fn analyze_matrix_properties(matrix: &CsrMatrix<f64>) -> (f64, f64, bool) {
-    let n = matrix.nrows();
-    let nnz = matrix.nnz();
-    let density = nnz as f64 / (n * n) as f64;
-
-    // Estimate condition number from diagonal dominance (rough heuristic)
-    let mut min_diag = f64::INFINITY;
-    let mut max_off_diag_sum: f64 = 0.0;
-
-    if n < 2000 {
-        // Only for reasonably sized matrices
-        if let Ok(dense) = matrix.to_dense() {
-            for i in 0..n {
-                let diag_val = dense[(i, i)].abs();
-                if diag_val > 0.0 {
-                    min_diag = min_diag.min(diag_val);
-                }
-
-                let mut off_diag_sum = 0.0;
-                for j in 0..n {
-                    if i != j {
-                        off_diag_sum += dense[(i, j)].abs();
-                    }
-                }
-                max_off_diag_sum = max_off_diag_sum.max(off_diag_sum);
-            }
-        }
-    }
-
-    let condition_estimate = if min_diag > 0.0 && min_diag.is_finite() {
-        max_off_diag_sum / min_diag
-    } else {
-        f64::INFINITY
-    };
-
-    let is_well_conditioned = condition_estimate < 100.0;
-
-    (density, condition_estimate, is_well_conditioned)
-}
-
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn cg_compatibility_screen(matrix: &CsrMatrix<f64>, diag_issues: bool) -> CgCompatibility {
@@ -910,17 +866,16 @@ fn cg_compatibility_screen(matrix: &CsrMatrix<f64>, diag_issues: bool) -> CgComp
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn choose_amg_mode_with_override(
-    matrix: &CsrMatrix<f64>,
     diag_issues: bool,
+    symmetry_hint: bool,
+    spd_like_hint: bool,
     allow_nonsymmetric_override: bool,
 ) -> AmgDecision {
-    let approx_symmetric = is_approximately_symmetric(matrix, 1e-8, 4_000);
-    let positive_diag = has_positive_diagonal(matrix, 1e-14, 20_000);
-    let spd_like = !diag_issues && approx_symmetric && positive_diag;
-    if spd_like {
+    if spd_like_hint {
         return AmgDecision {
             mode: AmgMode::DefaultSpd,
-            reason: "accepted: SPD-like screen passed (symmetric sample + positive diagonal + no diagonal issues)".to_string(),
+            reason: "accepted: SPD-like screen passed (conditioning symmetry + healthy diagonal)"
+                .to_string(),
         };
     }
 
@@ -938,11 +893,8 @@ fn choose_amg_mode_with_override(
     if diag_issues {
         causes.push("diagonal issues");
     }
-    if !approx_symmetric {
+    if !symmetry_hint {
         causes.push("nonsymmetric structure");
-    }
-    if !positive_diag {
-        causes.push("non-positive diagonal");
     }
     AmgDecision {
         mode: AmgMode::Disabled,
@@ -956,10 +908,19 @@ fn choose_amg_mode_with_override(
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn screen_matrix(matrix: &CsrMatrix<f64>) -> ScreenReport {
-    let diag_issues = detect_diag_issues(matrix, 1e-14, 20_000);
-    let approx_symmetric = is_approximately_symmetric(matrix, 1e-8, 4_000);
-    let positive_diag = has_positive_diagonal(matrix, 1e-14, 20_000);
-    let (density, condition_heuristic, _is_well_conditioned) = analyze_matrix_properties(matrix);
+    let tiny_threshold = 1e-14;
+    let stats = analyze_csr(matrix, tiny_threshold);
+    let diag_issues = stats.diag_tiny_count > 0 || stats.diag_missing_count > 0;
+    let approx_symmetric = stats
+        .symmetry_estimate
+        .map(|sym| sym >= 0.99)
+        .unwrap_or(false);
+    let density = matrix.nnz() as f64 / (matrix.nrows() * matrix.ncols()) as f64;
+    let condition_heuristic = if stats.diag_min_abs > 0.0 {
+        stats.row_norm_1.max / stats.diag_min_abs
+    } else {
+        f64::INFINITY
+    };
     let n = matrix.nrows().max(matrix.ncols());
     let size_class = if n <= 512 {
         "small"
@@ -968,7 +929,7 @@ fn screen_matrix(matrix: &CsrMatrix<f64>) -> ScreenReport {
     } else {
         "large"
     };
-    let spd_like_hint = !diag_issues && approx_symmetric && positive_diag;
+    let spd_like_hint = !diag_issues && approx_symmetric;
     ScreenReport {
         symmetry_hint: approx_symmetric,
         spd_like_hint,
@@ -1030,8 +991,9 @@ fn select_solver_policy(
 
     if primary_pc == "amg" {
         let amg_decision = choose_amg_mode_with_override(
-            matrix,
             !screen.diagonal_healthy,
+            screen.symmetry_hint,
+            screen.spd_like_hint,
             baseline.amg_nonsymmetric_override,
         );
         amg_mode = amg_decision.mode;
