@@ -33,6 +33,8 @@ use crate::matrix::convert::csr_from_linop;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::dist::halo::HaloPlan;
 use crate::matrix::op::LinOp;
+#[cfg(feature = "complex")]
+use crate::matrix::op::CsrOp;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
@@ -671,36 +673,81 @@ impl SorPc {
                 "dimension mismatch in SorPc::apply".into(),
             ));
         }
-        y.fill(S::zero());
         let rp = a.row_ptr();
         let cj = a.col_idx();
         let vv = a.values();
         let omega = S::from_real(self.omega);
+        let eisenstat = self.mat_side.contains(MatSorType::EISENSTAT);
         for _ in 0..self.sweeps {
-            for i in 0..self.n {
-                let mut sigma = S::zero();
-                for p in rp[i]..rp[i + 1] {
-                    let j = cj[p];
-                    if j < i {
-                        sigma += vv[p] * y[j];
-                    } else if j > i {
-                        sigma += vv[p] * x[j];
+            match (side, self.mat_side) {
+                (_, s) if s.contains(MatSorType::SYMMETRIC_SWEEP) => {
+                    y.fill(S::zero());
+                    for i in 0..self.n {
+                        let mut sigma = S::zero();
+                        for p in rp[i]..rp[i + 1] {
+                            let j = cj[p];
+                            if j < i {
+                                sigma += vv[p] * y[j];
+                            }
+                        }
+                        let yi = (x[i] - sigma) * self.inv_diag_complex[i];
+                        y[i] = (S::one() - omega) * x[i] + omega * yi;
+                    }
+                    let tmp = y.to_vec();
+                    y.fill(S::zero());
+                    for ii in (0..self.n).rev() {
+                        let mut sigma = S::zero();
+                        for p in rp[ii]..rp[ii + 1] {
+                            let j = cj[p];
+                            if j > ii {
+                                sigma += vv[p] * y[j];
+                            }
+                        }
+                        let yi = (tmp[ii] - sigma) * self.inv_diag_complex[ii];
+                        y[ii] = (S::one() - omega) * tmp[ii] + omega * yi;
                     }
                 }
-                let yi = (x[i] - sigma) * self.inv_diag_complex[i];
-                y[i] = (S::one() - omega) * x[i] + omega * yi;
-            }
-            if self.mat_side.contains(MatSorType::SYMMETRIC_SWEEP) {
-                for ii in (0..self.n).rev() {
-                    let mut sigma = S::zero();
-                    for p in rp[ii]..rp[ii + 1] {
-                        let j = cj[p];
-                        if j != ii {
-                            sigma += vv[p] * y[j];
+                (PcSide::Left, s) | (PcSide::Right, s) if s.contains(MatSorType::APPLY_LOWER) => {
+                    y.fill(S::zero());
+                    for i in 0..self.n {
+                        let mut sigma = S::zero();
+                        for p in rp[i]..rp[i + 1] {
+                            let j = cj[p];
+                            if j < i {
+                                sigma += vv[p] * y[j];
+                            }
                         }
+                        let yi = (x[i] - sigma) * self.inv_diag_complex[i];
+                        y[i] = (S::one() - omega) * x[i] + omega * yi;
                     }
-                    let yi = (x[ii] - sigma) * self.inv_diag_complex[ii];
-                    y[ii] = (S::one() - omega) * x[ii] + omega * yi;
+                }
+                (PcSide::Left, s) | (PcSide::Right, s) if s.contains(MatSorType::APPLY_UPPER) => {
+                    y.fill(S::zero());
+                    for ii in (0..self.n).rev() {
+                        let mut sigma = S::zero();
+                        for p in rp[ii]..rp[ii + 1] {
+                            let j = cj[p];
+                            if j > ii {
+                                sigma += vv[p] * y[j];
+                            }
+                        }
+                        let yi = (x[ii] - sigma) * self.inv_diag_complex[ii];
+                        y[ii] = (S::one() - omega) * x[ii] + omega * yi;
+                    }
+                }
+                _ => {
+                    y.fill(S::zero());
+                    for i in 0..self.n {
+                        let mut sigma = S::zero();
+                        for p in rp[i]..rp[i + 1] {
+                            let j = cj[p];
+                            if j < i {
+                                sigma += vv[p] * y[j];
+                            }
+                        }
+                        let yi = (x[i] - sigma) * self.inv_diag_complex[i];
+                        y[i] = (S::one() - omega) * x[i] + omega * yi;
+                    }
                 }
             }
         }
@@ -773,9 +820,11 @@ impl ObjPreconditioner for SorPc {
     fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
         let csr = if let Some(csr) = op.as_any().downcast_ref::<CsrMatrix<S>>() {
             Arc::new(csr.clone())
+        } else if let Some(csr_op) = op.as_any().downcast_ref::<CsrOp<S>>() {
+            Arc::new(csr_op.inner().clone())
         } else {
             return Err(KError::Unsupported(
-                "SOR complex setup currently requires a CSR operator".into(),
+                "SOR complex setup currently requires a CSR matrix/operator".into(),
             ));
         };
         self.a_csr_complex = Some(csr.clone());
