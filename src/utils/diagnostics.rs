@@ -3,6 +3,9 @@
 use crate::config::options::PcOptions;
 use crate::context::ksp_context::KspContext;
 use crate::context::pc_context::PcType;
+use crate::utils::verification::{
+    DirectReferenceLike, VerificationStatus, verification_status_from_direct_reference,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -267,10 +270,63 @@ fn build_nested_ksp_diagnostics(opts: &PcOptions) -> Option<KspDiagnostics> {
     Some(ksp.view())
 }
 
+/// Capability envelope for rendering direct-verification status in demos.
+#[derive(Debug, Clone, Copy)]
+pub struct DirectVerificationCapability {
+    pub dense_direct_compiled: bool,
+    pub policy_allows_direct: bool,
+}
+
+impl DirectVerificationCapability {
+    pub const fn globally_unavailable(self) -> bool {
+        !(self.dense_direct_compiled && self.policy_allows_direct)
+    }
+}
+
+/// Formats a demo-facing direct verification status string.
+///
+/// When direct verification is globally unavailable for the run (for example
+/// `dense-direct` is not compiled, or policy forces direct checks off), this
+/// formatter avoids reporting `"no"` unless a direct check actually executed.
+pub fn format_direct_verification_status<T: DirectReferenceLike>(
+    comparison: Option<&T>,
+    capability: DirectVerificationCapability,
+) -> &'static str {
+    let status = verification_status_from_direct_reference(comparison);
+    if !capability.globally_unavailable() {
+        return status.as_str();
+    }
+
+    match status {
+        VerificationStatus::No => "unavailable",
+        VerificationStatus::Yes => "yes",
+        VerificationStatus::Skip => "skip",
+        VerificationStatus::Unavailable => "unavailable",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::options::{KspOptions, PcOptions};
     use crate::context::ksp_context::KspContext;
+    use crate::utils::verification::DirectReferenceLike;
+
+    use super::{DirectVerificationCapability, format_direct_verification_status};
+
+    struct MockCmp {
+        matches: bool,
+        note: &'static str,
+    }
+
+    impl DirectReferenceLike for MockCmp {
+        fn matches_verified_answer(&self) -> bool {
+            self.matches
+        }
+
+        fn policy_note(&self) -> &str {
+            self.note
+        }
+    }
 
     #[test]
     fn diagnostics_include_solver_pc_and_key_fields() {
@@ -296,5 +352,37 @@ mod tests {
         assert!(json.contains("\"rtol\""));
         assert!(json.contains("\"maxits\""));
         assert!(json.contains("\"ilu_level\""));
+    }
+
+    #[test]
+    fn formatter_masks_no_when_globally_unavailable() {
+        let cmp = MockCmp {
+            matches: false,
+            note: "env override: forced on",
+        };
+        let capability = DirectVerificationCapability {
+            dense_direct_compiled: false,
+            policy_allows_direct: true,
+        };
+        assert_eq!(
+            format_direct_verification_status(Some(&cmp), capability),
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn formatter_preserves_skip_when_globally_unavailable() {
+        let cmp = MockCmp {
+            matches: false,
+            note: "auto skip: density 1.0e-3 < 1.0e-1 (size gate passed)",
+        };
+        let capability = DirectVerificationCapability {
+            dense_direct_compiled: false,
+            policy_allows_direct: true,
+        };
+        assert_eq!(
+            format_direct_verification_status(Some(&cmp), capability),
+            "skip"
+        );
     }
 }
