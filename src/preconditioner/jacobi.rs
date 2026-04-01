@@ -23,9 +23,19 @@ use crate::preconditioner::{LocalPreconditioner, PcDistributedSupport, PcSide, P
 use faer::Mat;
 use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JacobiDiagMode {
+    ZeroOnDefect,
+    FixDiagonal,
+    RowL1OnDefect,
+}
+
 pub struct Jacobi {
     pub(crate) diag_inv: Vec<S>,
     n: usize,
+    tiny_diag_threshold: R,
+    fix_diag_replacement: R,
+    diag_mode: JacobiDiagMode,
     applies: AtomicU64,
 }
 impl Default for Jacobi {
@@ -39,7 +49,45 @@ impl Jacobi {
         Self {
             diag_inv: Vec::new(),
             n: 0,
+            tiny_diag_threshold: 1e-14,
+            fix_diag_replacement: 1e-12,
+            diag_mode: JacobiDiagMode::ZeroOnDefect,
             applies: AtomicU64::new(0),
+        }
+    }
+
+    pub fn with_diag_mode(mut self, mode: JacobiDiagMode) -> Self {
+        self.diag_mode = mode;
+        self
+    }
+
+    pub fn with_tiny_diag_threshold(mut self, threshold: R) -> Self {
+        self.tiny_diag_threshold = threshold;
+        self
+    }
+
+    pub fn with_fix_diag_replacement(mut self, replacement: R) -> Self {
+        self.fix_diag_replacement = replacement;
+        self
+    }
+
+    fn diag_inverse_for_row(&self, aii: S, row_l1: R) -> S {
+        if aii.abs() > self.tiny_diag_threshold {
+            return aii.inv();
+        }
+        match self.diag_mode {
+            JacobiDiagMode::ZeroOnDefect => S::zero(),
+            JacobiDiagMode::FixDiagonal => {
+                let replacement = self
+                    .fix_diag_replacement
+                    .max(self.tiny_diag_threshold)
+                    .max(1e-30);
+                S::from_real(replacement).inv()
+            }
+            JacobiDiagMode::RowL1OnDefect => {
+                let scale = row_l1.max(self.tiny_diag_threshold).max(1e-30);
+                S::from_real(scale).inv()
+            }
         }
     }
 
@@ -50,17 +98,14 @@ impl Jacobi {
             let rs = csr.row_ptr()[i];
             let re = csr.row_ptr()[i + 1];
             let mut aii = S::zero();
+            let mut row_l1 = 0.0;
             for p in rs..re {
+                row_l1 += csr.values()[p].abs();
                 if csr.col_idx()[p] == i {
                     aii = csr.values()[p];
-                    break;
                 }
             }
-            self.diag_inv[i] = if aii.abs() > 1e-14 {
-                aii.inv()
-            } else {
-                S::zero()
-            };
+            self.diag_inv[i] = self.diag_inverse_for_row(aii, row_l1);
         }
         self.n = n;
     }
@@ -79,17 +124,14 @@ impl Jacobi {
                 let rs = csr.rowptr[i];
                 let re = csr.rowptr[i + 1];
                 let mut aii = S::zero();
+                let mut row_l1 = 0.0;
                 for p in rs..re {
+                    row_l1 += csr.values[p].abs();
                     if csr.colind[p] == i {
                         aii = csr.values[p];
-                        break;
                     }
                 }
-                self.diag_inv[i] = if aii.abs() > 1e-14 {
-                    aii.inv()
-                } else {
-                    S::zero()
-                };
+                self.diag_inv[i] = self.diag_inverse_for_row(aii, row_l1);
             }
             self.n = n;
             return Ok(());
@@ -100,11 +142,11 @@ impl Jacobi {
             self.diag_inv.resize(n, S::zero());
             for i in 0..n {
                 let aii = d[(i, i)];
-                self.diag_inv[i] = if aii.abs() > 1e-14 {
-                    aii.inv()
-                } else {
-                    S::zero()
-                };
+                let mut row_l1 = 0.0;
+                for j in 0..d.ncols() {
+                    row_l1 += d[(i, j)].abs();
+                }
+                self.diag_inv[i] = self.diag_inverse_for_row(aii, row_l1);
             }
             self.n = n;
             return Ok(());
@@ -255,6 +297,47 @@ mod tests {
         for (ys, &yr) in out_s.iter().zip(out_real.iter()) {
             assert!((ys.real() - yr).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn fix_diagonal_mode_replaces_tiny_diagonal() {
+        let mut pc = Jacobi::new()
+            .with_diag_mode(JacobiDiagMode::FixDiagonal)
+            .with_tiny_diag_threshold(1e-10)
+            .with_fix_diag_replacement(2.0);
+        let dense = Mat::<f64>::from_fn(2, 2, |i, j| {
+            if i == 0 && j == 0 {
+                0.0
+            } else if i == j {
+                4.0
+            } else {
+                0.0
+            }
+        });
+        pc.setup(&dense).expect("jacobi setup");
+
+        let rhs_real = [8.0, 8.0];
+        let mut out_real = [0.0; 2];
+        pc.apply(PcSide::Left, &rhs_real, &mut out_real)
+            .expect("jacobi apply real");
+        assert!((out_real[0] - 4.0).abs() < 1e-12);
+        assert!((out_real[1] - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn row_l1_mode_uses_row_sum_on_missing_diagonal() {
+        let mut pc = Jacobi::new()
+            .with_diag_mode(JacobiDiagMode::RowL1OnDefect)
+            .with_tiny_diag_threshold(1e-12);
+        let csr = CsrMatrix::from_csr(2, 2, vec![0, 1, 2], vec![1, 1], vec![3.0, 4.0]);
+        pc.setup(&csr).expect("jacobi setup");
+
+        let rhs_real = [6.0, 8.0];
+        let mut out_real = [0.0; 2];
+        pc.apply(PcSide::Left, &rhs_real, &mut out_real)
+            .expect("jacobi apply real");
+        assert!((out_real[0] - 2.0).abs() < 1e-12);
+        assert!((out_real[1] - 2.0).abs() < 1e-12);
     }
 }
 
