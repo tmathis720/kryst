@@ -9,7 +9,7 @@ use crate::preconditioner::{
     asm_amg::{AsmAmg, TwoLevelConfig, TwoLevelMode},
     bddc::BddcConfig,
     block_jacobi::BlockJacobi,
-    jacobi::Jacobi,
+    jacobi::{Jacobi, JacobiDiagMode},
     sor::MatSorType,
 };
 
@@ -26,7 +26,26 @@ use crate::preconditioner::direct::SuperLuDistPc;
 
 /// Build a Jacobi preconditioner.
 pub fn build_jacobi() -> Result<Box<dyn Preconditioner>, KError> {
-    Ok(Box::new(Jacobi::new()))
+    let mode = match std::env::var("KRYST_JACOBI_DIAG_MODE").ok().as_deref() {
+        Some("fixdiag") | Some("fix_diagonal") => JacobiDiagMode::FixDiagonal,
+        Some("rowl1") | Some("row_l1") | Some("l1") => JacobiDiagMode::RowL1OnDefect,
+        _ => JacobiDiagMode::ZeroOnDefect,
+    };
+    let tiny = std::env::var("KRYST_JACOBI_TINY_DIAG")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(1e-14);
+    let replacement = std::env::var("KRYST_JACOBI_FIXDIAG_REPLACEMENT")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(1e-12);
+    let pc = Jacobi::new()
+        .with_diag_mode(mode)
+        .with_tiny_diag_threshold(tiny)
+        .with_fix_diag_replacement(replacement);
+    Ok(Box::new(pc))
 }
 
 /// Build a Block Jacobi preconditioner.

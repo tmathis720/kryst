@@ -103,6 +103,14 @@ struct SelectionDecision {
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JacobiStrengthMode {
+    Plain,
+    FixDiagonal,
+    RowL1OnDefect,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AmgMode {
     DefaultSpd,
     ExplicitNonSpd,
@@ -1069,6 +1077,16 @@ fn screen_matrix(matrix: &CsrMatrix<f64>) -> ScreenReport {
 
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn jacobi_strength_mode_from_env() -> JacobiStrengthMode {
+    match std::env::var("KRYST_DEMO_JACOBI_STRENGTH").ok().as_deref() {
+        Some("fixdiag") | Some("fix_diagonal") => JacobiStrengthMode::FixDiagonal,
+        Some("rowl1") | Some("row_l1") | Some("l1") => JacobiStrengthMode::RowL1OnDefect,
+        _ => JacobiStrengthMode::Plain,
+    }
+}
+
+#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn select_solver_policy(
     matrix_name: &str,
     screen: &ScreenReport,
@@ -1085,6 +1103,7 @@ fn select_solver_policy(
     )];
     let mut contract_checks = Vec::new();
     let mut amg_mode = AmgMode::Disabled;
+    let jacobi_strength_mode = jacobi_strength_mode_from_env();
 
     let cg_screen = cg_compatibility_screen(matrix, !screen.diagonal_healthy);
     if primary_solver == "cg" && !cg_screen.cg_safe {
@@ -1172,6 +1191,28 @@ fn select_solver_policy(
             );
         }
         _ => {}
+    }
+
+    if !screen.diagonal_healthy && jacobi_strength_mode == JacobiStrengthMode::Plain {
+        if primary_pc == "jacobi" {
+            primary_pc = "ilut".to_string();
+            rationale.push(
+                "diagonal-bad screen: avoided plain Jacobi primary (enable KRYST_DEMO_JACOBI_STRENGTH=fixdiag|rowl1 to allow Jacobi)"
+                    .to_string(),
+            );
+        }
+        if fallback_pc == "jacobi" {
+            fallback_pc = "ilut".to_string();
+            rationale.push(
+                "diagonal-bad screen: avoided plain Jacobi fallback (enable KRYST_DEMO_JACOBI_STRENGTH=fixdiag|rowl1 to allow Jacobi)"
+                    .to_string(),
+            );
+        }
+    } else if !screen.diagonal_healthy && jacobi_strength_mode != JacobiStrengthMode::Plain {
+        rationale.push(format!(
+            "diagonal-bad screen: Jacobi allowed due to strengthened mode {:?}",
+            jacobi_strength_mode
+        ));
     }
 
     SelectionDecision {
