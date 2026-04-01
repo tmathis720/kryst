@@ -20,7 +20,11 @@ pub mod reduction;
 pub mod reordering;
 #[cfg(all(feature = "tuning", not(feature = "complex")))]
 pub mod tuning;
+pub mod verification;
 
 pub use convergence::{AcceptanceStatus, classify_acceptance_status};
 pub use metrics::true_residual_norm;
 pub use monitor::{Event, Monitor, NullMonitor, TextMonitor};
+pub use verification::{
+    DirectReferenceLike, VerificationStatus, verification_status_from_direct_reference,
+};

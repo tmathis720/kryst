@@ -79,6 +79,8 @@ use kryst::utils::matrix_market::read_matrix_market;
 use kryst::utils::matrix_screening::{lookup_csr, repair_diagonal_csr};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::utils::{DirectReferenceLike, verification_status_from_direct_reference};
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -149,6 +151,17 @@ struct DirectReferenceComparison {
     rel_error_norm: f64,
     matches_verified_answer: bool,
     note: String,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+impl DirectReferenceLike for DirectReferenceComparison {
+    fn matches_verified_answer(&self) -> bool {
+        self.matches_verified_answer
+    }
+
+    fn policy_note(&self) -> &str {
+        &self.note
+    }
 }
 
 /// Get the optimal solver configuration for a specific matrix
@@ -1254,20 +1267,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "-"
                 };
 
-                let verified = direct_comparison
-                    .as_ref()
-                    .map(|cmp| {
-                        if cmp.matches_verified_answer {
-                            "yes"
-                        } else if cmp.note.starts_with("auto skip")
-                            || cmp.note.contains("forced off")
-                        {
-                            "skip"
-                        } else {
-                            "no"
-                        }
-                    })
-                    .unwrap_or("N/A");
+                let verified =
+                    verification_status_from_direct_reference(direct_comparison.as_ref()).as_str();
 
                 if is_root_rank {
                     println!(
