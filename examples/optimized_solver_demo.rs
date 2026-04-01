@@ -54,6 +54,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::config::options::PcOptions;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::ksp_context::{KspContext, SolverType};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::context::pc_context::PcType;
@@ -77,17 +79,31 @@ struct OptimalConfig {
     fallback_pc: &'static str,
 }
 
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AmgMode {
+    DefaultSpd,
+    ExplicitNonSpd,
+    Disabled,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+struct AmgDecision {
+    mode: AmgMode,
+    reason: String,
+}
+
 /// Get the optimal solver configuration for a specific matrix
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
     match matrix_name {
         "fidap005" => OptimalConfig {
             solver: "cg",
-            preconditioner: "jacobi",
-            _description: "CG (Jacobi) - small structural problem",
+            preconditioner: "amg",
+            _description: "CG (AMG) - use default AMG only when SPD-like checks pass",
             expected_iterations: 100,
             fallback_solver: "gmres",
-            fallback_pc: "none",
+            fallback_pc: "ilu",
         },
         "e05r0100" => OptimalConfig {
             solver: "gmres",
@@ -177,8 +193,17 @@ fn test_optimal_solver(
     let mut ksp = KspContext::new();
     let st = SolverType::from_str(config.solver)?;
     let pct = PcType::from_str(config.preconditioner)?;
+    let amg_opts = if config.preconditioner == "amg" && config.solver != "cg" {
+        let mut opts = PcOptions::default();
+        opts.amg_require_spd = Some(false);
+        opts.amg_relax_type = Some("chebyshev".into());
+        Some(opts)
+    } else {
+        None
+    };
+    let amg_opts_ref = amg_opts.as_ref();
     ksp.set_type(st)?
-        .set_pc_type(pct, None)?
+        .set_pc_type(pct, amg_opts_ref)?
         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
 
     // provide operator and prepare workspace
@@ -361,6 +386,79 @@ fn detect_diag_issues(matrix: &CsrMatrix<f64>, tol: f64, max_rows: usize) -> boo
 
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn is_approximately_symmetric(matrix: &CsrMatrix<f64>, tol: f64, max_rows: usize) -> bool {
+    let n = matrix.nrows().min(matrix.ncols());
+    let limit = n.min(max_rows);
+    for i in 0..limit {
+        let (cols, vals) = matrix.row(i);
+        for (&j, &a_ij) in cols.iter().zip(vals.iter()) {
+            if j >= limit {
+                continue;
+            }
+            let a_ji = lookup(matrix, j, i).unwrap_or(0.0);
+            if (a_ij - a_ji).abs() > tol {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn has_positive_diagonal(matrix: &CsrMatrix<f64>, tol: f64, max_rows: usize) -> bool {
+    let n = matrix.nrows().min(matrix.ncols());
+    let limit = n.min(max_rows);
+    for i in 0..limit {
+        match lookup(matrix, i, i) {
+            Some(val) if val > tol => continue,
+            _ => return false,
+        }
+    }
+    true
+}
+
+#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn choose_amg_mode(matrix: &CsrMatrix<f64>, diag_issues: bool) -> AmgDecision {
+    let approx_symmetric = is_approximately_symmetric(matrix, 1e-8, 4_000);
+    let positive_diag = has_positive_diagonal(matrix, 1e-14, 20_000);
+    let spd_like = !diag_issues && approx_symmetric && positive_diag;
+    if spd_like {
+        return AmgDecision {
+            mode: AmgMode::DefaultSpd,
+            reason: "accepted: SPD-like screen passed (symmetric sample + positive diagonal + no diagonal issues)".to_string(),
+        };
+    }
+
+    if !diag_issues && approx_symmetric {
+        return AmgDecision {
+            mode: AmgMode::ExplicitNonSpd,
+            reason: "accepted with explicit non-SPD AMG options (relaxed SPD requirement for nearly symmetric matrix)".to_string(),
+        };
+    }
+
+    let mut causes = Vec::new();
+    if diag_issues {
+        causes.push("diagonal issues");
+    }
+    if !approx_symmetric {
+        causes.push("nonsymmetric structure");
+    }
+    if !positive_diag {
+        causes.push("non-positive diagonal");
+    }
+    AmgDecision {
+        mode: AmgMode::Disabled,
+        reason: format!(
+            "rejected: {} (routed to ILU/ILUT fallback)",
+            causes.join(", ")
+        ),
+    }
+}
+
+#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn lookup(matrix: &CsrMatrix<f64>, row: usize, col: usize) -> Option<f64> {
     if row >= matrix.nrows() {
         return None;
@@ -473,14 +571,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Get optimal configuration for this matrix
         let mut config = get_optimal_config(matrix_name);
-        if diag_issues && config.preconditioner == "amg" {
-            if is_root_rank {
-                println!(
-                    "    → AMG disabled due to diagonal issues; using {} preconditioner.",
-                    config.fallback_pc
-                );
+        let mut amg_reason = "not selected for this matrix".to_string();
+        if config.preconditioner == "amg" {
+            let amg_decision = choose_amg_mode(&matrix, diag_issues);
+            amg_reason = amg_decision.reason;
+            match amg_decision.mode {
+                AmgMode::DefaultSpd => {}
+                AmgMode::ExplicitNonSpd => {
+                    if config.solver == "cg" {
+                        config.solver = "gmres";
+                    }
+                }
+                AmgMode::Disabled => {
+                    config.preconditioner = if diag_issues { "ilu" } else { "ilut" };
+                    if config.solver == "cg" {
+                        config.solver = "gmres";
+                    }
+                }
             }
-            config.preconditioner = config.fallback_pc;
+        }
+        if is_root_rank {
+            println!("    → AMG reason: {}", amg_reason);
         }
 
         // Analyze matrix properties
