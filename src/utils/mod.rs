@@ -21,4 +21,5 @@ pub mod reordering;
 #[cfg(all(feature = "tuning", not(feature = "complex")))]
 pub mod tuning;
 
+pub use metrics::true_residual_norm;
 pub use monitor::{Event, Monitor, NullMonitor, TextMonitor};

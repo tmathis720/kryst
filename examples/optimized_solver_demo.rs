@@ -75,6 +75,8 @@ use kryst::utils::conditioning::analyze_csr;
 use kryst::utils::matrix_market::read_matrix_market;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_screening::{lookup_csr, repair_diagonal_csr};
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::utils::metrics::true_residual_norm;
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -215,21 +217,6 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             amg_nonsymmetric_override: false,
         },
     }
-}
-
-/// Test a solver configuration and return detailed results
-#[cfg(not(feature = "complex"))]
-// Use the true residual to gauge accuracy in the original system rather than preconditioned space.
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-fn true_residual_norm(op: &dyn LinOp<S = f64>, rhs: &[f64], solution: &[f64]) -> f64 {
-    let mut ax = vec![0.0; rhs.len()];
-    op.matvec(solution, &mut ax);
-    let mut norm_sq = 0.0;
-    for (b, ax_i) in rhs.iter().zip(ax.iter()) {
-        let r = b - ax_i;
-        norm_sq += r * r;
-    }
-    norm_sq.sqrt()
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
