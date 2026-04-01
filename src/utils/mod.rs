@@ -21,5 +21,6 @@ pub mod reordering;
 #[cfg(all(feature = "tuning", not(feature = "complex")))]
 pub mod tuning;
 
+pub use convergence::{AcceptanceStatus, classify_acceptance_status};
 pub use metrics::true_residual_norm;
 pub use monitor::{Event, Monitor, NullMonitor, TextMonitor};

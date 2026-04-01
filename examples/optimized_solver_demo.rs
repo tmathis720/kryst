@@ -70,6 +70,8 @@ use kryst::matrix::sparse::CsrMatrix;
 ))]
 use kryst::solver::dense_lu;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::utils::classify_acceptance_status;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::conditioning::analyze_csr;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_market::read_matrix_market;
@@ -424,6 +426,7 @@ fn test_optimal_solver(
         String,
         String,
         String,
+        String,
         f64,
         f64,
         usize,
@@ -491,47 +494,12 @@ fn test_optimal_solver(
         }
     }
 
-    fn classify_status_from_stats(
-        stats: &kryst::utils::convergence::SolveStats<f64>,
-        true_residual: f64,
-        tol: f64,
-    ) -> &'static str {
-        use kryst::utils::convergence::ConvergedReason;
-        match stats.reason {
-            ConvergedReason::DivergedIndefiniteMatrix | ConvergedReason::DivergedIndefinitePC => {
-                "contract_mismatch"
-            }
-            ConvergedReason::DivergedBreakdown
-            | ConvergedReason::DivergedBreakdownBiCG
-            | ConvergedReason::DivergedNan
-            | ConvergedReason::DivergedInf => "breakdown",
-            ConvergedReason::ConvergedRtol
-            | ConvergedReason::ConvergedAtol
-            | ConvergedReason::ConvergedTrustRegion
-            | ConvergedReason::ConvergedHappyBreakdown => {
-                if true_residual.is_finite() && true_residual < tol {
-                    "ok"
-                } else {
-                    "contract_mismatch"
-                }
-            }
-            _ => "stagnated",
-        }
-    }
-
     fn needs_fallback(
         stats: &kryst::utils::convergence::SolveStats<f64>,
         true_residual: f64,
         tol: f64,
     ) -> bool {
-        let contract_mismatch = matches!(
-            stats.reason,
-            kryst::utils::convergence::ConvergedReason::DivergedIndefiniteMatrix
-                | kryst::utils::convergence::ConvergedReason::DivergedIndefinitePC
-        );
-        let explicit_nonconverged_reason = !stats.reason.is_converged();
-        let missed_true_residual_contract = !true_residual.is_finite() || true_residual >= tol;
-        contract_mismatch || explicit_nonconverged_reason || missed_true_residual_contract
+        !classify_acceptance_status(stats.reason, true_residual, tol).is_accepted()
     }
 
     match result {
@@ -548,7 +516,7 @@ fn test_optimal_solver(
                     stats.reason, true_residual, stats.gmres_classical_retry
                 );
                 let primary_failure =
-                    classify_status_from_stats(&stats, true_residual, 1e-6).to_string();
+                    classify_acceptance_status(stats.reason, true_residual, 1e-6).as_str();
                 if is_root_rank {
                     println!(
                         "    Primary method did not meet convergence contract, trying fallback..."
@@ -585,12 +553,14 @@ fn test_optimal_solver(
                     Ok(stats_fallback) => {
                         let true_residual =
                             true_residual_norm(a_op.as_ref(), &rhs_vec, &solution_fallback);
-                        let status =
-                            classify_status_from_stats(&stats_fallback, true_residual, 1e-6)
-                                .to_string();
-                        let converged = status == "ok";
+                        let acceptance_status =
+                            classify_acceptance_status(stats_fallback.reason, true_residual, 1e-6);
+                        let status = acceptance_status.as_str().to_string();
+                        let converged = acceptance_status.is_accepted();
+                        let solver_reason = stats_fallback.reason.petsc_reason().to_string();
                         let reason = format!(
-                            "primary {}: {}; fallback succeeded with {} (internal_classical_retry={})",
+                            "solver_reason={} | primary {}: {}; fallback succeeded with {} (internal_classical_retry={})",
+                            solver_reason,
                             primary_failure,
                             primary_reason,
                             fallback_method,
@@ -606,6 +576,7 @@ fn test_optimal_solver(
                         Ok((
                             primary_method,
                             fallback_method,
+                            solver_reason,
                             reason,
                             true_residual,
                             stats_fallback.final_residual,
@@ -626,6 +597,7 @@ fn test_optimal_solver(
                         Ok((
                             primary_method,
                             fallback_method,
+                            "N/A".to_string(),
                             format!(
                                 "primary {}: {}; fallback {}: {}",
                                 primary_failure, primary_reason, fallback_failure, fallback_reason
@@ -640,19 +612,26 @@ fn test_optimal_solver(
                     }
                 }
             } else {
-                let status = "ok".to_string();
-                let reason = format!("internal_classical_retry={}", stats.gmres_classical_retry);
+                let acceptance_status =
+                    classify_acceptance_status(stats.reason, true_residual, 1e-6);
+                let status = acceptance_status.as_str().to_string();
+                let solver_reason = stats.reason.petsc_reason().to_string();
+                let reason = format!(
+                    "solver_reason={} | internal_classical_retry={}",
+                    solver_reason, stats.gmres_classical_retry
+                );
                 let direct_comparison =
                     compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &solution)?;
                 Ok((
                     primary_method,
                     "-".to_string(),
+                    solver_reason,
                     reason,
                     true_residual,
                     stats.final_residual,
                     stats.iterations,
                     status,
-                    true,
+                    acceptance_status.is_accepted(),
                     direct_comparison,
                 ))
             }
@@ -700,11 +679,14 @@ fn test_optimal_solver(
                 Ok(stats_fallback) => {
                     let true_residual =
                         true_residual_norm(a_op.as_ref(), &rhs_vec, &solution_fallback);
-                    let status = classify_status_from_stats(&stats_fallback, true_residual, 1e-6)
-                        .to_string();
-                    let converged = status == "ok";
+                    let acceptance_status =
+                        classify_acceptance_status(stats_fallback.reason, true_residual, 1e-6);
+                    let status = acceptance_status.as_str().to_string();
+                    let converged = acceptance_status.is_accepted();
+                    let solver_reason = stats_fallback.reason.petsc_reason().to_string();
                     let reason = format!(
-                        "primary {}: {}; fallback succeeded with {} (internal_classical_retry={})",
+                        "solver_reason={} | primary {}: {}; fallback succeeded with {} (internal_classical_retry={})",
+                        solver_reason,
                         primary_failure,
                         primary_reason,
                         fallback_method,
@@ -720,6 +702,7 @@ fn test_optimal_solver(
                     Ok((
                         primary_method,
                         fallback_method,
+                        solver_reason,
                         reason,
                         true_residual,
                         stats_fallback.final_residual,
@@ -740,6 +723,7 @@ fn test_optimal_solver(
                     Ok((
                         primary_method,
                         fallback_method,
+                        "N/A".to_string(),
                         format!(
                             "primary {}: {}; fallback {}: {}",
                             primary_failure, primary_reason, fallback_failure, fallback_reason
@@ -1133,19 +1117,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if is_root_rank {
         println!(
-            "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {:<10} {}",
+            "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
             "Matrix",
             "Primary",
             "Fallback",
+            "SolverReason",
             "Reason",
             "TrueRes",
             "StatsRes",
             "Iterations",
-            "Status",
+            "AcceptanceStatus",
             "Verified?",
             "Performance vs Benchmark"
         );
-        println!("{}", "=".repeat(164));
+        println!("{}", "=".repeat(210));
     }
 
     for (matrix_name, _description) in test_matrices {
@@ -1168,8 +1153,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {:<10} {}",
+                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
                         matrix_name,
+                        "-",
                         "-",
                         "-",
                         "files_missing",
@@ -1207,8 +1193,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if a_op.nrows() > 6000 {
             if is_root_rank {
                 println!(
-                    "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {:<10} {}",
-                    matrix_name, "-", "-", "too_large", "N/A", "N/A", "SKIP", "failed", "N/A", "-"
+                    "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
+                    matrix_name,
+                    "-",
+                    "-",
+                    "-",
+                    "too_large",
+                    "N/A",
+                    "N/A",
+                    "SKIP",
+                    "failed",
+                    "N/A",
+                    "-"
                 );
             }
             continue;
@@ -1226,6 +1222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok((
                 primary,
                 fallback,
+                solver_reason,
                 reason,
                 true_residual,
                 prec_residual,
@@ -1262,10 +1259,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<18} {:<12.2e} {:<12.2e} {:<10} {:<14} {:<10} {}",
+                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12.2e} {:<12.2e} {:<10} {:<18} {:<10} {}",
                         matrix_name,
                         primary,
                         fallback,
+                        solver_reason,
                         reason,
                         true_residual,
                         prec_residual,
@@ -1326,8 +1324,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => {
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<18} {:<12} {:<12} {:<10} {:<14} {:<10} {}",
-                        matrix_name, "-", "-", "failed", "N/A", "N/A", "N/A", "failed", "N/A", e
+                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
+                        matrix_name,
+                        "-",
+                        "-",
+                        "-",
+                        "failed",
+                        "N/A",
+                        "N/A",
+                        "N/A",
+                        "failed",
+                        "N/A",
+                        e
                     );
                 }
             }

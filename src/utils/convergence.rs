@@ -89,6 +89,71 @@ pub enum ConvergedReason {
     Continued,
 }
 
+/// Contract acceptance status derived from solver reason and true residual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptanceStatus {
+    Ok,
+    OkWithWarning,
+    ContractMismatch,
+    Breakdown,
+    Stagnated,
+    Failed,
+}
+
+impl AcceptanceStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AcceptanceStatus::Ok => "ok",
+            AcceptanceStatus::OkWithWarning => "ok_with_warning",
+            AcceptanceStatus::ContractMismatch => "contract_mismatch",
+            AcceptanceStatus::Breakdown => "breakdown",
+            AcceptanceStatus::Stagnated => "stagnated",
+            AcceptanceStatus::Failed => "failed",
+        }
+    }
+
+    pub fn is_accepted(self) -> bool {
+        matches!(self, AcceptanceStatus::Ok | AcceptanceStatus::OkWithWarning)
+    }
+}
+
+/// Classify acceptance from a canonical solver reason plus true residual contract.
+///
+/// The true residual check is evaluated first. If `true_residual < tol`, the solve is
+/// accepted even if the reported reason is non-converged, but marked as `OkWithWarning`.
+pub fn classify_acceptance_status(
+    reason: ConvergedReason,
+    true_residual: f64,
+    tol: f64,
+) -> AcceptanceStatus {
+    let meets_true_residual = true_residual.is_finite() && true_residual < tol;
+    if meets_true_residual {
+        if reason.is_converged() {
+            return AcceptanceStatus::Ok;
+        }
+        return AcceptanceStatus::OkWithWarning;
+    }
+
+    match reason {
+        ConvergedReason::ConvergedRtol
+        | ConvergedReason::ConvergedAtol
+        | ConvergedReason::ConvergedTrustRegion
+        | ConvergedReason::ConvergedHappyBreakdown
+        | ConvergedReason::DivergedIndefiniteMatrix
+        | ConvergedReason::DivergedIndefinitePC => AcceptanceStatus::ContractMismatch,
+        ConvergedReason::DivergedBreakdown
+        | ConvergedReason::DivergedBreakdownBiCG
+        | ConvergedReason::DivergedNan
+        | ConvergedReason::DivergedInf => AcceptanceStatus::Breakdown,
+        ConvergedReason::DivergedDtol
+        | ConvergedReason::DivergedMaxIts
+        | ConvergedReason::StoppedByMonitor => AcceptanceStatus::Stagnated,
+        ConvergedReason::DivergedPcSetupFailed
+        | ConvergedReason::DivergedPcFailed
+        | ConvergedReason::Continued => AcceptanceStatus::Failed,
+    }
+}
+
 impl ConvergedReason {
     /// Canonicalize a method-local failure kind into a stable reason code.
     pub fn from_failure_kind(kind: FailureReasonKind) -> Self {
