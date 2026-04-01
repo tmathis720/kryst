@@ -80,6 +80,8 @@ use kryst::utils::matrix_screening::{lookup_csr, repair_diagonal_csr};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::{
     DirectReferenceLike, DirectVerificationCapability, format_direct_verification_status,
 };
@@ -447,6 +449,7 @@ fn test_optimal_solver(
     p_mat: Option<&CsrMatrix<f64>>,
     rhs: &[f64],
     decision: &SelectionDecision,
+    screen: &ScreenReport,
     matrix_name: &str,
     is_root_rank: bool,
 ) -> Result<
@@ -493,6 +496,12 @@ fn test_optimal_solver(
     ksp.set_type(st)?
         .set_pc_type(pct, primary_opts_ref)?
         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
+    if matches!(decision.primary_solver.as_str(), "gmres" | "fgmres") {
+        let difficult_nonsymmetric =
+            !screen.symmetry_hint && screen.condition_heuristic >= 1.0e4 && !screen.spd_like_hint;
+        let gmres_profile = benchmark_demo_gmres_profile(difficult_nonsymmetric);
+        ksp.set_from_options(&gmres_profile)?;
+    }
 
     // Solve and residual checks both use the same A_op.
     ksp.set_operators(Arc::clone(&a_op), p_op.clone());
@@ -566,6 +575,13 @@ fn test_optimal_solver(
                     .set_type(st_fb)?
                     .set_pc_type(pc_fb, fallback_opts.as_ref())?
                     .set_tolerances(1e-6, 1e-12, 1e3, 1000);
+                if matches!(decision.fallback_solver.as_str(), "gmres" | "fgmres") {
+                    let difficult_nonsymmetric = !screen.symmetry_hint
+                        && screen.condition_heuristic >= 1.0e4
+                        && !screen.spd_like_hint;
+                    let gmres_profile = benchmark_demo_gmres_profile(difficult_nonsymmetric);
+                    ksp_fallback.set_from_options(&gmres_profile)?;
+                }
                 ksp_fallback.set_operators(Arc::clone(&a_op), p_op.clone());
                 ksp_fallback.setup()?;
 
@@ -698,6 +714,13 @@ fn test_optimal_solver(
                 .set_type(st_fb)?
                 .set_pc_type(pc_fb, fallback_opts.as_ref())?
                 .set_tolerances(1e-6, 1e-12, 1e3, 1000);
+            if matches!(decision.fallback_solver.as_str(), "gmres" | "fgmres") {
+                let difficult_nonsymmetric = !screen.symmetry_hint
+                    && screen.condition_heuristic >= 1.0e4
+                    && !screen.spd_like_hint;
+                let gmres_profile = benchmark_demo_gmres_profile(difficult_nonsymmetric);
+                ksp_fallback.set_from_options(&gmres_profile)?;
+            }
             ksp_fallback.set_operators(Arc::clone(&a_op), p_op);
             ksp_fallback.setup()?;
 
@@ -1261,6 +1284,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             p_mat.as_ref(),
             &rhs,
             &decision,
+            &screen,
             matrix_name,
             is_root_rank,
         ) {

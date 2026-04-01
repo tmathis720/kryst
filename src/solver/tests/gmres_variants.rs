@@ -358,6 +358,62 @@ fn gmres_classical_orthog_modes_no_pc_preserve_true_residual_sanity() -> Result<
 }
 
 #[test]
+fn gmres_reorth_policy_changes_path_and_keeps_residuals_sane() -> Result<(), KError> {
+    let a = util::nonsym_convdiff_2d(9, 6.0);
+    let b: Vec<R> = util::rhs_random(a.nrows(), 23);
+    let bnorm = util::vec_norm(&b).max(1e-32);
+    let comm = UniverseComm::NoComm(NoComm);
+
+    let mut never = GmresSolver::new(14, 1e-9, 220);
+    never.set_variant(GmresVariant::Classical);
+    never.set_orthog(GmresOrthog::Mgs);
+    never.set_reorth_policy(ReorthPolicy::Never);
+    let mut x_never = vec![0.0; b.len()];
+    let mut ws_never = Workspace::default();
+    let stats_never = never.solve_f64(
+        &a,
+        None,
+        &b,
+        &mut x_never,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws_never),
+    )?;
+
+    let mut always = GmresSolver::new(14, 1e-9, 220);
+    always.set_variant(GmresVariant::Classical);
+    always.set_orthog(GmresOrthog::Mgs);
+    always.set_reorth_policy(ReorthPolicy::Always);
+    let mut x_always = vec![0.0; b.len()];
+    let mut ws_always = Workspace::default();
+    let stats_always = always.solve_f64(
+        &a,
+        None,
+        &b,
+        &mut x_always,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws_always),
+    )?;
+
+    let r_never = util::true_residual_norm(&a, &x_never, &b);
+    let r_always = util::true_residual_norm(&a, &x_always, &b);
+    assert!(stats_never.reason.is_converged());
+    assert!(stats_always.reason.is_converged());
+    assert!(r_never <= 1e-8 * bnorm + 1e-10);
+    assert!(r_always <= 1e-8 * bnorm + 1e-10);
+    assert!(
+        stats_always.counters.num_global_reductions > stats_never.counters.num_global_reductions,
+        "expected Always reorth to use more reductions than Never (always={}, never={})",
+        stats_always.counters.num_global_reductions,
+        stats_never.counters.num_global_reductions
+    );
+    Ok(())
+}
+
+#[test]
 fn gmres_monitor_ids_are_strict_and_respect_max_it() -> Result<(), KError> {
     let a = util::nonsym_convdiff_2d(6, 5.0);
     let n = a.nrows();
