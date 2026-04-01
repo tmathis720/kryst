@@ -163,6 +163,7 @@ fn test_optimal_solver(
     rhs: &[f64],
     config: &OptimalConfig,
     _matrix_name: &str,
+    is_root_rank: bool,
 ) -> Result<(usize, f64, f64, f64, bool, String), Box<dyn std::error::Error>> {
     let mut solution = vec![0.0; rhs.len()];
 
@@ -208,7 +209,9 @@ fn test_optimal_solver(
         }
         Err(_) => {
             // Try fallback configuration
-            println!("    Primary method failed, trying fallback...");
+            if is_root_rank {
+                println!("    Primary method failed, trying fallback...");
+            }
             let mut solution_fallback = vec![0.0; rhs.len()];
 
             let mut ksp_fallback = KspContext::new();
@@ -378,14 +381,33 @@ fn lookup(matrix: &CsrMatrix<f64>, row: usize, col: usize) -> Option<f64> {
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    fn is_root_rank() -> bool {
+        // If MPI launcher environment variables are present, only rank 0 prints.
+        // In regular (non-MPI) runs no rank variable is present, so default to true.
+        let rank = std::env::var("OMPI_COMM_WORLD_RANK")
+            .or_else(|_| std::env::var("PMI_RANK"))
+            .or_else(|_| std::env::var("MV2_COMM_WORLD_RANK"))
+            .or_else(|_| std::env::var("SLURM_PROCID"));
+
+        match rank {
+            Ok(value) => value.parse::<i32>() == Ok(0),
+            Err(_) => true,
+        }
+    }
+
+    let is_root_rank = is_root_rank();
+
     // Initialize logging if available
     #[cfg(feature = "logging")]
     env_logger::init();
 
-    println!("Optimized Matrix Market Solver Demonstration");
-    println!("===========================================");
-    println!("Using benchmark-proven optimal configurations");
-    println!();
+    if is_root_rank {
+        println!("Optimized Matrix Market Solver Demonstration");
+        println!("===========================================");
+        println!("Using benchmark-proven optimal configurations");
+        // Note: this demo does not perform distributed coordination unless explicitly added.
+        println!();
+    }
 
     // Test matrices with known optimal configurations
     let test_matrices = vec![
@@ -397,18 +419,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("memplus", "Memplus matrix (if available)"),
     ];
 
-    println!(
-        "{:<15} {:<8} {:<12} {:<12} {:<10} {:<8} {:<25} {}",
-        "Matrix",
-        "Iters",
-        "TrueRes",
-        "PrecRes",
-        "Time(s)",
-        "Status",
-        "Method",
-        "Performance vs Benchmark"
-    );
-    println!("{}", "=".repeat(107));
+    if is_root_rank {
+        println!(
+            "{:<15} {:<8} {:<12} {:<12} {:<10} {:<8} {:<25} {}",
+            "Matrix",
+            "Iters",
+            "TrueRes",
+            "PrecRes",
+            "Time(s)",
+            "Status",
+            "Method",
+            "Performance vs Benchmark"
+        );
+        println!("{}", "=".repeat(107));
+    }
 
     for (matrix_name, _description) in test_matrices {
         let base_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -428,10 +452,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ) {
             (Ok(matrix), Ok(rhs)) => (matrix, rhs),
             _ => {
-                println!(
-                    "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Files not found",
-                    matrix_name, "N/A", "N/A", "N/A", "⚠", "N/A"
-                );
+                if is_root_rank {
+                    println!(
+                        "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Files not found",
+                        matrix_name, "N/A", "N/A", "N/A", "⚠", "N/A"
+                    );
+                }
                 continue;
             }
         };
@@ -439,7 +465,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Convert to Kryst formats
         let matrix = matrix_data.to_csr_matrix()?;
         let (matrix, repaired) = repair_diagonal_csr(&matrix, 1e-14, 1e-8);
-        if repaired > 0 {
+        if is_root_rank && repaired > 0 {
             println!("    → Repaired {repaired} diagonal entries (|diag|<=1e-14 or missing).");
         }
         let diag_issues = detect_diag_issues(&matrix, 1e-14, 20_000);
@@ -448,10 +474,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Get optimal configuration for this matrix
         let mut config = get_optimal_config(matrix_name);
         if diag_issues && config.preconditioner == "amg" {
-            println!(
-                "    → AMG disabled due to diagonal issues; using {} preconditioner.",
-                config.fallback_pc
-            );
+            if is_root_rank {
+                println!(
+                    "    → AMG disabled due to diagonal issues; using {} preconditioner.",
+                    config.fallback_pc
+                );
+            }
             config.preconditioner = config.fallback_pc;
         }
 
@@ -460,15 +488,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Skip very large matrices for this demo
         if matrix.nrows() > 6000 {
-            println!(
-                "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Matrix too large for demo",
-                matrix_name, "SKIP", "N/A", "N/A", "⚠", "N/A"
-            );
+            if is_root_rank {
+                println!(
+                    "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Matrix too large for demo",
+                    matrix_name, "SKIP", "N/A", "N/A", "⚠", "N/A"
+                );
+            }
             continue;
         }
 
         // Test with optimal configuration
-        match test_optimal_solver(&matrix, &rhs, &config, matrix_name) {
+        match test_optimal_solver(&matrix, &rhs, &config, matrix_name, is_root_rank) {
             Ok((iters, true_residual, prec_residual, time, converged, method)) => {
                 let status = if converged { "✓" } else { "✗" };
 
@@ -481,32 +511,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "Slower than expected"
                 };
 
-                println!(
-                    "{:<15} {:<8} {:<12.2e} {:<12.2e} {:<10.3} {:<8} {:<25} {}",
-                    matrix_name,
-                    iters,
-                    true_residual,
-                    prec_residual,
-                    time,
-                    status,
-                    method,
-                    iter_performance
-                );
+                if is_root_rank {
+                    println!(
+                        "{:<15} {:<8} {:<12.2e} {:<12.2e} {:<10.3} {:<8} {:<25} {}",
+                        matrix_name,
+                        iters,
+                        true_residual,
+                        prec_residual,
+                        time,
+                        status,
+                        method,
+                        iter_performance
+                    );
+                }
 
                 // Additional diagnostics for interesting cases
-                if !is_well_conditioned {
+                if is_root_rank && !is_well_conditioned {
                     println!(
                         "    → Ill-conditioned matrix (est. cond. ≈ {:.1e})",
                         condition_est
                     );
                 }
-                if density > 0.1 {
+                if is_root_rank && density > 0.1 {
                     println!(
                         "    → Dense matrix ({:.1}% fill) - direct methods may be preferred",
                         density * 100.0
                     );
                 }
-                if converged && iters < config.expected_iterations / 2 {
+                if is_root_rank && converged && iters < config.expected_iterations / 2 {
                     println!(
                         "    → Excellent performance: {} iterations vs {} expected",
                         iters, config.expected_iterations
@@ -514,29 +546,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Err(e) => {
-                println!(
-                    "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Error: {}",
-                    matrix_name, "FAIL", "N/A", "N/A", "✗", "N/A", e
-                );
+                if is_root_rank {
+                    println!(
+                        "{:<15} {:<8} {:<12} {:<10} {:<8} {:<25} Error: {}",
+                        matrix_name, "FAIL", "N/A", "N/A", "✗", "N/A", e
+                    );
+                }
             }
         }
     }
 
-    println!();
-    println!("Benchmark Insights Summary:");
-    println!("==========================");
-    println!("• Sherman matrices: ILU preconditioning essential for fast convergence");
-    println!("• Driven cavity (E-series): GMRES often best, ILU critical for difficult cases");
-    println!("• Add20: CG with ILU gives near-optimal 5-iteration convergence");
-    println!("• Memplus: BiCGStab + ILU reduces 17,000+ iterations to just 4");
-    println!("• General rule: ILU preconditioning dramatically improves robustness");
-    println!("• Fallback: GMRES + ILU is reliable for unknown matrices");
-    println!();
-    println!("Key Performance Factors:");
-    println!("• Matrix conditioning: Well-conditioned matrices converge faster");
-    println!("• Sparsity pattern: Diagonal dominance helps preconditioner stability");
-    println!("• Problem physics: Fluid flow problems often need robust iterative methods");
-    println!("• Preconditioner quality: ILU factorization quality affects convergence rate");
+    if is_root_rank {
+        println!();
+        println!("Benchmark Insights Summary:");
+        println!("==========================");
+        println!("• Sherman matrices: ILU preconditioning essential for fast convergence");
+        println!("• Driven cavity (E-series): GMRES often best, ILU critical for difficult cases");
+        println!("• Add20: CG with ILU gives near-optimal 5-iteration convergence");
+        println!("• Memplus: BiCGStab + ILU reduces 17,000+ iterations to just 4");
+        println!("• General rule: ILU preconditioning dramatically improves robustness");
+        println!("• Fallback: GMRES + ILU is reliable for unknown matrices");
+        println!();
+        println!("Key Performance Factors:");
+        println!("• Matrix conditioning: Well-conditioned matrices converge faster");
+        println!("• Sparsity pattern: Diagonal dominance helps preconditioner stability");
+        println!("• Problem physics: Fluid flow problems often need robust iterative methods");
+        println!("• Preconditioner quality: ILU factorization quality affects convergence rate");
+    }
 
     Ok(())
 }
