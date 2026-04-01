@@ -9,8 +9,11 @@ use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::{
     LocalPreconditioner, Op, PcCaps, PcDistributedSupport, PcSide, Preconditioner,
 };
-use crate::utils::conditioning::{ConditioningOptions, apply_csr_transforms};
-use crate::utils::permutation::{Permutation, amd_csr, permute_csr_symmetric, rcm_csr};
+use crate::utils::conditioning::ConditioningOptions;
+use crate::utils::permutation::Permutation;
+use crate::utils::preconditioning_pipeline::{
+    PreconditioningMetadata, apply_preconditioning_pipeline,
+};
 
 #[cfg(feature = "complex")]
 use crate::algebra::bridge::BridgeScratch;
@@ -188,6 +191,7 @@ pub struct IluCsr {
     // scratch for apply
     tmp: Vec<Real>,
     perm: Permutation,
+    pipeline_meta: PreconditioningMetadata,
     #[cfg(feature = "complex")]
     c_l_val: Vec<S>,
     #[cfg(feature = "complex")]
@@ -226,6 +230,7 @@ impl IluCsr {
             buckets_bwd: Vec::new(),
             tmp: Vec::new(),
             perm: Permutation::identity(0),
+            pipeline_meta: PreconditioningMetadata::identity(0),
             #[cfg(feature = "complex")]
             c_l_val: Vec::new(),
             #[cfg(feature = "complex")]
@@ -457,11 +462,7 @@ impl IluCsr {
     }
 
     #[cfg(feature = "complex")]
-    fn factor_ilut_complex(
-        &mut self,
-        a: &CsrMatrix<S>,
-        params: &IlutParams,
-    ) -> Result<(), KError> {
+    fn factor_ilut_complex(&mut self, a: &CsrMatrix<S>, params: &IlutParams) -> Result<(), KError> {
         let a_real = CsrMatrix::from_csr(
             a.nrows(),
             a.ncols(),
@@ -1242,15 +1243,12 @@ impl Preconditioner for IluCsr {
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         let drop = 0.0; // use full numerical content by default
         let a: Arc<CsrMatrix<f64>> = csr_from_linop(op, drop)?;
-        let mut conditioned = None;
-        let a = if self.cfg.conditioning.is_active() {
-            let mut local = (*a).clone();
-            apply_csr_transforms("ILU/ILUT", &mut local, &self.cfg.conditioning)?;
-            conditioned = Some(local);
-            conditioned.as_ref().unwrap()
-        } else {
-            a.as_ref()
-        };
+        let pipeline = apply_preconditioning_pipeline(
+            a.as_ref(),
+            &self.cfg.conditioning,
+            &self.cfg.reordering,
+        )?;
+        let a = &pipeline.matrix;
         let sid = op.structure_id();
         let vid = op.values_id();
 
@@ -1258,28 +1256,17 @@ impl Preconditioner for IluCsr {
         let values_changed = self.last_vid != Some(vid);
 
         if structure_changed || !self.cfg.numeric_update_fixed {
-            // compute permutation
-            let perm = match self.cfg.reordering.kind {
-                ReorderingKind::None => Permutation::identity(a.nrows()),
-                ReorderingKind::Rcm => rcm_csr(&a),
-                ReorderingKind::Amd => amd_csr(&a),
-            };
-            let a_perm = if self.cfg.reordering.symmetric {
-                permute_csr_symmetric(&a, &perm)
-            } else {
-                // nonsymmetric not yet supported
-                permute_csr_symmetric(&a, &perm)
-            };
-            self.perm = perm;
-            self.factor_symbolic_and_numeric(&a_perm)?;
+            self.perm = pipeline.metadata.left_perm.clone();
+            self.pipeline_meta = pipeline.metadata.clone();
+            self.factor_symbolic_and_numeric(a)?;
             self.build_levels_if_enabled();
             self.last_sid = Some(sid);
             self.last_vid = Some(vid);
-            self.tmp.resize(a_perm.nrows(), Real::zero());
+            self.tmp.resize(a.nrows(), Real::zero());
             Ok(())
         } else if values_changed {
-            let a_perm = permute_csr_symmetric(&a, &self.perm);
-            self.factor_numeric_only(&a_perm)?;
+            self.pipeline_meta = pipeline.metadata.clone();
+            self.factor_numeric_only(a)?;
             self.last_vid = Some(vid);
             Ok(())
         } else {
@@ -1691,6 +1678,27 @@ impl IluCsr {
         &self.buckets_bwd
     }
 
+    fn pipeline_apply_left(&self, x: &[Real], y: &mut [Real]) {
+        self.pipeline_meta.left_perm.apply_vec(x, y);
+        if let Some(scale) = &self.pipeline_meta.row_scaling {
+            for i in 0..y.len() {
+                y[i] /= scale[i];
+            }
+        }
+    }
+
+    fn pipeline_apply_right_inverse(&self, x: &[Real], y: &mut [Real]) {
+        let mut tmp = vec![Real::zero(); x.len()];
+        self.pipeline_meta.right_perm.apply_vec_t(x, &mut tmp);
+        if let Some(scale) = &self.pipeline_meta.col_scaling {
+            for i in 0..y.len() {
+                y[i] = tmp[i] / scale[i];
+            }
+        } else {
+            y.copy_from_slice(&tmp);
+        }
+    }
+
     fn apply_op_scalar(&self, op: Op, x: &[Real], y: &mut [Real]) -> Result<(), KError> {
         if x.len() != self.n || y.len() != self.n {
             return Err(KError::InvalidInput(format!(
@@ -1702,7 +1710,7 @@ impl IluCsr {
         }
         let mut x_perm = vec![Real::zero(); self.n];
         let mut y_perm = vec![Real::zero(); self.n];
-        self.perm.apply_vec(x, &mut x_perm);
+        self.pipeline_apply_left(x, &mut x_perm);
         match op {
             Op::NoTrans => {
                 if self.cfg.level_sched {
@@ -1731,7 +1739,7 @@ impl IluCsr {
                 )
             }
         }?;
-        self.perm.apply_vec_t(&y_perm, y);
+        self.pipeline_apply_right_inverse(&y_perm, y);
         Ok(())
     }
 }

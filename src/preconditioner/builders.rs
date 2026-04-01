@@ -313,7 +313,16 @@ fn parse_reordering_options(reordering: Option<String>) -> Result<ReorderingOpti
     let Some(kind) = reordering else {
         return Ok(opts);
     };
-    opts.kind = match kind.to_lowercase().as_str() {
+    let normalized = kind.to_lowercase();
+    let (base, nonsym) = if let Some(base) = normalized.strip_suffix("_nonsym") {
+        (base, true)
+    } else if let Some(base) = normalized.strip_suffix(":nonsym") {
+        (base, true)
+    } else {
+        (normalized.as_str(), false)
+    };
+    opts.symmetric = !nonsym;
+    opts.kind = match base {
         "none" | "natural" => ReorderingKind::None,
         "rcm" => ReorderingKind::Rcm,
         "amd" => ReorderingKind::Amd,
