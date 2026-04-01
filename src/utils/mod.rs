@@ -23,6 +23,7 @@ pub mod tuning;
 pub mod verification;
 
 pub use convergence::{AcceptanceStatus, classify_acceptance_status};
+pub use diagnostics::{DirectVerificationCapability, format_direct_verification_status};
 pub use metrics::true_residual_norm;
 pub use monitor::{Event, Monitor, NullMonitor, TextMonitor};
 pub use verification::{

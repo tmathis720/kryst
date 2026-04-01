@@ -80,7 +80,9 @@ use kryst::utils::matrix_screening::{lookup_csr, repair_diagonal_csr};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::{DirectReferenceLike, verification_status_from_direct_reference};
+use kryst::utils::{
+    DirectReferenceLike, DirectVerificationCapability, format_direct_verification_status,
+};
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -270,6 +272,14 @@ fn direct_reference_policy(a_mat: &CsrMatrix<f64>) -> (bool, String) {
             ),
         ),
     }
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn global_direct_reference_policy_allows() -> bool {
+    !matches!(
+        std::env::var("KRYST_ENABLE_DIRECT_REFERENCE").as_deref(),
+        Ok("0" | "false" | "FALSE" | "no" | "NO")
+    )
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -1130,6 +1140,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
 
+    let direct_verification_capability = DirectVerificationCapability {
+        dense_direct_compiled: cfg!(feature = "dense-direct"),
+        policy_allows_direct: global_direct_reference_policy_allows(),
+    };
+
     // Test matrices with known optimal configurations
     let test_matrices = vec![
         ("fidap005", "FIDAP 27x27 structural problem"),
@@ -1267,8 +1282,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "-"
                 };
 
-                let verified =
-                    verification_status_from_direct_reference(direct_comparison.as_ref()).as_str();
+                let verified = format_direct_verification_status(
+                    direct_comparison.as_ref(),
+                    direct_verification_capability,
+                );
 
                 if is_root_rank {
                     println!(
