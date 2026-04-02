@@ -4,10 +4,13 @@ use faer::Mat;
 use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::KspContext;
 use kryst::error::KError;
+use kryst::matrix::op::{LinOp, LinOpF64};
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
-use kryst::solver::{BiCgStabSolver, BiCgStabVariant};
+use kryst::solver::{BiCgStabBreakdownPolicy, BiCgStabSolver, BiCgStabVariant};
+use kryst::utils::convergence::ConvergedReason;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn nonsym_tridiag(n: usize) -> Mat<f64> {
     let mut a = Mat::<f64>::zeros(n, n);
@@ -21,6 +24,63 @@ fn nonsym_tridiag(n: usize) -> Mat<f64> {
         }
     }
     a
+}
+
+struct NanOnceOp {
+    a: Mat<f64>,
+    nan_call: usize,
+    calls: AtomicUsize,
+}
+
+impl NanOnceOp {
+    fn new(a: Mat<f64>, nan_call: usize) -> Self {
+        Self {
+            a,
+            nan_call,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn matvec_impl(&self, x: &[f64], y: &mut [f64]) {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if call == self.nan_call {
+            y.fill(f64::NAN);
+            return;
+        }
+        for i in 0..self.a.nrows() {
+            let mut acc = 0.0;
+            for j in 0..self.a.ncols() {
+                acc += self.a[(i, j)] * x[j];
+            }
+            y[i] = acc;
+        }
+    }
+}
+
+impl LinOp for NanOnceOp {
+    type S = f64;
+
+    fn dims(&self) -> (usize, usize) {
+        (self.a.nrows(), self.a.ncols())
+    }
+
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        self.matvec_impl(x, y);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl LinOpF64 for NanOnceOp {
+    fn dims(&self) -> (usize, usize) {
+        <Self as LinOp>::dims(self)
+    }
+
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        self.matvec_impl(x, y);
+    }
 }
 
 #[test]
@@ -123,4 +183,87 @@ fn bicgstab_rejects_symmetric_pc_side() {
         }
         other => panic!("expected InvalidInput for symmetric side, got: {other:?}"),
     }
+}
+
+#[test]
+fn bicgstab_rho_breakdown_policy_strict_exits() {
+    let mut a = Mat::<f64>::zeros(3, 3);
+    a[(0, 0)] = 4.0;
+    a[(0, 1)] = 1.0;
+    a[(1, 0)] = -1.0;
+    a[(1, 1)] = 3.0;
+    a[(1, 2)] = 1.0;
+    a[(2, 1)] = -2.0;
+    a[(2, 2)] = 5.0;
+    let op = NanOnceOp::new(a, 2);
+    let b = vec![1.0, 2.0, -1.0];
+    let mut x = vec![0.0; 3];
+    let mut solver = BiCgStabSolver::new(1e-10, 40);
+    solver.set_breakdown_policy(BiCgStabBreakdownPolicy::Strict);
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut ws = kryst::context::ksp_context::Workspace::default();
+    let stats = solver
+        .solve_f64(
+            &op,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
+        .expect("strict solve should return stats");
+
+    assert!(matches!(
+        stats.reason,
+        ConvergedReason::DivergedBreakdownBiCG | ConvergedReason::ConvergedHappyBreakdown
+    ));
+    assert_eq!(stats.counters.residual_replacements, 0);
+}
+
+#[test]
+fn bicgstab_rho_breakdown_policy_refresh_shadow_recovers() {
+    let a = nonsym_tridiag(3);
+    let b = vec![1.0e-20, -2.0e-20, 1.0e-20];
+    let comm = UniverseComm::NoComm(NoComm);
+
+    let mut x_strict = vec![0.0; 3];
+    let mut strict = BiCgStabSolver::new(0.0, 40);
+    strict.atol = 0.0;
+    strict.set_breakdown_policy(BiCgStabBreakdownPolicy::Strict);
+    let mut ws_strict = kryst::context::ksp_context::Workspace::default();
+    let strict_stats = strict
+        .solve_f64(
+            &a,
+            None,
+            &b,
+            &mut x_strict,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws_strict),
+        )
+        .expect("strict solve should return stats");
+
+    let mut x = vec![0.0; 3];
+    let mut solver = BiCgStabSolver::new(0.0, 40);
+    solver.atol = 0.0;
+    solver.set_breakdown_policy(BiCgStabBreakdownPolicy::RefreshShadow { max_refreshes: 1 });
+    let mut ws = kryst::context::ksp_context::Workspace::default();
+    let stats = solver
+        .solve_f64(
+            &a,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
+        .expect("refresh solve should return stats");
+
+    assert!(stats.counters.residual_replacements >= 1);
+    assert!(stats.iterations > strict_stats.iterations);
 }

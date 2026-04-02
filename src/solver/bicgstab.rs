@@ -170,12 +170,19 @@ pub enum BiCgStabVariant {
     Reliable { residual_replace_every: usize },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BiCgStabBreakdownPolicy {
+    Strict,
+    RefreshShadow { max_refreshes: usize },
+}
+
 pub struct BiCgStabSolver {
     pub rtol: R,
     pub atol: R,
     pub dtol: R,
     pub maxits: usize,
     pub variant: BiCgStabVariant,
+    pub breakdown_policy: BiCgStabBreakdownPolicy,
 }
 
 impl BiCgStabSolver {
@@ -186,11 +193,16 @@ impl BiCgStabSolver {
             dtol: 1e3,
             maxits,
             variant: BiCgStabVariant::Classic,
+            breakdown_policy: BiCgStabBreakdownPolicy::Strict,
         }
     }
 
     pub fn set_variant(&mut self, variant: BiCgStabVariant) {
         self.variant = variant;
+    }
+
+    pub fn set_breakdown_policy(&mut self, policy: BiCgStabBreakdownPolicy) {
+        self.breakdown_policy = policy;
     }
 
     pub fn reduction_model(&self) -> ReductionModel {
@@ -353,6 +365,12 @@ impl BiCgStabSolver {
 
         let mut sync_reductions = 2usize;
         let mut async_reduction_waits = 0usize;
+        let mut residual_replacements = 0usize;
+        let mut rho_refreshes_remaining = match self.breakdown_policy {
+            BiCgStabBreakdownPolicy::Strict => 0,
+            BiCgStabBreakdownPolicy::RefreshShadow { max_refreshes } => max_refreshes,
+        };
+        let mut refreshed_shadow = false;
 
         let (check_s_norm, replace_every) = match self.variant {
             BiCgStabVariant::Classic => (true, None),
@@ -370,6 +388,36 @@ impl BiCgStabSolver {
             };
             sync_reductions += 1;
             if rho.abs() <= eps_rho || !rho.is_finite() {
+                if rho_refreshes_remaining > 0 {
+                    rho_refreshes_remaining -= 1;
+                    residual_replacements += 1;
+
+                    a.matvec_s(x, &mut v[..], &mut *scratch);
+                    for i in 0..n {
+                        r[i] = b[i] - v[i];
+                    }
+                    if need_left {
+                        if let Some(zs) = z_s.as_deref_mut() {
+                            if let Some(pc) = pc {
+                                pc.apply_s(pc_apply_side, r, zs, &mut *scratch)?;
+                            } else {
+                                zs.copy_from_slice(r);
+                            }
+                            s.copy_from_slice(zs);
+                        } else {
+                            s.copy_from_slice(r);
+                        }
+                        r_hat.copy_from_slice(s);
+                    } else {
+                        r_hat.copy_from_slice(r);
+                    }
+
+                    rho_prev = S::one();
+                    alpha = S::one();
+                    omega_prev = S::one();
+                    refreshed_shadow = true;
+                    continue;
+                }
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: rho ~ 0 at iter {k}");
                 let stats = finalize_breakdown_salvage_exit(
@@ -389,11 +437,12 @@ impl BiCgStabSolver {
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
-                    residual_replacements: async_reduction_waits,
+                    residual_replacements,
                 }));
             }
 
-            let beta = if k == 1 {
+            let beta = if k == 1 || refreshed_shadow {
+                refreshed_shadow = false;
                 S::zero()
             } else {
                 (rho / rho_prev) * (alpha / omega_prev)
@@ -458,7 +507,7 @@ impl BiCgStabSolver {
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
-                    residual_replacements: async_reduction_waits,
+                    residual_replacements,
                 }));
             }
             alpha = rho / alpha_den;
@@ -493,7 +542,7 @@ impl BiCgStabSolver {
                     return Ok(stats.with_counters(SolverCounters {
                         num_global_reductions: sync_reductions + async_reduction_waits,
                         overlap_global_reductions: async_reduction_waits,
-                        residual_replacements: async_reduction_waits,
+                        residual_replacements,
                     }));
                 }
                 if call_monitors(mons, k, s_norm, 0) {
@@ -502,7 +551,7 @@ impl BiCgStabSolver {
                             .with_counters(SolverCounters {
                                 num_global_reductions: sync_reductions + async_reduction_waits,
                                 overlap_global_reductions: async_reduction_waits,
-                                residual_replacements: async_reduction_waits,
+                                residual_replacements,
                             }),
                     );
                 }
@@ -552,7 +601,7 @@ impl BiCgStabSolver {
                     return Ok(stats.with_counters(SolverCounters {
                         num_global_reductions: sync_reductions + async_reduction_waits,
                         overlap_global_reductions: async_reduction_waits,
-                        residual_replacements: async_reduction_waits,
+                        residual_replacements,
                     }));
                 }
             }
@@ -609,7 +658,7 @@ impl BiCgStabSolver {
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
-                    residual_replacements: async_reduction_waits,
+                    residual_replacements,
                 }));
             }
             let omega = S::from_real(omega_reds.1) / omega_den;
@@ -632,7 +681,7 @@ impl BiCgStabSolver {
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
-                    residual_replacements: async_reduction_waits,
+                    residual_replacements,
                 }));
             }
 
@@ -701,6 +750,7 @@ impl BiCgStabSolver {
                     for i in 0..n {
                         r[i] = b[i] - v[i];
                     }
+                    residual_replacements += 1;
                     if need_left {
                         if let Some(zs) = z_s.as_deref_mut() {
                             if let Some(pc) = pc {
@@ -739,7 +789,7 @@ impl BiCgStabSolver {
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
-                    residual_replacements: async_reduction_waits,
+                    residual_replacements,
                 }));
             }
             if call_monitors(mons, k, r_norm, 0) {
@@ -748,7 +798,7 @@ impl BiCgStabSolver {
                         SolverCounters {
                             num_global_reductions: sync_reductions + async_reduction_waits,
                             overlap_global_reductions: async_reduction_waits,
-                            residual_replacements: async_reduction_waits,
+                            residual_replacements,
                         },
                     ),
                 );
@@ -776,7 +826,7 @@ impl BiCgStabSolver {
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
-                    residual_replacements: async_reduction_waits,
+                    residual_replacements,
                 }));
             }
             if r_norm >= self.dtol * bnorm {
@@ -796,7 +846,7 @@ impl BiCgStabSolver {
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
-                    residual_replacements: async_reduction_waits,
+                    residual_replacements,
                 }));
             }
 
@@ -823,7 +873,7 @@ impl BiCgStabSolver {
         Ok(stats.with_counters(SolverCounters {
             num_global_reductions: sync_reductions + async_reduction_waits,
             overlap_global_reductions: async_reduction_waits,
-            residual_replacements: async_reduction_waits,
+            residual_replacements,
         }))
     }
 

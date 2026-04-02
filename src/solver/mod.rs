@@ -219,7 +219,7 @@ pub use gmres::GmresSolver;
 pub mod fgmres;
 pub use fgmres::FgmresSolver;
 pub mod bicgstab;
-pub use bicgstab::{BiCgStabSolver, BiCgStabVariant};
+pub use bicgstab::{BiCgStabBreakdownPolicy, BiCgStabSolver, BiCgStabVariant};
 pub mod idrs;
 pub use idrs::{
     BreakdownRepair as IdrsBreakdownRepair, IdrsBuilder, IdrsOptions, IdrsSolver,
