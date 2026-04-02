@@ -16,6 +16,56 @@ struct ScriptedScaleOp {
     calls: AtomicUsize,
 }
 
+struct ScriptedMat2Op {
+    mats: Vec<[[f64; 2]; 2]>,
+    calls: AtomicUsize,
+}
+
+impl ScriptedMat2Op {
+    fn new(mats: Vec<[[f64; 2]; 2]>) -> Self {
+        Self {
+            mats,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn next_mat(&self) -> [[f64; 2]; 2] {
+        let idx = self.calls.fetch_add(1, Ordering::Relaxed);
+        self.mats
+            .get(idx)
+            .copied()
+            .unwrap_or_else(|| *self.mats.last().unwrap_or(&[[1.0, 0.0], [0.0, 1.0]]))
+    }
+}
+
+impl LinOpF64 for ScriptedMat2Op {
+    fn dims(&self) -> (usize, usize) {
+        (2, 2)
+    }
+
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        let a = self.next_mat();
+        y[0] = a[0][0] * x[0] + a[0][1] * x[1];
+        y[1] = a[1][0] * x[0] + a[1][1] * x[1];
+    }
+}
+
+impl LinOp for ScriptedMat2Op {
+    type S = f64;
+
+    fn dims(&self) -> (usize, usize) {
+        (2, 2)
+    }
+
+    fn matvec(&self, x: &[Self::S], y: &mut [Self::S]) {
+        <Self as LinOpF64>::matvec(self, x, y);
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 impl ScriptedScaleOp {
     fn new(scales: Vec<f64>) -> Self {
         Self {
@@ -122,4 +172,82 @@ fn gmres_breakdown_mismatch_reclassified_when_true_residual_meets_tol() {
         ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
     ));
     assert!(stats.final_residual <= solver.conv.rtol * 1.0);
+}
+
+#[test]
+fn bicgstab_omega_breakdown_reclassified_when_true_residual_meets_tol() {
+    let op = ScriptedMat2Op::new(vec![
+        [[0.0, 0.0], [0.0, 0.0]],
+        [[1.0, 0.0], [1.0, 0.0]],
+        [[0.0, -1.0], [0.0, 0.0]],
+        [[1.0, 0.0], [0.0, 1.0]],
+    ]);
+    let b = vec![1.0, 0.0];
+    let mut x = vec![1.0, 0.0];
+    let mut solver = BiCgStabSolver::new(1e-12, 5);
+    solver.atol = 1e-12;
+    solver.set_variant(crate::solver::bicgstab::BiCgStabVariant::LowSync);
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut ws = Workspace::default();
+
+    let stats = solver
+        .solve(
+            &op,
+            None::<&dyn KPreconditioner<Scalar = f64>>,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
+        .expect("bicgstab should return stats");
+
+    assert_eq!(stats.reason, ConvergedReason::ConvergedHappyBreakdown);
+    assert_eq!(stats.acceptance_status, AcceptanceStatus::OkWithWarning);
+    assert_eq!(stats.breakdown_reason, Some(ConvergedReason::DivergedBreakdownBiCG));
+    assert!(
+        stats
+            .residual_override_note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("omega near-zero/non-finite")
+    );
+    assert!(stats.final_residual <= solver.atol);
+}
+
+#[test]
+fn bicgstab_omega_breakdown_keeps_hard_breakdown_above_tol() {
+    let op = ScriptedMat2Op::new(vec![
+        [[0.0, 0.0], [0.0, 0.0]],
+        [[1.0, 0.0], [1.0, 0.0]],
+        [[0.0, -1.0], [0.0, 0.0]],
+        [[0.0, 0.0], [0.0, 0.0]],
+    ]);
+    let b = vec![1.0, 0.0];
+    let mut x = vec![1.0, 0.0];
+    let mut solver = BiCgStabSolver::new(1e-12, 5);
+    solver.atol = 1e-12;
+    solver.set_variant(crate::solver::bicgstab::BiCgStabVariant::LowSync);
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut ws = Workspace::default();
+
+    let stats = solver
+        .solve(
+            &op,
+            None::<&dyn KPreconditioner<Scalar = f64>>,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
+        .expect("bicgstab should return stats");
+
+    assert_eq!(stats.reason, ConvergedReason::DivergedBreakdownBiCG);
+    assert_eq!(stats.acceptance_status, AcceptanceStatus::Failed);
+    assert_eq!(stats.breakdown_reason, None);
+    assert!(stats.residual_override_note.is_none());
+    assert!(stats.final_residual > solver.atol);
 }
