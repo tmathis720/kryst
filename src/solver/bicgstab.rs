@@ -24,7 +24,7 @@ use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
-use crate::solver::common::exit_checks::{true_residual_converged_reason, true_residual_norm};
+use crate::solver::common::exit_checks::{reconcile_reason_with_true_residual, true_residual_norm};
 use crate::solver::common::{ReductCtx, call_monitors, dot2_async_s};
 use crate::utils::convergence::{
     ConvergedReason, ReasonEmitter, ReductionModel, SolveStats, SolverCounters,
@@ -104,6 +104,26 @@ impl<'a> BiCgWorkspace<'a> {
             scratch: &mut work.bridge,
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_true_residual_exit<A: KLinOp<Scalar = S> + ?Sized>(
+    a: &A,
+    b: &[S],
+    x: &[S],
+    red: &ReductCtx,
+    tmp: &mut [S],
+    scratch: &mut BridgeScratch,
+    bnorm: R,
+    atol: R,
+    rtol: R,
+    iterations: usize,
+    nominal_reason: ConvergedReason,
+) -> SolveStats<R> {
+    let true_residual = true_residual_norm(a, b, x, red, tmp, scratch);
+    let reason =
+        reconcile_reason_with_true_residual(nominal_reason, true_residual, bnorm, atol, rtol);
+    SolveStats::new(iterations, true_residual, reason)
 }
 
 /// BiCGStab solver (scalar-generic internal variant)
@@ -292,7 +312,6 @@ impl BiCgStabSolver {
         let eps_alpha = 1e-30;
         let eps_omega = 1e-30;
 
-        let mut stats = SolveStats::new(0, res0, ConvergedReason::Continued);
         let mut sync_reductions = 2usize;
         let mut async_reduction_waits = 0usize;
 
@@ -314,15 +333,19 @@ impl BiCgStabSolver {
             if rho.abs() <= eps_rho || !rho.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: rho ~ 0 at iter {k}");
-                stats.iterations = k - 1;
-                stats.final_residual = true_residual_norm(a, b, x, &red, r, &mut *scratch);
-                stats.reason = true_residual_converged_reason(
-                    stats.final_residual,
+                let stats = finalize_true_residual_exit(
+                    a,
+                    b,
+                    x,
+                    &red,
+                    r,
+                    &mut *scratch,
                     bnorm,
                     self.atol,
                     self.rtol,
-                )
-                .unwrap_or_else(ReasonEmitter::breakdown_bicg);
+                    k - 1,
+                    ReasonEmitter::breakdown_bicg(),
+                );
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
@@ -378,15 +401,19 @@ impl BiCgStabSolver {
             if alpha_den.abs() <= eps_alpha || !alpha_den.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: alpha_den ~ 0 at iter {k}");
-                stats.iterations = k - 1;
-                stats.final_residual = true_residual_norm(a, b, x, &red, r, &mut *scratch);
-                stats.reason = true_residual_converged_reason(
-                    stats.final_residual,
+                let stats = finalize_true_residual_exit(
+                    a,
+                    b,
+                    x,
+                    &red,
+                    r,
+                    &mut *scratch,
                     bnorm,
                     self.atol,
                     self.rtol,
-                )
-                .unwrap_or_else(ReasonEmitter::breakdown_bicg);
+                    k - 1,
+                    ReasonEmitter::breakdown_bicg(),
+                );
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
@@ -409,9 +436,19 @@ impl BiCgStabSolver {
                 let s_norm = red.norm2(s);
                 sync_reductions += 1;
                 if let Some(reason) = ReasonEmitter::non_finite(s_norm) {
-                    stats.iterations = k;
-                    stats.final_residual = s_norm;
-                    stats.reason = reason;
+                    let stats = finalize_true_residual_exit(
+                        a,
+                        b,
+                        x,
+                        &red,
+                        r,
+                        &mut *scratch,
+                        bnorm,
+                        self.atol,
+                        self.rtol,
+                        k,
+                        reason,
+                    );
                     return Ok(stats.with_counters(SolverCounters {
                         num_global_reductions: sync_reductions + async_reduction_waits,
                         overlap_global_reductions: async_reduction_waits,
@@ -453,13 +490,24 @@ impl BiCgStabSolver {
                             }
                         }
                     }
-                    stats.iterations = k;
-                    stats.final_residual = s_norm;
-                    stats.reason = if s_norm <= self.atol {
+                    let nominal = if s_norm <= self.atol {
                         ConvergedReason::ConvergedAtol
                     } else {
                         ConvergedReason::ConvergedRtol
                     };
+                    let stats = finalize_true_residual_exit(
+                        a,
+                        b,
+                        x,
+                        &red,
+                        r,
+                        &mut *scratch,
+                        bnorm,
+                        self.atol,
+                        self.rtol,
+                        k,
+                        nominal,
+                    );
                     return Ok(stats.with_counters(SolverCounters {
                         num_global_reductions: sync_reductions + async_reduction_waits,
                         overlap_global_reductions: async_reduction_waits,
@@ -504,15 +552,19 @@ impl BiCgStabSolver {
             if omega_den.abs() <= eps_omega || !omega_den.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega_den ~ 0 at iter {k}");
-                stats.iterations = k;
-                stats.final_residual = true_residual_norm(a, b, x, &red, r, &mut *scratch);
-                stats.reason = true_residual_converged_reason(
-                    stats.final_residual,
+                let stats = finalize_true_residual_exit(
+                    a,
+                    b,
+                    x,
+                    &red,
+                    r,
+                    &mut *scratch,
                     bnorm,
                     self.atol,
                     self.rtol,
-                )
-                .unwrap_or_else(ReasonEmitter::breakdown_bicg);
+                    k,
+                    ReasonEmitter::breakdown_bicg(),
+                );
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
@@ -523,15 +575,19 @@ impl BiCgStabSolver {
             if omega.abs() <= eps_omega || !omega.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega ~ 0 at iter {k}");
-                stats.iterations = k;
-                stats.final_residual = true_residual_norm(a, b, x, &red, r, &mut *scratch);
-                stats.reason = true_residual_converged_reason(
-                    stats.final_residual,
+                let stats = finalize_true_residual_exit(
+                    a,
+                    b,
+                    x,
+                    &red,
+                    r,
+                    &mut *scratch,
                     bnorm,
                     self.atol,
                     self.rtol,
-                )
-                .unwrap_or_else(ReasonEmitter::breakdown_bicg);
+                    k,
+                    ReasonEmitter::breakdown_bicg(),
+                );
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
@@ -626,9 +682,19 @@ impl BiCgStabSolver {
             };
             sync_reductions += 1;
             if let Some(reason) = ReasonEmitter::non_finite(r_norm) {
-                stats.iterations = k;
-                stats.final_residual = r_norm;
-                stats.reason = reason;
+                let stats = finalize_true_residual_exit(
+                    a,
+                    b,
+                    x,
+                    &red,
+                    r,
+                    &mut *scratch,
+                    bnorm,
+                    self.atol,
+                    self.rtol,
+                    k,
+                    reason,
+                );
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
@@ -648,13 +714,24 @@ impl BiCgStabSolver {
             }
 
             if r_norm <= thr {
-                stats.iterations = k;
-                stats.final_residual = r_norm;
-                stats.reason = if r_norm <= self.atol {
+                let nominal = if r_norm <= self.atol {
                     ConvergedReason::ConvergedAtol
                 } else {
                     ConvergedReason::ConvergedRtol
                 };
+                let stats = finalize_true_residual_exit(
+                    a,
+                    b,
+                    x,
+                    &red,
+                    r,
+                    &mut *scratch,
+                    bnorm,
+                    self.atol,
+                    self.rtol,
+                    k,
+                    nominal,
+                );
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
@@ -662,9 +739,19 @@ impl BiCgStabSolver {
                 }));
             }
             if r_norm >= self.dtol * bnorm {
-                stats.iterations = k;
-                stats.final_residual = r_norm;
-                stats.reason = ConvergedReason::DivergedDtol;
+                let stats = finalize_true_residual_exit(
+                    a,
+                    b,
+                    x,
+                    &red,
+                    r,
+                    &mut *scratch,
+                    bnorm,
+                    self.atol,
+                    self.rtol,
+                    k,
+                    ConvergedReason::DivergedDtol,
+                );
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
                     overlap_global_reductions: async_reduction_waits,
@@ -678,15 +765,25 @@ impl BiCgStabSolver {
 
         let r_norm = red.norm2(r);
         sync_reductions += 1;
-        Ok(
-            SolveStats::new(self.maxits, r_norm, ConvergedReason::DivergedMaxIts).with_counters(
-                SolverCounters {
-                    num_global_reductions: sync_reductions + async_reduction_waits,
-                    overlap_global_reductions: async_reduction_waits,
-                    residual_replacements: async_reduction_waits,
-                },
-            ),
-        )
+        let _ = r_norm;
+        let stats = finalize_true_residual_exit(
+            a,
+            b,
+            x,
+            &red,
+            r,
+            &mut *scratch,
+            bnorm,
+            self.atol,
+            self.rtol,
+            self.maxits,
+            ConvergedReason::DivergedMaxIts,
+        );
+        Ok(stats.with_counters(SolverCounters {
+            num_global_reductions: sync_reductions + async_reduction_waits,
+            overlap_global_reductions: async_reduction_waits,
+            residual_replacements: async_reduction_waits,
+        }))
     }
 
     #[allow(clippy::too_many_arguments)]

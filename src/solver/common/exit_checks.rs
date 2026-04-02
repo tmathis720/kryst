@@ -37,3 +37,21 @@ pub fn true_residual_converged_reason(
     }
     None
 }
+
+#[inline]
+pub fn reconcile_reason_with_true_residual(
+    nominal_reason: ConvergedReason,
+    true_residual: R,
+    bnorm: R,
+    atol: R,
+    rtol: R,
+) -> ConvergedReason {
+    let true_reason = true_residual_converged_reason(true_residual, bnorm, atol, rtol);
+    if let Some(reason) = true_reason {
+        return reason;
+    }
+    if nominal_reason.is_converged() {
+        return ConvergedReason::DivergedMaxIts;
+    }
+    nominal_reason
+}
