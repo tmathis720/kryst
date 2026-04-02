@@ -174,6 +174,7 @@ struct DirectReferenceComparison {
     rel_error_norm: f64,
     matches_verified_answer: bool,
     reference_solve_executed: bool,
+    elapsed_seconds: Option<f64>,
     note: String,
 }
 
@@ -223,6 +224,10 @@ struct SolverTestResult {
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 impl SolverTestResult {
+    fn baseline_attempt(&self) -> Option<&AttemptRecord> {
+        self.attempts.iter().find(|attempt| attempt.rung_id == 0)
+    }
+
     fn best_iterative_attempt(&self) -> Option<&AttemptRecord> {
         self.attempts
             .iter()
@@ -468,6 +473,7 @@ fn compare_with_direct_reference(
             rel_error_norm: f64::NAN,
             matches_verified_answer: false,
             reference_solve_executed: false,
+            elapsed_seconds: None,
             note: policy_note,
         }));
     }
@@ -476,15 +482,18 @@ fn compare_with_direct_reference(
     {
         let dense_mat = a_mat.to_dense()?;
         let mut reference_solution = vec![0.0; rhs.len()];
+        let started = Instant::now();
         if let Err(err) = dense_lu::solve(&dense_mat, rhs, &mut reference_solution) {
             return Ok(Some(DirectReferenceComparison {
                 abs_error_norm: f64::NAN,
                 rel_error_norm: f64::NAN,
                 matches_verified_answer: false,
                 reference_solve_executed: true,
+                elapsed_seconds: Some(started.elapsed().as_secs_f64()),
                 note: format!("{}; direct LU failed ({err})", policy_note),
             }));
         }
+        let reference_elapsed = started.elapsed().as_secs_f64();
 
         let mut diff_sq = 0.0;
         let mut ref_sq = 0.0;
@@ -501,6 +510,7 @@ fn compare_with_direct_reference(
             rel_error_norm,
             matches_verified_answer,
             reference_solve_executed: true,
+            elapsed_seconds: Some(reference_elapsed),
             note: policy_note,
         }));
     }
@@ -513,6 +523,7 @@ fn compare_with_direct_reference(
             rel_error_norm: f64::NAN,
             matches_verified_answer: false,
             reference_solve_executed: false,
+            elapsed_seconds: None,
             note: format!(
                 "{}; direct LU failed (dense-direct feature is disabled)",
                 policy_note
@@ -975,18 +986,19 @@ fn test_optimal_solver(
                 if iterative_benchmark_mode {
                     // Continue through all fallback rungs and decide by the best iterative attempt.
                 } else {
+                    let comparison =
+                        compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &solution)?;
+                    let reference_solve_executed = comparison
+                        .as_ref()
+                        .is_some_and(|cmp| cmp.reference_solve_executed);
+                    let reference_elapsed = comparison.as_ref().and_then(|cmp| cmp.elapsed_seconds);
                     truth_reference = Some(TruthReference {
                         selected_as_winner: false,
-                        reference_solve_executed: false,
-                        elapsed_seconds: None,
+                        reference_solve_executed,
+                        elapsed_seconds: reference_elapsed,
                         true_abs_residual: None,
                         true_rel_residual: None,
-                        comparison: compare_with_direct_reference(
-                            matrix_name,
-                            a_mat,
-                            &rhs_vec,
-                            &solution,
-                        )?,
+                        comparison,
                         note: "iterative winner with direct-reference side-channel check"
                             .to_string(),
                     });
@@ -1134,18 +1146,19 @@ fn test_optimal_solver(
                         ));
                         continue;
                     }
+                    let comparison =
+                        compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &sol_fb)?;
+                    let reference_solve_executed = comparison
+                        .as_ref()
+                        .is_some_and(|cmp| cmp.reference_solve_executed);
+                    let reference_elapsed = comparison.as_ref().and_then(|cmp| cmp.elapsed_seconds);
                     truth_reference = Some(TruthReference {
                         selected_as_winner: false,
-                        reference_solve_executed: false,
-                        elapsed_seconds: None,
+                        reference_solve_executed,
+                        elapsed_seconds: reference_elapsed,
                         true_abs_residual: None,
                         true_rel_residual: None,
-                        comparison: compare_with_direct_reference(
-                            matrix_name,
-                            a_mat,
-                            &rhs_vec,
-                            &sol_fb,
-                        )?,
+                        comparison,
                         note: "iterative winner with direct-reference side-channel check"
                             .to_string(),
                     });
@@ -1216,6 +1229,7 @@ fn test_optimal_solver(
                         rel_error_norm: 0.0,
                         matches_verified_answer: true,
                         reference_solve_executed: true,
+                        elapsed_seconds: Some(direct_elapsed),
                         note: format!("truth_path: {direct_policy_reason}"),
                     };
                     truth_reference = Some(TruthReference {
@@ -1275,14 +1289,18 @@ fn test_optimal_solver(
         } else {
             None
         };
+        let reference_solve_executed = comparison
+            .as_ref()
+            .is_some_and(|cmp| cmp.reference_solve_executed);
+        let reference_elapsed = comparison.as_ref().and_then(|cmp| cmp.elapsed_seconds);
         attempt_log.push(format!(
             "rung=3 [suppressed]: mode={} keeps direct reference as side-channel only ({})",
             direct_truth_policy.mode_label, direct_policy_reason
         ));
         truth_reference = Some(TruthReference {
             selected_as_winner: false,
-            reference_solve_executed: false,
-            elapsed_seconds: None,
+            reference_solve_executed,
+            elapsed_seconds: reference_elapsed,
             true_abs_residual: None,
             true_rel_residual: None,
             comparison,
@@ -1751,6 +1769,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    fn format_elapsed_ms(elapsed_seconds: Option<f64>) -> String {
+        elapsed_seconds
+            .map(|seconds| format!("{:.2} ms", seconds * 1_000.0))
+            .unwrap_or_else(|| "-".to_string())
+    }
+
+    fn format_iters_time(iters: Option<usize>, elapsed_seconds: Option<f64>) -> String {
+        match iters {
+            Some(value) => format!("{value} / {}", format_elapsed_ms(elapsed_seconds)),
+            None => "- / -".to_string(),
+        }
+    }
+
     fn is_root_rank() -> bool {
         // If MPI launcher environment variables are present, only rank 0 prints.
         // In regular (non-MPI) runs no rank variable is present, so default to true.
@@ -1834,11 +1865,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             );
             println!(
-                "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<14} {:<26} {}",
+                "{:<12} {:<14} {:<20} {:<20} {:<12} {:<12} {:<12} {:<14} {:<26} {}",
                 "Matrix",
                 "Reference",
-                "Best iterative",
-                "Iter",
+                "Baseline iters/time",
+                "Best iter iters/time",
+                "Ref time",
                 "TrueRelRes",
                 "RefDiff",
                 "Policy rung",
@@ -1872,10 +1904,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {
                     if is_root_rank {
                         println!(
-                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<14} {:<26} {}",
+                            "{:<12} {:<14} {:<20} {:<20} {:<12} {:<12} {:<12} {:<14} {:<26} {}",
                             matrix_name,
                             "unavailable",
-                            "-",
+                            "- / -",
+                            "- / -",
                             "-",
                             "-",
                             "-",
@@ -1955,8 +1988,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if a_op.nrows() > 6000 {
                 if is_root_rank {
                     println!(
-                        "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<14} {:<26} {}",
-                        matrix_name, "skipped", "-", "-", "-", "-", "-", "failed: too large", "-"
+                        "{:<12} {:<14} {:<20} {:<20} {:<12} {:<12} {:<12} {:<14} {:<26} {}",
+                        matrix_name,
+                        "skipped",
+                        "- / -",
+                        "- / -",
+                        "-",
+                        "-",
+                        "-",
+                        "-",
+                        "failed: too large",
+                        "-"
                     );
                 }
                 total_rows += 1;
@@ -1997,13 +2039,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         "N/A".to_string()
                     };
-                    let iter_text = if iterative_row {
-                        best_iterative
-                            .map(|attempt| attempt.iterations.to_string())
-                            .unwrap_or_else(|| "-".to_string())
-                    } else {
-                        "N/A".to_string()
-                    };
+                    let baseline_attempt = test_result.baseline_attempt();
+                    let baseline_iters_time = format_iters_time(
+                        baseline_attempt.map(|attempt| attempt.iterations),
+                        baseline_attempt.map(|attempt| attempt.elapsed_seconds),
+                    );
+                    let best_iters_time = format_iters_time(
+                        best_iterative.map(|attempt| attempt.iterations),
+                        best_iterative.map(|attempt| attempt.elapsed_seconds),
+                    );
+                    let reference_time_text = format_elapsed_ms(
+                        test_result
+                            .truth_reference
+                            .as_ref()
+                            .and_then(|truth| truth.elapsed_seconds),
+                    );
                     let true_rel_res_text = if iterative_row {
                         best_iterative
                             .map(|attempt| format!("{:.2e}", attempt.true_rel_residual))
@@ -2098,11 +2148,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if is_root_rank {
                         println!(
-                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<14} {:<26} {}",
+                            "{:<12} {:<14} {:<20} {:<20} {:<12} {:<12} {:<12} {:<14} {:<26} {}",
                             matrix_name,
                             reference,
-                            best_iter_label,
-                            iter_text,
+                            baseline_iters_time,
+                            best_iters_time,
+                            reference_time_text,
                             true_rel_res_text,
                             ref_diff_text,
                             policy_rung,
@@ -2114,6 +2165,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "    ↳ diagnostics: primary={primary}, fallback={fallback}, solver_code={solver_reason}, outcome={outcome_code}, ||b||={:.2e}, acceptance_threshold={:.2e}, verified={verified}",
                                 rhs_norm, acceptance_threshold
                             );
+                            println!(
+                                "    → Timing summary: baseline={}, best_iterative={} ({best_iter_label}), reference={}",
+                                baseline_iters_time, best_iters_time, reference_time_text
+                            );
                             println!("    → Preprocessing trace: {prep_trace}");
                             println!(
                                 "    → Attempted rungs: {}",
@@ -2121,13 +2176,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .attempts
                                     .iter()
                                     .map(|a| format!(
-                                        "{}:{}+{}:{}(iters={}, rel={:.2e})",
+                                        "{}:{}+{}:{}(iters={}, rel={:.2e}, time={})",
                                         a.rung_label,
                                         a.solver,
                                         a.preconditioner,
                                         a.acceptance_status,
                                         a.iterations,
-                                        a.true_rel_residual
+                                        a.true_rel_residual,
+                                        format_elapsed_ms(Some(a.elapsed_seconds))
                                     ))
                                     .collect::<Vec<_>>()
                                     .join(" | ")
@@ -2145,6 +2201,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     cmp.rel_error_norm,
                                     cmp.matches_verified_answer,
                                     cmp.note
+                                );
+                                println!(
+                                    "    → Direct reference timing: {}",
+                                    format_elapsed_ms(cmp.elapsed_seconds)
                                 );
                             }
                             println!(
@@ -2205,8 +2265,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => {
                     if is_root_rank {
                         println!(
-                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<14} {:<26} {}",
-                            matrix_name, "none", "-", "-", "-", "-", "none_ok", "failed", e
+                            "{:<12} {:<14} {:<20} {:<20} {:<12} {:<12} {:<12} {:<14} {:<26} {}",
+                            matrix_name,
+                            "none",
+                            "- / -",
+                            "- / -",
+                            "-",
+                            "-",
+                            "-",
+                            "none_ok",
+                            "failed",
+                            e
                         );
                     }
                     total_rows += 1;
