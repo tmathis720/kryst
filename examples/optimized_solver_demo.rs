@@ -47,11 +47,6 @@ fn main() {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use std::str::FromStr;
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use std::sync::Arc;
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::config::options::PcOptions;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -62,6 +57,8 @@ use kryst::context::pc_context::PcType;
 use kryst::matrix::op::{CsrOp, LinOp};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::matrix::sparse::CsrMatrix;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::preconditioner::ilu_csr::{ReorderingKind, ReorderingOptions};
 #[cfg(all(
     feature = "backend-faer",
     feature = "dense-direct",
@@ -71,22 +68,30 @@ use kryst::solver::dense_lu;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::conditioning::analyze_csr;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::utils::conditioning::{ConditioningOptions, ScaleDirection, ScaleNorm};
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::matrix_market::{MatrixMarketSymmetry, read_matrix_market};
+use kryst::utils::matrix_market::{read_matrix_market, MatrixMarketSymmetry};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_screening::{
-    SYMMETRY_MAX_ASYMMETRY_RATE, SymmetryAssessment, assess_symmetry, cg_compatibility_screen,
-    repair_diagonal_csr,
+    assess_symmetry, cg_compatibility_screen, repair_diagonal_csr, SymmetryAssessment,
+    SYMMETRY_MAX_ASYMMETRY_RATE,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::utils::preconditioning_pipeline::apply_preconditioning_pipeline;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::{
-    DirectReferenceLike, DirectVerificationCapability, format_direct_verification_status,
+    format_direct_verification_status, DirectReferenceLike, DirectVerificationCapability,
 };
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use std::str::FromStr;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use std::sync::Arc;
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -351,6 +356,48 @@ fn compare_with_direct_reference(
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[derive(Clone, Debug)]
+struct PreconditionerPrepConfig {
+    row_scaling: bool,
+    col_scaling: bool,
+    nonsymmetric_matching: bool,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+impl PreconditionerPrepConfig {
+    fn baseline() -> Self {
+        Self {
+            row_scaling: true,
+            col_scaling: true,
+            nonsymmetric_matching: true,
+        }
+    }
+
+    fn for_matrix(matrix_name: &str) -> Self {
+        match matrix_name {
+            "fidap001" | "fidap005" | "sherman3" | "e05r0100" => Self::baseline(),
+            _ => Self {
+                row_scaling: true,
+                col_scaling: false,
+                nonsymmetric_matching: false,
+            },
+        }
+    }
+
+    fn as_trace(&self) -> String {
+        format!(
+            "preprocess[row_scale={}, col_scale={}, nonsym_matching={}]",
+            self.row_scaling, self.col_scaling, self.nonsymmetric_matching
+        )
+    }
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn prep_config_for(matrix_name: &str) -> PreconditionerPrepConfig {
+    PreconditionerPrepConfig::for_matrix(matrix_name)
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn build_preconditioner_options(
     matrix_name: &str,
     solver: &str,
@@ -376,6 +423,7 @@ fn build_preconditioner_options(
     }
 
     let mut opts = PcOptions::default();
+    let prep_cfg = prep_config_for(matrix_name);
     opts.ilu_type = Some(if pc == "ilut" { "ilut" } else { "iluk" }.to_string());
     opts.ilu_level_of_fill = Some(1);
     opts.ilu_max_fill_per_row = Some(24);
@@ -384,8 +432,19 @@ fn build_preconditioner_options(
     opts.ilu_reordering = Some("rcm".to_string());
     opts.ilu_triangular_solve = Some("gauss-seidel".to_string());
     opts.ilu_pivot_threshold = Some(1e-10);
-    opts.pc_scale = Some("both".to_string());
+    opts.pc_scale = if prep_cfg.row_scaling && prep_cfg.col_scaling {
+        Some("both".to_string())
+    } else if prep_cfg.row_scaling {
+        Some("row".to_string())
+    } else if prep_cfg.col_scaling {
+        Some("col".to_string())
+    } else {
+        None
+    };
     opts.pc_scale_norm = Some("inf".to_string());
+    if prep_cfg.nonsymmetric_matching {
+        opts.ilu_reordering = Some("amd_nonsym".to_string());
+    }
 
     match matrix_name {
         "e05r0100" if fallback_rung == Some(1) && pc == "ilut" => {
@@ -420,7 +479,7 @@ fn build_preconditioner_options(
             opts.ilu_reordering = Some("amd_nonsym".to_string());
             opts.ilu_triangular_solve = Some("exact".to_string());
             opts.ilu_pivot_threshold = Some(1e-12);
-            opts.pc_scale = Some("row".to_string());
+            opts.pc_scale = Some("both".to_string());
         }
         "fidap005" => {
             opts.ilu_type = Some("ilut".to_string());
@@ -437,7 +496,8 @@ fn build_preconditioner_options(
     if fallback_rung == Some(1) && matches!(solver, "gmres" | "fgmres") && pc == "ilut" {
         opts.ilu_type = Some("ilut".to_string());
         opts.ilu_max_fill_per_row = Some(opts.ilu_max_fill_per_row.unwrap_or(48).max(64));
-        opts.ilu_offdiag_drop_tolerance = Some(opts.ilu_offdiag_drop_tolerance.unwrap_or(1e-6).min(5e-7));
+        opts.ilu_offdiag_drop_tolerance =
+            Some(opts.ilu_offdiag_drop_tolerance.unwrap_or(1e-6).min(5e-7));
         opts.ilu_reordering_type = Some("amd".to_string());
         opts.ilu_reordering = Some("amd_nonsym".to_string());
         opts.ilu_triangular_solve = Some("exact".to_string());
@@ -457,6 +517,7 @@ fn test_optimal_solver(
     decision: &SelectionDecision,
     screen: &ScreenReport,
     matrix_name: &str,
+    prep_trace: &str,
     is_root_rank: bool,
 ) -> Result<
     (
@@ -561,10 +622,18 @@ fn test_optimal_solver(
         let meets_any_contract = rtol_ok || atol_ok;
         match reason {
             ConvergedReason::ConvergedRtol => {
-                if rtol_ok { AcceptanceStatus::Ok } else { AcceptanceStatus::ContractMismatch }
+                if rtol_ok {
+                    AcceptanceStatus::Ok
+                } else {
+                    AcceptanceStatus::ContractMismatch
+                }
             }
             ConvergedReason::ConvergedAtol => {
-                if atol_ok { AcceptanceStatus::Ok } else { AcceptanceStatus::ContractMismatch }
+                if atol_ok {
+                    AcceptanceStatus::Ok
+                } else {
+                    AcceptanceStatus::ContractMismatch
+                }
             }
             ConvergedReason::DivergedBreakdown
             | ConvergedReason::DivergedBreakdownBiCG
@@ -572,20 +641,36 @@ fn test_optimal_solver(
             | ConvergedReason::DivergedInf
             | ConvergedReason::DivergedIndefiniteMatrix
             | ConvergedReason::DivergedIndefinitePC => {
-                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Breakdown }
+                if meets_any_contract {
+                    AcceptanceStatus::OkWithWarning
+                } else {
+                    AcceptanceStatus::Breakdown
+                }
             }
             ConvergedReason::ConvergedTrustRegion | ConvergedReason::ConvergedHappyBreakdown => {
-                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::ContractMismatch }
+                if meets_any_contract {
+                    AcceptanceStatus::OkWithWarning
+                } else {
+                    AcceptanceStatus::ContractMismatch
+                }
             }
             ConvergedReason::DivergedDtol
             | ConvergedReason::DivergedMaxIts
             | ConvergedReason::StoppedByMonitor => {
-                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Stagnated }
+                if meets_any_contract {
+                    AcceptanceStatus::OkWithWarning
+                } else {
+                    AcceptanceStatus::Stagnated
+                }
             }
             ConvergedReason::DivergedPcSetupFailed
             | ConvergedReason::DivergedPcFailed
             | ConvergedReason::Continued => {
-                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Failed }
+                if meets_any_contract {
+                    AcceptanceStatus::OkWithWarning
+                } else {
+                    AcceptanceStatus::Failed
+                }
             }
         }
     }
@@ -600,7 +685,8 @@ fn test_optimal_solver(
 
     let (primary_failure, primary_reason) = match result {
         Ok(stats) => {
-            let (true_abs_res, true_rel_res) = true_residual_metrics(a_op.as_ref(), &rhs_vec, &solution);
+            let (true_abs_res, true_rel_res) =
+                true_residual_metrics(a_op.as_ref(), &rhs_vec, &solution);
             let acceptance_status = classify_acceptance(
                 stats.reason,
                 true_abs_res,
@@ -612,10 +698,11 @@ fn test_optimal_solver(
             if acceptance_status.is_accepted() {
                 let solver_reason = stats.reason.petsc_reason().to_string();
                 let reason = format!(
-                    "solver_reason={} | rung=primary | internal_classical_retry={}",
-                    solver_reason, stats.gmres_classical_retry
+                    "solver_reason={} | rung=primary | {} | internal_classical_retry={}",
+                    solver_reason, prep_trace, stats.gmres_classical_retry
                 );
-                let direct_comparison = compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &solution)?;
+                let direct_comparison =
+                    compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &solution)?;
                 return Ok((
                     primary_method,
                     "-".to_string(),
@@ -648,7 +735,10 @@ fn test_optimal_solver(
         println!("    Primary rung failed, entering fallback ladder...");
     }
 
-    let mut attempt_log = vec![format!("rung=primary [{}]: {}", primary_failure, primary_reason)];
+    let mut attempt_log = vec![format!(
+        "rung=primary [{}]: {} | {}",
+        primary_failure, primary_reason, prep_trace
+    )];
 
     for step in &decision.fallback_ladder {
         let mut sol_fb = vec![0.0; rhs.len()];
@@ -667,8 +757,9 @@ fn test_optimal_solver(
             .set_pc_type(pc_fb, fallback_opts.as_ref())?
             .set_tolerances(1e-6, 1e-12, 1e3, 1000);
         if matches!(step.solver.as_str(), "gmres" | "fgmres") {
-            let difficult_nonsymmetric =
-                !screen.symmetry_hint && screen.condition_heuristic >= 1.0e4 && !screen.spd_like_hint;
+            let difficult_nonsymmetric = !screen.symmetry_hint
+                && screen.condition_heuristic >= 1.0e4
+                && !screen.spd_like_hint;
             let mut gmres_profile = benchmark_demo_gmres_profile(difficult_nonsymmetric);
             gmres_profile.pc_side = Some("right".to_string());
             ksp_fallback.set_from_options(&gmres_profile)?;
@@ -678,7 +769,8 @@ fn test_optimal_solver(
 
         match ksp_fallback.solve(&rhs_vec, &mut sol_fb) {
             Ok(stats_fallback) => {
-                let (true_abs_res, true_rel_res) = true_residual_metrics(a_op.as_ref(), &rhs_vec, &sol_fb);
+                let (true_abs_res, true_rel_res) =
+                    true_residual_metrics(a_op.as_ref(), &rhs_vec, &sol_fb);
                 let acceptance_status = classify_acceptance(
                     stats_fallback.reason,
                     true_abs_res,
@@ -701,7 +793,8 @@ fn test_optimal_solver(
                         step.note,
                         attempt_log.join(" -> ")
                     );
-                    let direct_comparison = compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &sol_fb)?;
+                    let direct_comparison =
+                        compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &sol_fb)?;
                     return Ok((
                         primary_method,
                         fallback_method,
@@ -741,7 +834,8 @@ fn test_optimal_solver(
         {
             match dense_lu::solve(a_mat, &rhs_vec) {
                 Ok(x_direct) => {
-                    let (true_abs_res, true_rel_res) = true_residual_metrics(a_op.as_ref(), &rhs_vec, &x_direct);
+                    let (true_abs_res, true_rel_res) =
+                        true_residual_metrics(a_op.as_ref(), &rhs_vec, &x_direct);
                     let cmp = DirectReferenceComparison {
                         abs_error_norm: 0.0,
                         rel_error_norm: 0.0,
@@ -752,7 +846,11 @@ fn test_optimal_solver(
                         primary_method,
                         "R3 DIRECT_LU (truth path)".to_string(),
                         "direct_truth_path".to_string(),
-                        format!("rung=3 direct truth path selected: {} | attempted: {}", direct_policy_reason, attempt_log.join(" -> ")),
+                        format!(
+                            "rung=3 direct truth path selected: {} | attempted: {}",
+                            direct_policy_reason,
+                            attempt_log.join(" -> ")
+                        ),
                         true_abs_res,
                         true_rel_res,
                         true_abs_res,
@@ -1232,18 +1330,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-        // Keep original operator matrix; optionally build repaired matrix for preconditioner setup only.
+        // Keep original operator matrix; build a preconditioner matrix with explicit preprocessing first,
+        // then optional diagonal repair as a secondary safeguard.
         let a_op = matrix_data.to_csr_matrix()?;
-        let (p_candidate, repaired) = repair_diagonal_csr(&a_op, 1e-14, 1e-8);
-        let p_mat = if repaired > 0 {
-            Some(p_candidate)
-        } else {
-            None
+        let prep_cfg = prep_config_for(matrix_name);
+        let conditioning = ConditioningOptions {
+            scale: match (prep_cfg.row_scaling, prep_cfg.col_scaling) {
+                (true, true) => Some(ScaleDirection::Both),
+                (true, false) => Some(ScaleDirection::Row),
+                (false, true) => Some(ScaleDirection::Col),
+                (false, false) => None,
+            },
+            scale_norm: ScaleNorm::Inf,
+            ..ConditioningOptions::default()
         };
-        if is_root_rank && repaired > 0 {
-            println!(
-                "    → Preconditioner matrix repaired: {repaired} diagonal entries (|diag|<=1e-14 or missing)."
-            );
+        let reordering = ReorderingOptions {
+            kind: ReorderingKind::None,
+            symmetric: !prep_cfg.nonsymmetric_matching,
+            deterministic: true,
+        };
+        let preprocessed = apply_preconditioning_pipeline(&a_op, &conditioning, &reordering)?;
+        let (p_candidate, repaired) = repair_diagonal_csr(&preprocessed.matrix, 1e-14, 1e-8);
+        let p_mat = Some(p_candidate);
+        let prep_trace = if repaired > 0 {
+            format!(
+                "{} -> diag_repair[count={}, tol=1e-14, tau=1e-8]",
+                prep_cfg.as_trace(),
+                repaired
+            )
+        } else {
+            format!("{} -> diag_repair[count=0]", prep_cfg.as_trace())
+        };
+        if is_root_rank {
+            println!("    → Preconditioner prep: {prep_trace}.");
         }
         let rhs = rhs_data.to_vector()?;
 
@@ -1284,6 +1403,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &decision,
             &screen,
             matrix_name,
+            &prep_trace,
             is_root_rank,
         ) {
             Ok((
