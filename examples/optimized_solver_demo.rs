@@ -702,6 +702,7 @@ fn test_optimal_solver(
     matrix_name: &str,
     prep_trace: &str,
     is_root_rank: bool,
+    verbose_details: bool,
     direct_truth_policy: DirectTruthPolicy,
 ) -> Result<SolverTestResult, Box<dyn std::error::Error>> {
     let mut solution = vec![0.0; rhs.len()];
@@ -961,7 +962,7 @@ fn test_optimal_solver(
         }
     };
 
-    if is_root_rank {
+    if is_root_rank && verbose_details {
         println!("    Primary rung failed, entering fallback ladder...");
     }
 
@@ -1662,6 +1663,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let is_root_rank = is_root_rank();
     let mut selected_mode = DemoMode::Both;
+    let mut verbose_details = false;
     let mut cli_iter = std::env::args().skip(1);
     while let Some(arg) = cli_iter.next() {
         if let Some(raw) = arg.strip_prefix("--mode=") {
@@ -1673,6 +1675,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or("--mode requires a value: verify | iterative-benchmark | both")?;
             selected_mode =
                 DemoMode::from_str(&raw).map_err(|e| format!("invalid --mode argument: {e}"))?;
+        } else if arg == "--verbose-details" {
+            verbose_details = true;
         } else {
             return Err(format!("unknown argument '{arg}'").into());
         }
@@ -1695,6 +1699,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Mode selection: {:?} (supported: verify | iterative-benchmark | both)",
             selected_mode
         );
+        println!("Verbose details: {}", verbose_details);
         println!();
     }
 
@@ -1725,18 +1730,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             );
             println!(
-                "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
+                "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<26} {}",
                 "Matrix",
-                "Primary",
-                "Fallback",
-                "SolverCode",
-                "OutcomeCode",
-                "Category",
-                "Status",
-                "Iters",
-                "Performance vs Benchmark"
+                "Reference",
+                "Best iterative",
+                "Iter",
+                "TrueRelRes",
+                "RefDiff",
+                "Verdict",
+                "Benchmark delta"
             );
-            println!("{}", "=".repeat(166));
+            println!("{}", "=".repeat(128));
         }
         let mut total_rows = 0usize;
         let mut iterative_success_rows = 0usize;
@@ -1763,15 +1767,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {
                     if is_root_rank {
                         println!(
-                            "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
+                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<26} {}",
                             matrix_name,
+                            "unavailable",
                             "-",
                             "-",
-                            "N/A",
-                            "FILES_MISSING",
-                            "failed",
-                            "failed",
-                            "N/A",
+                            "-",
+                            "-",
+                            "failed: files missing",
                             "-"
                         );
                     }
@@ -1830,7 +1833,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .unwrap_or_default()
                 )
             };
-            if is_root_rank {
+            if is_root_rank && verbose_details {
                 println!("    → Preconditioner prep: {prep_trace}.");
             }
             let rhs = rhs_data.to_vector()?;
@@ -1849,8 +1852,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if a_op.nrows() > 6000 {
                 if is_root_rank {
                     println!(
-                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
-                        matrix_name, "-", "-", "N/A", "TOO_LARGE", "failed", "failed", "SKIP", "-"
+                        "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<26} {}",
+                        matrix_name, "skipped", "-", "-", "-", "-", "failed: too large", "-"
                     );
                 }
                 total_rows += 1;
@@ -1868,6 +1871,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 matrix_name,
                 &prep_trace,
                 is_root_rank,
+                verbose_details,
                 policy,
             ) {
                 Ok(test_result) => {
@@ -1875,47 +1879,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let fallback = test_result.chosen_method.as_str();
                     let solver_reason = test_result.solver_reason.as_str();
                     let outcome_code = test_result.outcome_code.as_str();
-                    let diagnostics = test_result.diagnostics.as_str();
                     let converged = test_result.converged;
                     let direct_comparison = test_result
                         .truth_reference
                         .as_ref()
                         .and_then(|truth| truth.comparison.as_ref());
                     let best_iterative = test_result.best_iterative_attempt();
-                    let best_verified = test_result.best_verified_attempt();
                     let row_category = classify_row_category(outcome_code, fallback, converged);
-                    let display_attempt = if row_category == "verified_by_direct_reference" {
-                        best_verified.or(best_iterative)
-                    } else {
-                        best_iterative
+                    let best_iter_label = best_iterative
+                        .map(|attempt| format!("{}+{}", attempt.solver, attempt.preconditioner))
+                        .unwrap_or_else(|| "-".to_string());
+                    let iter_text = best_iterative
+                        .map(|attempt| attempt.iterations.to_string())
+                        .unwrap_or_else(|| "-".to_string());
+                    let true_rel_res_text = best_iterative
+                        .map(|attempt| format!("{:.2e}", attempt.true_rel_residual))
+                        .unwrap_or_else(|| "-".to_string());
+                    let reference = test_result
+                        .truth_reference
+                        .as_ref()
+                        .map(|truth| {
+                            if truth.reference_solve_executed {
+                                "executed"
+                            } else {
+                                "side-channel"
+                            }
+                        })
+                        .unwrap_or("none");
+                    let ref_diff_text = direct_comparison
+                        .map(|cmp| format!("{:.2e}", cmp.rel_error_norm))
+                        .unwrap_or_else(|| "-".to_string());
+                    let verdict = match row_category {
+                        "iterative_accepted" => "iterative accepted".to_string(),
+                        "verified_by_direct_reference" => {
+                            "verified by direct reference".to_string()
+                        }
+                        _ => "failed".to_string(),
                     };
-                    let true_abs_res = display_attempt
-                        .map(|attempt| attempt.true_abs_residual)
-                        .unwrap_or(f64::NAN);
-                    let true_rel_res = display_attempt
-                        .map(|attempt| attempt.true_rel_residual)
-                        .unwrap_or(f64::NAN);
-                    let prec_residual = display_attempt
-                        .map(|attempt| attempt.solver_reported_residual)
-                        .unwrap_or(f64::NAN);
-                    let iters = display_attempt
-                        .map(|attempt| attempt.iterations)
-                        .unwrap_or(0);
-                    let status = display_attempt
-                        .map(|attempt| attempt.acceptance_status.as_str())
-                        .unwrap_or("failed");
-                    // Compare with benchmark expectations
-                    let iter_performance = if row_category == "verified_by_direct_reference" {
-                        "N/A (verification row)"
-                    } else if converged && iters <= decision.expected_iterations {
-                        "Better than expected"
-                    } else if converged && iters <= decision.expected_iterations * 2 {
-                        "Within expected range"
-                    } else if converged {
-                        "Slower than expected"
-                    } else {
-                        "-"
-                    };
+                    let benchmark_delta = best_iterative
+                        .map(|attempt| {
+                            let delta =
+                                attempt.iterations as isize - decision.expected_iterations as isize;
+                            if delta == 0 {
+                                "0".to_string()
+                            } else {
+                                format!("{delta:+}")
+                            }
+                        })
+                        .unwrap_or_else(|| "-".to_string());
 
                     let verified = format_direct_verification_status(
                         direct_comparison,
@@ -1924,96 +1935,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if is_root_rank {
                         println!(
-                            "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
+                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<26} {}",
                             matrix_name,
-                            primary,
-                            fallback,
-                            solver_reason,
-                            outcome_code,
-                            row_category,
-                            status,
-                            iters,
-                            iter_performance
+                            reference,
+                            best_iter_label,
+                            iter_text,
+                            true_rel_res_text,
+                            ref_diff_text,
+                            verdict,
+                            benchmark_delta
                         );
-                        if row_category == "verified_by_direct_reference" {
+                        if verbose_details {
                             println!(
-                                "    ⇢ VERIFICATION ROW: direct reference metrics are authoritative for this result."
+                                "    ↳ diagnostics: primary={primary}, fallback={fallback}, solver_code={solver_reason}, outcome={outcome_code}, ||b||={:.2e}, acceptance_threshold={:.2e}, verified={verified}",
+                                rhs_norm, acceptance_threshold
+                            );
+                            println!("    → Preprocessing trace: {prep_trace}");
+                            println!(
+                                "    → Attempted rungs: {}",
+                                test_result
+                                    .attempts
+                                    .iter()
+                                    .map(|a| format!(
+                                        "r{}:{}+{}:{}(iters={}, rel={:.2e})",
+                                        a.rung_id,
+                                        a.solver,
+                                        a.preconditioner,
+                                        a.acceptance_status,
+                                        a.iterations,
+                                        a.true_rel_residual
+                                    ))
+                                    .collect::<Vec<_>>()
+                                    .join(" | ")
+                            );
+                            if let Some(cmp) = direct_comparison {
+                                let reference_phase = if cmp.reference_solve_executed {
+                                    "executed"
+                                } else {
+                                    "skipped"
+                                };
+                                println!(
+                                    "    → Direct reference check: status={}, abs_err_norm={:.3e}, rel_diff={:.3e}, matches_verified_answer={}, policy={}",
+                                    reference_phase,
+                                    cmp.abs_error_norm,
+                                    cmp.rel_error_norm,
+                                    cmp.matches_verified_answer,
+                                    cmp.note
+                                );
+                            }
+                            println!(
+                                "    → Screening details: symmetry_hint={}, spd_like_hint={}, diagonal_healthy={}, density={:.3e}, size_class={}, cond_heuristic={:.2e}, symmetry_verdict={}",
+                                screen.symmetry_hint,
+                                screen.spd_like_hint,
+                                screen.diagonal_healthy,
+                                screen.density,
+                                screen.size_class,
+                                screen.condition_heuristic,
+                                screen.symmetry.verdict
+                            );
+                            println!("    → {}", decision.amg_status_label);
+                            println!(
+                                "    → Contract checks: {}",
+                                decision.contract_checks.join(" | ")
                             );
                         }
-                        println!(
-                            "    ↳ diagnostics: ||b||={:.2e}, acceptance_threshold=max(rtol*||b||, atol)={:.2e}, true_abs_res={:.2e}, true_rel_res={:.2e}, stats_res={:.2e}, verified={}",
-                            rhs_norm,
-                            acceptance_threshold,
-                            true_abs_res,
-                            true_rel_res,
-                            prec_residual,
-                            verified
-                        );
-                        if let Some(cmp) = direct_comparison {
-                            let reference_phase = if cmp.reference_solve_executed {
-                                "executed"
-                            } else {
-                                "skipped"
-                            };
-                            println!(
-                                "    → Direct reference check: status={}, abs_err_norm={:.3e}, rel_diff={:.3e}, matches_verified_answer={}, policy={}",
-                                reference_phase,
-                                cmp.abs_error_norm,
-                                cmp.rel_error_norm,
-                                cmp.matches_verified_answer,
-                                cmp.note
-                            );
-                        }
-                        if let Some(best) = best_iterative {
-                            println!(
-                                "    → Best iterative attempt: rung={} [{}], {} + {}, iters={}, true_rel_res={:.3e}, elapsed={:.3e}s",
-                                best.rung_id,
-                                best.rung_label,
-                                best.solver,
-                                best.preconditioner,
-                                best.iterations,
-                                best.true_rel_residual,
-                                best.elapsed_seconds
-                            );
-                            println!(
-                                "      acceptance={} ({}) | solver_status={} | preprocessing={}",
-                                best.acceptance_status,
-                                best.acceptance_reason,
-                                best.solver_reported_status,
-                                best.preprocessing_profile
-                            );
-                        }
-                        if let Some(truth) = test_result.truth_reference.as_ref() {
-                            println!(
-                                "    → Truth reference: selected_as_winner={}, executed={}, elapsed={:?}, true_abs_res={:?}, true_rel_res={:?}, note={}",
-                                truth.selected_as_winner,
-                                truth.reference_solve_executed,
-                                truth.elapsed_seconds,
-                                truth.true_abs_residual,
-                                truth.true_rel_residual,
-                                truth.note
-                            );
-                        }
-                        println!("    ↳ detail: {diagnostics}");
-                        println!(
-                            "    → Screen: symmetry_hint={}, spd_like_hint={}, diagonal_healthy={}, density={:.3e}, size_class={}, cond_heuristic={:.2e}, symmetry_verdict={}",
-                            screen.symmetry_hint,
-                            screen.spd_like_hint,
-                            screen.diagonal_healthy,
-                            screen.density,
-                            screen.size_class,
-                            screen.condition_heuristic,
-                            screen.symmetry.verdict
-                        );
-                        println!("    → {}", decision.amg_status_label);
-                        println!(
-                            "    → Decision rationale: {}",
-                            decision.rationale.join(" | ")
-                        );
-                        println!(
-                            "    → Contract checks: {}",
-                            decision.contract_checks.join(" | ")
-                        );
                     }
 
                     total_rows += 1;
@@ -2024,30 +2009,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     // Additional diagnostics for interesting cases
-                    if is_root_rank && screen.condition_heuristic >= 100.0 {
+                    if is_root_rank && verbose_details && screen.condition_heuristic >= 100.0 {
                         println!(
                             "    → Ill-conditioned matrix (est. cond. ≈ {:.1e})",
                             screen.condition_heuristic
                         );
                     }
-                    if is_root_rank && screen.density > 0.1 {
+                    if is_root_rank && verbose_details && screen.density > 0.1 {
                         println!(
                             "    → Dense matrix ({:.1}% fill) - direct methods may be preferred",
                             screen.density * 100.0
                         );
                     }
-                    if is_root_rank && converged && iters < decision.expected_iterations / 2 {
+                    if is_root_rank
+                        && verbose_details
+                        && converged
+                        && best_iterative.is_some_and(|attempt| {
+                            attempt.iterations < decision.expected_iterations / 2
+                        })
+                    {
                         println!(
                             "    → Excellent performance: {} iterations vs {} expected",
-                            iters, decision.expected_iterations
+                            best_iterative
+                                .map(|attempt| attempt.iterations)
+                                .unwrap_or(0),
+                            decision.expected_iterations
                         );
                     }
                 }
                 Err(e) => {
                     if is_root_rank {
                         println!(
-                            "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
-                            matrix_name, "-", "-", "N/A", "FAILED", "failed", "failed", "N/A", e
+                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<26} {}",
+                            matrix_name, "none", "-", "-", "-", "-", "failed", e
                         );
                     }
                     total_rows += 1;
