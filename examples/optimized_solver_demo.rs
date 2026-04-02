@@ -541,6 +541,7 @@ fn test_optimal_solver(
         String,
         String,
         String,
+        String,
         f64,
         f64,
         f64,
@@ -589,22 +590,22 @@ fn test_optimal_solver(
     fn classify_failure(msg: &str) -> &'static str {
         let m = msg.to_ascii_lowercase();
         if m.contains("contract") || m.contains("cg rejected") || m.contains("wrong method") {
-            "contract_mismatch"
+            "CONTRACT_MISMATCH"
         } else if m.contains("breakdown")
             || m.contains("nan")
             || m.contains("inf")
             || m.contains("zero pivot")
             || m.contains("singular")
         {
-            "breakdown"
+            "BREAKDOWN"
         } else if m.contains("stagnat")
             || m.contains("max iter")
             || m.contains("did not converge")
             || m.contains("no convergence")
         {
-            "stagnated"
+            "STAGNATED"
         } else {
-            "failed"
+            "FAILED"
         }
     }
 
@@ -640,6 +641,8 @@ fn test_optimal_solver(
             ConvergedReason::ConvergedRtol => {
                 if rtol_ok {
                     AcceptanceStatus::Ok
+                } else if meets_any_contract {
+                    AcceptanceStatus::OkWithWarning
                 } else {
                     AcceptanceStatus::ContractMismatch
                 }
@@ -647,6 +650,8 @@ fn test_optimal_solver(
             ConvergedReason::ConvergedAtol => {
                 if atol_ok {
                     AcceptanceStatus::Ok
+                } else if meets_any_contract {
+                    AcceptanceStatus::OkWithWarning
                 } else {
                     AcceptanceStatus::ContractMismatch
                 }
@@ -691,6 +696,28 @@ fn test_optimal_solver(
         }
     }
 
+    fn solver_reason_code(
+        reason: ConvergedReason,
+        acceptance_status: AcceptanceStatus,
+    ) -> &'static str {
+        match acceptance_status {
+            AcceptanceStatus::Ok | AcceptanceStatus::OkWithWarning => match reason {
+                ConvergedReason::ConvergedRtol => "RTOL_OK",
+                ConvergedReason::ConvergedAtol => "ATOL_OK",
+                ConvergedReason::ConvergedTrustRegion => "TRUST_REGION_OK",
+                ConvergedReason::ConvergedHappyBreakdown => "HAPPY_BREAKDOWN_OK",
+                ConvergedReason::DivergedDtol
+                | ConvergedReason::DivergedMaxIts
+                | ConvergedReason::StoppedByMonitor => "CONTRACT_OK_WARN",
+                _ => "CONTRACT_OK_WARN",
+            },
+            AcceptanceStatus::ContractMismatch => "CONTRACT_MISMATCH",
+            AcceptanceStatus::Breakdown => "BREAKDOWN",
+            AcceptanceStatus::Stagnated => "STAGNATED",
+            AcceptanceStatus::Failed => "FAILED",
+        }
+    }
+
     let primary_method = format!(
         "{} + {}",
         decision.primary_solver.to_uppercase(),
@@ -712,10 +739,12 @@ fn test_optimal_solver(
                 CONTRACT_SLACK,
             );
             if acceptance_status.is_accepted() {
-                let solver_reason = stats.reason.petsc_reason().to_string();
+                let solver_reason = solver_reason_code(stats.reason, acceptance_status).to_string();
                 let reason = format!(
                     "solver_reason={} | rung=primary | {} | internal_classical_retry={}",
-                    solver_reason, prep_trace, stats.gmres_classical_retry
+                    stats.reason.petsc_reason(),
+                    prep_trace,
+                    stats.gmres_classical_retry
                 );
                 let direct_comparison =
                     compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &solution)?;
@@ -723,6 +752,7 @@ fn test_optimal_solver(
                     primary_method,
                     "-".to_string(),
                     solver_reason,
+                    "PRIMARY_ACCEPTED".to_string(),
                     reason,
                     true_abs_res,
                     true_rel_res,
@@ -743,7 +773,7 @@ fn test_optimal_solver(
         }
         Err(primary_err) => {
             let msg = primary_err.to_string();
-            (classify_failure(&msg).to_string(), msg)
+            (classify_failure(&msg).to_ascii_uppercase(), msg)
         }
     };
 
@@ -756,6 +786,7 @@ fn test_optimal_solver(
         primary_failure, primary_reason, prep_trace
     )];
 
+    let mut fallback_contract_unmet = false;
     for step in &decision.fallback_ladder {
         let mut sol_fb = vec![0.0; rhs.len()];
         let mut ksp_fallback = KspContext::new();
@@ -802,10 +833,11 @@ fn test_optimal_solver(
                     step.pc.to_uppercase()
                 );
                 if acceptance_status.is_accepted() {
-                    let solver_reason = stats_fallback.reason.petsc_reason().to_string();
+                    let solver_reason =
+                        solver_reason_code(stats_fallback.reason, acceptance_status).to_string();
                     let reason = format!(
                         "solver_reason={} | {} | attempted: {}",
-                        solver_reason,
+                        stats_fallback.reason.petsc_reason(),
                         step.note,
                         attempt_log.join(" -> ")
                     );
@@ -815,6 +847,7 @@ fn test_optimal_solver(
                         primary_method,
                         fallback_method,
                         solver_reason,
+                        "FALLBACK_ACCEPTED".to_string(),
                         reason,
                         true_abs_res,
                         true_rel_res,
@@ -825,6 +858,8 @@ fn test_optimal_solver(
                         direct_comparison,
                     ));
                 }
+                fallback_contract_unmet |=
+                    matches!(acceptance_status, AcceptanceStatus::ContractMismatch);
                 attempt_log.push(format!(
                     "rung={} [{}]: reason={:?}, true_rel_res={:.3e}",
                     step.rung,
@@ -862,7 +897,8 @@ fn test_optimal_solver(
                     return Ok((
                         primary_method,
                         "R3 DIRECT_LU (truth path)".to_string(),
-                        "direct_truth_path".to_string(),
+                        "DIRECT_TRUTH_PATH".to_string(),
+                        "DIRECT_TRUTH_PATH".to_string(),
                         format!(
                             "rung=3 direct truth path selected: {} | attempted: {}",
                             direct_policy_reason,
@@ -890,10 +926,16 @@ fn test_optimal_solver(
         attempt_log.push(format!("rung=3 [skipped]: {}", direct_policy_reason));
     }
 
+    let terminal_reason_code = if fallback_contract_unmet {
+        "FALLBACK_CONTRACT_UNMET"
+    } else {
+        "FALLBACK_EXHAUSTED"
+    };
     Ok((
         primary_method,
         "-".to_string(),
-        "N/A".to_string(),
+        "NO_ACCEPTED_SOLVE".to_string(),
+        terminal_reason_code.to_string(),
         format!("all rungs exhausted: {}", attempt_log.join(" -> ")),
         f64::NAN,
         f64::NAN,
@@ -1291,21 +1333,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if is_root_rank {
         println!(
-            "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
+            "{:<12} {:<18} {:<18} {:<16} {:<24} {:<12} {:<8} {}",
             "Matrix",
             "Primary",
             "Fallback",
-            "SolverReason",
-            "Reason",
-            "TrueAbsRes",
-            "TrueRelRes",
-            "StatsRes",
-            "Iterations",
-            "AcceptanceStatus",
-            "Verified?",
+            "SolverCode",
+            "OutcomeCode",
+            "Status",
+            "Iters",
             "Performance vs Benchmark"
         );
-        println!("{}", "=".repeat(224));
+        println!("{}", "=".repeat(136));
     }
 
     for (matrix_name, _description) in test_matrices {
@@ -1328,19 +1366,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
-                        matrix_name,
-                        "-",
-                        "-",
-                        "-",
-                        "files_missing",
-                        "N/A",
-                        "N/A",
-                        "N/A",
-                        "N/A",
-                        "failed",
-                        "N/A",
-                        "-"
+                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<12} {:<8} {}",
+                        matrix_name, "-", "-", "N/A", "FILES_MISSING", "failed", "N/A", "-"
                     );
                 }
                 continue;
@@ -1394,19 +1421,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if a_op.nrows() > 6000 {
             if is_root_rank {
                 println!(
-                    "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
-                    matrix_name,
-                    "-",
-                    "-",
-                    "-",
-                    "too_large",
-                    "N/A",
-                    "N/A",
-                    "N/A",
-                    "SKIP",
-                    "failed",
-                    "N/A",
-                    "-"
+                    "{:<12} {:<18} {:<18} {:<16} {:<24} {:<12} {:<8} {}",
+                    matrix_name, "-", "-", "N/A", "TOO_LARGE", "failed", "SKIP", "-"
                 );
             }
             continue;
@@ -1427,7 +1443,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 primary,
                 fallback,
                 solver_reason,
-                reason,
+                outcome_code,
+                diagnostics,
                 true_abs_res,
                 true_rel_res,
                 prec_residual,
@@ -1454,19 +1471,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12.2e} {:<12.2e} {:<12.2e} {:<10} {:<18} {:<10} {}",
+                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<12} {:<8} {}",
                         matrix_name,
                         primary,
                         fallback,
                         solver_reason,
-                        reason,
-                        true_abs_res,
-                        true_rel_res,
-                        prec_residual,
-                        iters,
+                        outcome_code,
                         status,
-                        verified,
+                        iters,
                         iter_performance
+                    );
+                    println!(
+                        "    ↳ diagnostics: true_abs_res={:.2e}, true_rel_res={:.2e}, stats_res={:.2e}, verified={}",
+                        true_abs_res, true_rel_res, prec_residual, verified
                     );
                     if let Some(cmp) = direct_comparison.as_ref() {
                         let reference_phase = if cmp.reference_solve_executed {
@@ -1483,6 +1500,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             cmp.note
                         );
                     }
+                    println!("    ↳ detail: {diagnostics}");
                     println!(
                         "    → Screen: symmetry_hint={}, spd_like_hint={}, diagonal_healthy={}, density={:.3e}, size_class={}, cond_heuristic={:.2e}, symmetry_verdict={}",
                         screen.symmetry_hint,
@@ -1527,19 +1545,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => {
                 if is_root_rank {
                     println!(
-                        "{:<15} {:<22} {:<22} {:<28} {:<28} {:<12} {:<12} {:<12} {:<10} {:<18} {:<10} {}",
-                        matrix_name,
-                        "-",
-                        "-",
-                        "-",
-                        "failed",
-                        "N/A",
-                        "N/A",
-                        "N/A",
-                        "N/A",
-                        "failed",
-                        "N/A",
-                        e
+                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<12} {:<8} {}",
+                        matrix_name, "-", "-", "N/A", "FAILED", "failed", "N/A", e
                     );
                 }
             }
