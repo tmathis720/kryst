@@ -72,23 +72,23 @@ use kryst::utils::conditioning::{ConditioningOptions, ScaleDirection, ScaleNorm}
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::matrix_market::{read_matrix_market, MatrixMarketSymmetry};
+use kryst::utils::matrix_market::{MatrixMarketSymmetry, read_matrix_market};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_screening::{
-    assess_symmetry, cg_compatibility_screen, repair_diagonal_csr, SymmetryAssessment,
-    SYMMETRY_MAX_ASYMMETRY_RATE,
+    SYMMETRY_MAX_ASYMMETRY_RATE, SymmetryAssessment, assess_symmetry, cg_compatibility_screen,
+    repair_diagonal_csr,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::preconditioning_pipeline::{
-    apply_preconditioning_pipeline, PreconditioningMetadata,
+    PreconditioningMetadata, apply_preconditioning_pipeline,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::{
-    format_direct_verification_status, DirectReferenceLike, DirectVerificationCapability,
+    DirectReferenceLike, DirectVerificationCapability, format_direct_verification_status,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::str::FromStr;
@@ -100,7 +100,7 @@ use std::time::Instant;
 #[path = "support/benchmark_catalog.rs"]
 mod benchmark_catalog;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use benchmark_catalog::{compare_best_iterative, expectation_for, ComparisonConfidence};
+use benchmark_catalog::{ComparisonConfidence, compare_best_iterative, expectation_for};
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -243,6 +243,22 @@ impl SolverTestResult {
             return None;
         }
         self.best_iterative_attempt()
+    }
+
+    fn policy_rung_fidelity(&self) -> &'static str {
+        let baseline_ok = self
+            .attempts
+            .iter()
+            .any(|attempt| attempt.rung_id == 0 && attempt.accepted);
+        let rescue_ok = self
+            .attempts
+            .iter()
+            .any(|attempt| attempt.rung_id > 0 && attempt.accepted);
+        match (baseline_ok, rescue_ok) {
+            (true, _) => "baseline_ok",
+            (false, true) => "rescue_only",
+            (false, false) => "none_ok",
+        }
     }
 }
 
@@ -928,7 +944,7 @@ fn test_optimal_solver(
             );
             attempts.push(AttemptRecord {
                 rung_id: 0,
-                rung_label: "primary".to_string(),
+                rung_label: "baseline".to_string(),
                 solver: decision.primary_solver.to_uppercase(),
                 preconditioner: decision.primary_pc.to_uppercase(),
                 preprocessing_profile: prep_trace.to_string(),
@@ -944,7 +960,7 @@ fn test_optimal_solver(
             });
             if acceptance_status.is_accepted() {
                 let reason = format!(
-                    "solver_reason={} | rung=primary | {} | internal_classical_retry={}",
+                    "solver_reason={} | rung=baseline | {} | internal_classical_retry={}",
                     stats.reason.petsc_reason(),
                     prep_trace,
                     stats.gmres_classical_retry
@@ -1008,7 +1024,7 @@ fn test_optimal_solver(
     }
 
     let mut attempt_log = vec![format!(
-        "rung=primary [{}]: {} | {}",
+        "rung=baseline [{}]: {} | {}",
         primary_failure, primary_reason, prep_trace
     )];
 
@@ -1064,7 +1080,7 @@ fn test_optimal_solver(
                     solver_reason_code(stats_fallback.reason, acceptance_status).to_string();
                 attempts.push(AttemptRecord {
                     rung_id: step.rung,
-                    rung_label: format!("fallback_r{}", step.rung),
+                    rung_label: format!("rescue_{}", step.rung),
                     solver: step.solver.to_uppercase(),
                     preconditioner: step.pc.to_uppercase(),
                     preprocessing_profile: prep_trace.to_string(),
@@ -1159,7 +1175,7 @@ fn test_optimal_solver(
                 let failure = classify_failure(&fallback_err.to_string()).to_ascii_uppercase();
                 attempts.push(AttemptRecord {
                     rung_id: step.rung,
-                    rung_label: format!("fallback_r{}", step.rung),
+                    rung_label: format!("rescue_{}", step.rung),
                     solver: step.solver.to_uppercase(),
                     preconditioner: step.pc.to_uppercase(),
                     preprocessing_profile: prep_trace.to_string(),
@@ -1818,17 +1834,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             );
             println!(
-                "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<26} {}",
+                "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<14} {:<26} {}",
                 "Matrix",
                 "Reference",
                 "Best iterative",
                 "Iter",
                 "TrueRelRes",
                 "RefDiff",
+                "Policy rung",
                 "Verdict",
                 "Benchmark delta"
             );
-            println!("{}", "=".repeat(128));
+            println!("{}", "=".repeat(144));
         }
         let mut total_rows = 0usize;
         let mut iterative_success_rows = 0usize;
@@ -1855,9 +1872,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {
                     if is_root_rank {
                         println!(
-                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<26} {}",
+                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<14} {:<26} {}",
                             matrix_name,
                             "unavailable",
+                            "-",
                             "-",
                             "-",
                             "-",
@@ -1937,8 +1955,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if a_op.nrows() > 6000 {
                 if is_root_rank {
                     println!(
-                        "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<26} {}",
-                        matrix_name, "skipped", "-", "-", "-", "-", "failed: too large", "-"
+                        "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<14} {:<26} {}",
+                        matrix_name, "skipped", "-", "-", "-", "-", "-", "failed: too large", "-"
                     );
                 }
                 total_rows += 1;
@@ -2076,16 +2094,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         direct_comparison,
                         direct_verification_capability,
                     );
+                    let policy_rung = test_result.policy_rung_fidelity();
 
                     if is_root_rank {
                         println!(
-                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<26} {}",
+                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<14} {:<26} {}",
                             matrix_name,
                             reference,
                             best_iter_label,
                             iter_text,
                             true_rel_res_text,
                             ref_diff_text,
+                            policy_rung,
                             verdict,
                             benchmark_delta
                         );
@@ -2101,8 +2121,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .attempts
                                     .iter()
                                     .map(|a| format!(
-                                        "r{}:{}+{}:{}(iters={}, rel={:.2e})",
-                                        a.rung_id,
+                                        "{}:{}+{}:{}(iters={}, rel={:.2e})",
+                                        a.rung_label,
                                         a.solver,
                                         a.preconditioner,
                                         a.acceptance_status,
@@ -2185,8 +2205,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => {
                     if is_root_rank {
                         println!(
-                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<26} {}",
-                            matrix_name, "none", "-", "-", "-", "-", "failed", e
+                            "{:<12} {:<14} {:<24} {:<6} {:<12} {:<12} {:<14} {:<26} {}",
+                            matrix_name, "none", "-", "-", "-", "-", "none_ok", "failed", e
                         );
                     }
                     total_rows += 1;
