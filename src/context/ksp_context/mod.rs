@@ -91,7 +91,8 @@ use crate::solver::{
 #[cfg(feature = "complex")]
 use crate::solver::{QmrSolver, TfqmrSolver};
 use crate::utils::convergence::{
-    ConvergedReason, FailureStage, ReasonDiagnosticsCounters, ReasonEmitter, SolveStats,
+    AcceptanceStatus, ConvergedReason, FailureStage, ReasonDiagnosticsCounters, ReasonEmitter,
+    SolveStats, classify_acceptance_status,
 };
 use crate::utils::diagnostics::{KspDiagnostics, PcDiagnostics};
 use crate::utils::reduction::{ReductOptions, reduction_latency_estimate_us};
@@ -2790,6 +2791,12 @@ impl KspContext {
                     {
                         stats = stats.with_nested_pc_failure(failure);
                     }
+                    self.apply_residual_contract_classification(
+                        &mut stats,
+                        amat.as_deref(),
+                        b,
+                        Some(&err),
+                    )?;
                     let stats = stats.finalize_reason_counters();
                     self.last_converged_reason = Some(reason);
                     self.reason_counters.record_reason(reason);
@@ -2947,6 +2954,12 @@ impl KspContext {
                         {
                             stats = stats.with_nested_pc_failure(failure);
                         }
+                        self.apply_residual_contract_classification(
+                            &mut stats,
+                            Some(amat_ref),
+                            b,
+                            Some(&err),
+                        )?;
                         let stats = stats.finalize_reason_counters();
                         self.last_converged_reason = Some(reason);
                         self.reason_counters.record_reason(reason);
@@ -2961,6 +2974,7 @@ impl KspContext {
 
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
             stats.final_residual = res;
+            self.apply_residual_contract_classification(&mut stats, Some(amat_ref), b, None)?;
             let stats = stats.finalize_reason_counters();
             if let Some(inner) = stats.nested_pc_failure.as_ref() {
                 log::warn!(
@@ -3295,6 +3309,12 @@ impl KspContext {
                         {
                             stats = stats.with_nested_pc_failure(failure);
                         }
+                        self.apply_residual_contract_classification(
+                            &mut stats,
+                            Some(amat_ref),
+                            b,
+                            Some(&err),
+                        )?;
                         let stats = stats.finalize_reason_counters();
                         self.last_converged_reason = Some(reason);
                         self.reason_counters.record_reason(reason);
@@ -3309,6 +3329,7 @@ impl KspContext {
 
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
             stats.final_residual = res;
+            self.apply_residual_contract_classification(&mut stats, Some(amat_ref), b, None)?;
             let stats = stats.finalize_reason_counters();
             if let Some(inner) = stats.nested_pc_failure.as_ref() {
                 log::warn!(
@@ -3382,6 +3403,48 @@ impl KspContext {
             .cloned()
             .unwrap_or_else(|| comm.reduction_engine(w.reduction_options()));
         Ok(red.norm2_s(&w.tmp1))
+    }
+
+    fn apply_residual_contract_classification(
+        &mut self,
+        stats: &mut SolveStats<R>,
+        mat: Option<&dyn LinOp<S = S>>,
+        b: &[S],
+        source_err: Option<&KError>,
+    ) -> Result<(), KError> {
+        let bnorm = if let Some(mat) = mat {
+            let comm = mat.comm();
+            if let Some(work) = self.work.as_ref() {
+                let red = work
+                    .reduction_engine()
+                    .cloned()
+                    .unwrap_or_else(|| comm.reduction_engine(work.reduction_options()));
+                red.norm2_s(b)
+            } else {
+                comm.reduction_engine(&self.reduction_opts).norm2_s(b)
+            }
+        } else {
+            R::default()
+        };
+        let tol = self.atol.max(self.rtol * bnorm).real();
+        let true_res = stats.final_residual.real();
+        let acceptance = classify_acceptance_status(stats.reason, true_res, tol);
+        stats.acceptance_status = acceptance;
+
+        if stats.reason.is_diverged() || matches!(acceptance, AcceptanceStatus::OkWithWarning) {
+            stats.breakdown_reason = Some(stats.reason);
+        }
+        if matches!(acceptance, AcceptanceStatus::OkWithWarning) {
+            let mut note = format!(
+                "true_residual={true_res:.6e} <= max(atol, rtol*||b||)={tol:.6e}; accepted_with_warning from {}",
+                stats.reason.petsc_reason()
+            );
+            if let Some(err) = source_err {
+                note.push_str(&format!("; source_error={err}"));
+            }
+            stats.residual_override_note = Some(note);
+        }
+        Ok(())
     }
 
     fn invalidate_solver_setup(&mut self) {
@@ -4091,6 +4154,10 @@ mod tests {
     use crate::matrix::utils::poisson_2d;
     use crate::preconditioner::PcSide;
     #[cfg(not(feature = "complex"))]
+    use crate::utils::convergence::AcceptanceStatus;
+    #[cfg(not(feature = "complex"))]
+    use crate::utils::matrix_market::read_matrix_market;
+    #[cfg(not(feature = "complex"))]
     use faer::Mat;
     use std::sync::{
         Arc,
@@ -4104,6 +4171,20 @@ mod tests {
         sym_ct: Arc<AtomicUsize>,
         num_ct: Arc<AtomicUsize>,
         supports_num: bool,
+    }
+
+    #[cfg(not(feature = "complex"))]
+    struct BreakdownApplyPc;
+
+    #[cfg(not(feature = "complex"))]
+    impl Preconditioner for BreakdownApplyPc {
+        fn setup(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
+            Ok(())
+        }
+
+        fn apply(&self, _side: PcSide, _x: &[S], _y: &mut [S]) -> Result<(), KError> {
+            Err(KError::BreakdownOrIndefinite)
+        }
     }
 
     impl Preconditioner for CountingPc {
@@ -5013,6 +5094,75 @@ mod tests {
                 let msg = err.to_string().to_lowercase();
                 assert!(msg.contains("stage 0"));
                 assert!(msg.contains("amg"));
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "complex"))]
+    fn solve_breakdown_reason_can_be_accepted_with_true_residual_override() {
+        let a = Mat::<R>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Gmres).unwrap();
+        ksp.set_operators(Arc::new(a), None);
+        ksp.set_pc_box_for_tests(Box::new(BreakdownApplyPc));
+        ksp.setup().expect("setup");
+
+        let b = vec![1.0, -2.0];
+        let mut x = b.clone();
+        let stats = ksp.solve(&b, &mut x).expect("solve");
+
+        assert_eq!(stats.reason, ConvergedReason::DivergedBreakdown);
+        assert_eq!(stats.acceptance_status, AcceptanceStatus::OkWithWarning);
+        assert_eq!(
+            stats.breakdown_reason,
+            Some(ConvergedReason::DivergedBreakdown)
+        );
+        assert!(
+            stats
+                .residual_override_note
+                .as_deref()
+                .unwrap_or("")
+                .contains("accepted_with_warning")
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "complex"))]
+    fn bicgstab_add20_breakdown_prone_case_reports_transparent_diagnostics() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/mtx");
+        let matrix = read_matrix_market(root.join("add20.mtx")).expect("read add20 matrix");
+        let rhs = read_matrix_market(root.join("add20_rhs1.mtx")).expect("read add20 rhs");
+        let a = Arc::new(CsrOp::<R>::new(Arc::new(
+            matrix.to_csr_matrix().expect("add20 to csr"),
+        )));
+        let b = rhs
+            .values
+            .iter()
+            .copied()
+            .map(S::from_real)
+            .collect::<Vec<_>>();
+        let mut x = vec![S::zero(); b.len()];
+
+        let mut ksp = KspContext::new();
+        ksp.set_operators(a, None);
+        ksp.set_type(SolverType::BiCgStab).expect("set type");
+        ksp.rtol = 1e-8;
+        ksp.atol = 1e-12;
+        ksp.maxits = 500;
+        let opts = KspOptions {
+            bicgstab_variant: Some("lowsync".into()),
+            ..Default::default()
+        };
+        ksp.set_from_options(&opts).expect("set opts");
+        ksp.setup().expect("setup");
+
+        let stats = ksp.solve(&b, &mut x).expect("solve");
+        assert!(stats.final_residual.is_finite());
+        if stats.reason.is_diverged() {
+            assert_eq!(stats.breakdown_reason, Some(stats.reason));
+            if matches!(stats.acceptance_status, AcceptanceStatus::OkWithWarning) {
+                assert!(stats.residual_override_note.is_some());
             }
         }
     }
