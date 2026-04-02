@@ -414,6 +414,46 @@ fn prep_config_for(matrix_name: &str) -> PreconditionerPrepConfig {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn select_reordering_for_preprocessing(
+    prep_cfg: &PreconditionerPrepConfig,
+    a_mat: &CsrMatrix<f64>,
+) -> (ReorderingOptions, String, Option<String>) {
+    if prep_cfg.nonsymmetric_matching {
+        if a_mat.nrows() == a_mat.ncols() {
+            let mode = ReorderingOptions {
+                kind: ReorderingKind::Amd,
+                symmetric: false,
+                deterministic: true,
+            };
+            return (mode, "amd_nonsym(transversal+amd)".to_string(), None);
+        }
+        let fallback = ReorderingOptions {
+            kind: ReorderingKind::None,
+            symmetric: true,
+            deterministic: true,
+        };
+        return (
+            fallback,
+            "none".to_string(),
+            Some(
+                "requested nonsymmetric matching is unavailable for non-square matrices; falling back to none"
+                    .to_string(),
+            ),
+        );
+    }
+
+    (
+        ReorderingOptions {
+            kind: ReorderingKind::None,
+            symmetric: true,
+            deterministic: true,
+        },
+        "none".to_string(),
+        None,
+    )
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn build_preconditioner_options(
     matrix_name: &str,
     solver: &str,
@@ -1390,22 +1430,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             scale_norm: ScaleNorm::Inf,
             ..ConditioningOptions::default()
         };
-        let reordering = ReorderingOptions {
-            kind: ReorderingKind::None,
-            symmetric: !prep_cfg.nonsymmetric_matching,
-            deterministic: true,
-        };
+        let (reordering, reordering_trace, mut fallback_note) =
+            select_reordering_for_preprocessing(&prep_cfg, &a_op);
         let preprocessed = apply_preconditioning_pipeline(&a_op, &conditioning, &reordering)?;
         let (p_candidate, repaired) = repair_diagonal_csr(&preprocessed.matrix, 1e-14, 1e-8);
         let p_mat = Some(p_candidate);
+        if prep_cfg.nonsymmetric_matching && preprocessed.metadata.matched_pairs.is_none() {
+            fallback_note = Some(
+                "requested nonsymmetric matching is unavailable for this build/matrix path; fell back without matching"
+                    .to_string(),
+            );
+        }
         let prep_trace = if repaired > 0 {
             format!(
-                "{} -> diag_repair[count={}, tol=1e-14, tau=1e-8]",
+                "{} -> reorder[kind={}, symmetric={}]{} -> diag_repair[count={}, tol=1e-14, tau=1e-8]",
                 prep_cfg.as_trace(),
+                reordering_trace,
+                reordering.symmetric,
+                fallback_note
+                    .as_ref()
+                    .map(|note| format!(" -> note[{note}]"))
+                    .unwrap_or_default(),
                 repaired
             )
         } else {
-            format!("{} -> diag_repair[count=0]", prep_cfg.as_trace())
+            format!(
+                "{} -> reorder[kind={}, symmetric={}]{} -> diag_repair[count=0]",
+                prep_cfg.as_trace(),
+                reordering_trace,
+                reordering.symmetric,
+                fallback_note
+                    .as_ref()
+                    .map(|note| format!(" -> note[{note}]"))
+                    .unwrap_or_default()
+            )
         };
         if is_root_rank {
             println!("    → Preconditioner prep: {prep_trace}.");
