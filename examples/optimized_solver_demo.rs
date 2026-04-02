@@ -70,7 +70,6 @@ use kryst::utils::conditioning::analyze_csr;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::conditioning::{ConditioningOptions, ScaleDirection, ScaleNorm};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_market::{MatrixMarketSymmetry, read_matrix_market};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -88,7 +87,12 @@ use kryst::utils::preconditioning_pipeline::{
 use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::{
-    DirectReferenceLike, DirectVerificationCapability, format_direct_verification_status,
+    AcceptanceContract, AcceptanceStatus, AttemptRecord, DirectReferenceComparison,
+    DirectReferencePolicyInput,
+    DirectVerificationCapability, FallbackStep, SolverTestResult, TruthReference,
+    classify_acceptance, classify_failure, direct_reference_policy,
+    execute_fallback_ladder, format_direct_verification_status,
+    global_direct_reference_policy_allows, render_attempt_chain, solver_reason_code,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::str::FromStr;
@@ -137,15 +141,6 @@ struct SelectionDecision {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-#[derive(Clone, Debug)]
-struct FallbackStep {
-    solver: String,
-    pc: String,
-    rung: usize,
-    note: String,
-}
-
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JacobiStrengthMode {
     Plain,
@@ -165,117 +160,6 @@ enum AmgMode {
 struct AmgDecision {
     mode: AmgMode,
     reason: String,
-}
-
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-#[derive(Clone, Debug)]
-struct DirectReferenceComparison {
-    abs_error_norm: f64,
-    rel_error_norm: f64,
-    matches_verified_answer: bool,
-    reference_solve_executed: bool,
-    elapsed_seconds: Option<f64>,
-    note: String,
-}
-
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-#[derive(Clone, Debug)]
-struct AttemptRecord {
-    rung_id: usize,
-    rung_label: String,
-    solver: String,
-    preconditioner: String,
-    preprocessing_profile: String,
-    iterations: usize,
-    true_abs_residual: f64,
-    true_rel_residual: f64,
-    solver_reported_residual: f64,
-    solver_reported_status: String,
-    acceptance_status: String,
-    acceptance_reason: String,
-    elapsed_seconds: f64,
-    accepted: bool,
-}
-
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-#[derive(Clone, Debug)]
-struct TruthReference {
-    selected_as_winner: bool,
-    reference_solve_executed: bool,
-    elapsed_seconds: Option<f64>,
-    true_abs_residual: Option<f64>,
-    true_rel_residual: Option<f64>,
-    comparison: Option<DirectReferenceComparison>,
-    note: String,
-}
-
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-#[derive(Clone, Debug)]
-struct SolverTestResult {
-    primary_method: String,
-    chosen_method: String,
-    solver_reason: String,
-    outcome_code: String,
-    diagnostics: String,
-    converged: bool,
-    attempts: Vec<AttemptRecord>,
-    truth_reference: Option<TruthReference>,
-}
-
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-impl SolverTestResult {
-    fn baseline_attempt(&self) -> Option<&AttemptRecord> {
-        self.attempts.iter().find(|attempt| attempt.rung_id == 0)
-    }
-
-    fn best_iterative_attempt(&self) -> Option<&AttemptRecord> {
-        self.attempts
-            .iter()
-            .filter(|attempt| attempt.accepted)
-            .min_by(|a, b| {
-                a.iterations
-                    .cmp(&b.iterations)
-                    .then_with(|| a.true_rel_residual.total_cmp(&b.true_rel_residual))
-            })
-    }
-
-    fn best_verified_attempt(&self) -> Option<&AttemptRecord> {
-        if self
-            .truth_reference
-            .as_ref()
-            .is_some_and(|truth| truth.selected_as_winner)
-        {
-            return None;
-        }
-        self.best_iterative_attempt()
-    }
-
-    fn policy_rung_fidelity(&self) -> &'static str {
-        let baseline_ok = self
-            .attempts
-            .iter()
-            .any(|attempt| attempt.rung_id == 0 && attempt.accepted);
-        let rescue_ok = self
-            .attempts
-            .iter()
-            .any(|attempt| attempt.rung_id > 0 && attempt.accepted);
-        match (baseline_ok, rescue_ok) {
-            (true, _) => "baseline_ok",
-            (false, true) => "rescue_only",
-            (false, false) => "none_ok",
-        }
-    }
-}
-
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-impl DirectReferenceLike for DirectReferenceComparison {
-    fn matches_verified_answer(&self) -> bool {
-        self.matches_verified_answer
-    }
-
-    fn policy_note(&self) -> &str {
-        &self.note
-    }
 }
 
 /// Get the optimal solver configuration for a specific matrix
@@ -339,58 +223,6 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             amg_nonsymmetric_override: false,
         },
     }
-}
-
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-fn direct_reference_policy(a_mat: &CsrMatrix<f64>) -> (bool, String) {
-    const ALWAYS_DIRECT_MAX_N: usize = 512;
-    const MODERATE_DENSITY_MAX_N: usize = 1024;
-    const MODERATE_DENSITY_THRESHOLD: f64 = 0.05;
-    let n = a_mat.nrows().max(a_mat.ncols());
-    let density = a_mat.nnz() as f64 / (a_mat.nrows() * a_mat.ncols()) as f64;
-    let env_override = std::env::var("KRYST_ENABLE_DIRECT_REFERENCE")
-        .ok()
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
-    match env_override {
-        Some(true) => (true, "env override: forced on".to_string()),
-        Some(false) => (false, "env override: forced off".to_string()),
-        None if n <= ALWAYS_DIRECT_MAX_N => (
-            true,
-            format!(
-                "auto: n={} <= {} (always direct-reference band)",
-                n, ALWAYS_DIRECT_MAX_N
-            ),
-        ),
-        None if n <= MODERATE_DENSITY_MAX_N && density >= MODERATE_DENSITY_THRESHOLD => (
-            true,
-            format!(
-                "auto: n={} in ({}, {}] and density {:.3e} >= {:.3e}",
-                n, ALWAYS_DIRECT_MAX_N, MODERATE_DENSITY_MAX_N, density, MODERATE_DENSITY_THRESHOLD
-            ),
-        ),
-        None if n <= MODERATE_DENSITY_MAX_N => (
-            false,
-            format!(
-                "auto skip: n={} in ({}, {}] but density {:.3e} < {:.3e}",
-                n, ALWAYS_DIRECT_MAX_N, MODERATE_DENSITY_MAX_N, density, MODERATE_DENSITY_THRESHOLD
-            ),
-        ),
-        None => (
-            false,
-            format!(
-                "auto skip: n={} > {} (explicit opt-in required for large matrices)",
-                n, MODERATE_DENSITY_MAX_N
-            ),
-        ),
-    }
-}
-
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-fn global_direct_reference_policy_allows() -> bool {
-    !matches!(
-        std::env::var("KRYST_ENABLE_DIRECT_REFERENCE").as_deref(),
-        Ok("0" | "false" | "FALSE" | "no" | "NO")
-    )
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -460,7 +292,11 @@ fn compare_with_direct_reference(
     rhs: &[f64],
     iterative_solution: &[f64],
 ) -> Result<Option<DirectReferenceComparison>, Box<dyn std::error::Error>> {
-    let (enabled, mut policy_note) = direct_reference_policy(a_mat);
+    let (enabled, mut policy_note) = direct_reference_policy(DirectReferencePolicyInput {
+        nrows: a_mat.nrows(),
+        ncols: a_mat.ncols(),
+        nnz: a_mat.nnz(),
+    });
     let force_direct = is_forced_direct_reference_matrix(matrix_name);
     if force_direct {
         policy_note =
@@ -495,24 +331,14 @@ fn compare_with_direct_reference(
         }
         let reference_elapsed = started.elapsed().as_secs_f64();
 
-        let mut diff_sq = 0.0;
-        let mut ref_sq = 0.0;
-        for (&x_it, &x_ref) in iterative_solution.iter().zip(reference_solution.iter()) {
-            let d = x_it - x_ref;
-            diff_sq += d * d;
-            ref_sq += x_ref * x_ref;
-        }
-        let abs_error_norm = diff_sq.sqrt();
-        let rel_error_norm = abs_error_norm / ref_sq.sqrt().max(1e-32);
-        let matches_verified_answer = rel_error_norm <= 1e-6;
-        return Ok(Some(DirectReferenceComparison {
-            abs_error_norm,
-            rel_error_norm,
-            matches_verified_answer,
-            reference_solve_executed: true,
-            elapsed_seconds: Some(reference_elapsed),
-            note: policy_note,
-        }));
+        let mut comparison = kryst::utils::compare_solution_vectors(
+            iterative_solution,
+            &reference_solution,
+            1e-6,
+            policy_note,
+        );
+        comparison.elapsed_seconds = Some(reference_elapsed);
+        return Ok(Some(comparison));
     }
 
     #[cfg(not(feature = "dense-direct"))]
@@ -749,7 +575,7 @@ fn test_optimal_solver(
     is_root_rank: bool,
     verbose_details: bool,
     direct_truth_policy: DirectTruthPolicy,
-) -> Result<SolverTestResult, Box<dyn std::error::Error>> {
+) -> Result<SolverTestResult<DirectReferenceComparison>, Box<dyn std::error::Error>> {
     let iterative_benchmark_mode = !direct_truth_policy.allow_truth_path_winner;
     let mut solution = vec![0.0; rhs.len()];
     let csr_a_matrix = Arc::new(a_mat.clone());
@@ -786,28 +612,6 @@ fn test_optimal_solver(
     const CONTRACT_ATOL: f64 = 1e-12;
     const CONTRACT_SLACK: f64 = 1.05;
 
-    fn classify_failure(msg: &str) -> &'static str {
-        let m = msg.to_ascii_lowercase();
-        if m.contains("contract") || m.contains("cg rejected") || m.contains("wrong method") {
-            "CONTRACT_MISMATCH"
-        } else if m.contains("breakdown")
-            || m.contains("nan")
-            || m.contains("inf")
-            || m.contains("zero pivot")
-            || m.contains("singular")
-        {
-            "BREAKDOWN"
-        } else if m.contains("stagnat")
-            || m.contains("max iter")
-            || m.contains("did not converge")
-            || m.contains("no convergence")
-        {
-            "STAGNATED"
-        } else {
-            "FAILED"
-        }
-    }
-
     fn true_residual_metrics(
         a_op: &dyn LinOp<S = f64>,
         rhs: &[f64],
@@ -825,98 +629,6 @@ fn test_optimal_solver(
         (true_abs_res, true_rel_res)
     }
 
-    fn classify_acceptance(
-        reason: ConvergedReason,
-        true_abs_res: f64,
-        true_rel_res: f64,
-        rtol: f64,
-        atol: f64,
-        slack: f64,
-    ) -> AcceptanceStatus {
-        let rtol_ok = true_rel_res.is_finite() && true_rel_res <= rtol * slack;
-        let atol_ok = true_abs_res.is_finite() && true_abs_res <= atol * slack;
-        let meets_any_contract = rtol_ok || atol_ok;
-        match reason {
-            ConvergedReason::ConvergedRtol => {
-                if rtol_ok {
-                    AcceptanceStatus::Ok
-                } else if meets_any_contract {
-                    AcceptanceStatus::OkWithWarning
-                } else {
-                    AcceptanceStatus::ContractMismatch
-                }
-            }
-            ConvergedReason::ConvergedAtol => {
-                if atol_ok {
-                    AcceptanceStatus::Ok
-                } else if meets_any_contract {
-                    AcceptanceStatus::OkWithWarning
-                } else {
-                    AcceptanceStatus::ContractMismatch
-                }
-            }
-            ConvergedReason::DivergedBreakdown
-            | ConvergedReason::DivergedBreakdownBiCG
-            | ConvergedReason::DivergedNan
-            | ConvergedReason::DivergedInf
-            | ConvergedReason::DivergedIndefiniteMatrix
-            | ConvergedReason::DivergedIndefinitePC => {
-                if meets_any_contract {
-                    AcceptanceStatus::OkWithWarning
-                } else {
-                    AcceptanceStatus::Breakdown
-                }
-            }
-            ConvergedReason::ConvergedTrustRegion | ConvergedReason::ConvergedHappyBreakdown => {
-                if meets_any_contract {
-                    AcceptanceStatus::OkWithWarning
-                } else {
-                    AcceptanceStatus::ContractMismatch
-                }
-            }
-            ConvergedReason::DivergedDtol
-            | ConvergedReason::DivergedMaxIts
-            | ConvergedReason::StoppedByMonitor => {
-                if meets_any_contract {
-                    AcceptanceStatus::OkWithWarning
-                } else {
-                    AcceptanceStatus::Stagnated
-                }
-            }
-            ConvergedReason::DivergedPcSetupFailed
-            | ConvergedReason::DivergedPcFailed
-            | ConvergedReason::Continued => {
-                if meets_any_contract {
-                    AcceptanceStatus::OkWithWarning
-                } else {
-                    AcceptanceStatus::Failed
-                }
-            }
-        }
-    }
-
-    fn solver_reason_code(
-        reason: ConvergedReason,
-        acceptance_status: AcceptanceStatus,
-    ) -> &'static str {
-        match acceptance_status {
-            AcceptanceStatus::Ok | AcceptanceStatus::OkWithWarning => match reason {
-                ConvergedReason::ConvergedRtol => "RTOL_OK",
-                ConvergedReason::ConvergedAtol => "ATOL_OK",
-                ConvergedReason::ConvergedTrustRegion => "TRUST_REGION_OK",
-                ConvergedReason::ConvergedHappyBreakdown => "HAPPY_BREAKDOWN_OK",
-                ConvergedReason::DivergedDtol
-                | ConvergedReason::DivergedMaxIts
-                | ConvergedReason::StoppedByMonitor => "CONTRACT_OK_WARN",
-                _ => "CONTRACT_OK_WARN",
-            },
-            AcceptanceStatus::ContractMismatch => "CONTRACT_MISMATCH",
-            AcceptanceStatus::Breakdown => "BREAKDOWN",
-            AcceptanceStatus::Stagnated => "STAGNATED",
-            AcceptanceStatus::Failed => "FAILED",
-        }
-    }
-
     let primary_method = format!(
         "{} + {}",
         decision.primary_solver.to_uppercase(),
@@ -930,7 +642,7 @@ fn test_optimal_solver(
     let mut best_iterative_iterations: Option<usize> = None;
     let mut best_iterative_rel_residual: Option<f64> = None;
     let mut attempts = Vec::<AttemptRecord>::new();
-    let mut truth_reference: Option<TruthReference> = None;
+    let mut truth_reference: Option<TruthReference<DirectReferenceComparison>> = None;
     let solve_started = Instant::now();
     let result = ksp.solve(&rhs_vec, &mut solution);
     let solve_elapsed = solve_started.elapsed().as_secs_f64();
@@ -943,9 +655,11 @@ fn test_optimal_solver(
                 stats.reason,
                 true_abs_res,
                 true_rel_res,
-                CONTRACT_RTOL,
-                CONTRACT_ATOL,
-                CONTRACT_SLACK,
+                AcceptanceContract {
+                    rtol: CONTRACT_RTOL,
+                    atol: CONTRACT_ATOL,
+                    slack: CONTRACT_SLACK,
+                },
             );
             let solver_reason = solver_reason_code(stats.reason, acceptance_status).to_string();
             let acceptance_reason = format!(
@@ -1041,7 +755,12 @@ fn test_optimal_solver(
     )];
 
     let mut fallback_contract_unmet = false;
-    for step in &decision.fallback_ladder {
+    for (_, step_result) in
+        execute_fallback_ladder(&decision.fallback_ladder, |step: &FallbackStep| {
+            Ok::<FallbackStep, ()>(step.clone())
+        })
+    {
+        let step = step_result.expect("cloned fallback step");
         let mut sol_fb = vec![0.0; rhs.len()];
         let mut ksp_fallback = KspContext::new();
         let st_fb = SolverType::from_str(&step.solver)?;
@@ -1078,9 +797,11 @@ fn test_optimal_solver(
                     stats_fallback.reason,
                     true_abs_res,
                     true_rel_res,
-                    CONTRACT_RTOL,
-                    CONTRACT_ATOL,
-                    CONTRACT_SLACK,
+                    AcceptanceContract {
+                        rtol: CONTRACT_RTOL,
+                        atol: CONTRACT_ATOL,
+                        slack: CONTRACT_SLACK,
+                    },
                 );
                 let fallback_method = format!(
                     "R{} {} + {}",
@@ -1212,7 +933,12 @@ fn test_optimal_solver(
         }
     }
 
-    let (allow_direct, direct_policy_reason) = direct_reference_policy(a_mat);
+    let (allow_direct, direct_policy_reason) =
+        direct_reference_policy(DirectReferencePolicyInput {
+            nrows: a_mat.nrows(),
+            ncols: a_mat.ncols(),
+            nnz: a_mat.nnz(),
+        });
     if allow_direct && direct_truth_policy.allow_truth_path_winner {
         #[cfg(feature = "dense-direct")]
         {
@@ -2172,21 +1898,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("    → Preprocessing trace: {prep_trace}");
                             println!(
                                 "    → Attempted rungs: {}",
-                                test_result
-                                    .attempts
-                                    .iter()
-                                    .map(|a| format!(
-                                        "{}:{}+{}:{}(iters={}, rel={:.2e}, time={})",
-                                        a.rung_label,
-                                        a.solver,
-                                        a.preconditioner,
-                                        a.acceptance_status,
-                                        a.iterations,
-                                        a.true_rel_residual,
-                                        format_elapsed_ms(Some(a.elapsed_seconds))
-                                    ))
-                                    .collect::<Vec<_>>()
-                                    .join(" | ")
+                                render_attempt_chain(&test_result.attempts)
                             );
                             if let Some(cmp) = direct_comparison {
                                 let reference_phase = if cmp.reference_solve_executed {
