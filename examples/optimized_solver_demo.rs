@@ -1886,15 +1886,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .and_then(|truth| truth.comparison.as_ref());
                     let best_iterative = test_result.best_iterative_attempt();
                     let row_category = classify_row_category(outcome_code, fallback, converged);
-                    let best_iter_label = best_iterative
-                        .map(|attempt| format!("{}+{}", attempt.solver, attempt.preconditioner))
-                        .unwrap_or_else(|| "-".to_string());
-                    let iter_text = best_iterative
-                        .map(|attempt| attempt.iterations.to_string())
-                        .unwrap_or_else(|| "-".to_string());
-                    let true_rel_res_text = best_iterative
-                        .map(|attempt| format!("{:.2e}", attempt.true_rel_residual))
-                        .unwrap_or_else(|| "-".to_string());
+                    let iterative_row = row_category == "iterative_accepted";
+                    let best_iter_label = if iterative_row {
+                        best_iterative
+                            .map(|attempt| format!("{}+{}", attempt.solver, attempt.preconditioner))
+                            .unwrap_or_else(|| "-".to_string())
+                    } else {
+                        "N/A".to_string()
+                    };
+                    let iter_text = if iterative_row {
+                        best_iterative
+                            .map(|attempt| attempt.iterations.to_string())
+                            .unwrap_or_else(|| "-".to_string())
+                    } else {
+                        "N/A".to_string()
+                    };
+                    let true_rel_res_text = if iterative_row {
+                        best_iterative
+                            .map(|attempt| format!("{:.2e}", attempt.true_rel_residual))
+                            .unwrap_or_else(|| "-".to_string())
+                    } else {
+                        "N/A".to_string()
+                    };
                     let reference = test_result
                         .truth_reference
                         .as_ref()
@@ -1916,17 +1929,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         _ => "failed".to_string(),
                     };
-                    let benchmark_delta = best_iterative
-                        .map(|attempt| {
-                            let delta =
-                                attempt.iterations as isize - decision.expected_iterations as isize;
-                            if delta == 0 {
-                                "0".to_string()
-                            } else {
-                                format!("{delta:+}")
-                            }
-                        })
-                        .unwrap_or_else(|| "-".to_string());
+                    let benchmark_delta = if iterative_row {
+                        best_iterative
+                            .map(|attempt| {
+                                let delta = attempt.iterations as isize
+                                    - decision.expected_iterations as isize;
+                                if delta == 0 {
+                                    "0".to_string()
+                                } else {
+                                    format!("{delta:+}")
+                                }
+                            })
+                            .unwrap_or_else(|| "-".to_string())
+                    } else {
+                        "N/A".to_string()
+                    };
 
                     let verified = format_direct_verification_status(
                         direct_comparison,
@@ -2023,6 +2040,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if is_root_rank
                         && verbose_details
+                        && iterative_row
                         && converged
                         && best_iterative.is_some_and(|attempt| {
                             attempt.iterations < decision.expected_iterations / 2
