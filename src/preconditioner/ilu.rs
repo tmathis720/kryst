@@ -55,7 +55,7 @@ use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*, tri_solve:
 use crate::utils::conditioning::{ConditioningOptions, apply_dense_transforms};
 use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
-use crate::utils::permutation::{Permutation, amd_from_adj, rcm_from_adj};
+use crate::utils::permutation::{Permutation, amd_from_adj, permutation_from_order, rcm_from_adj};
 use faer::Mat;
 use std::collections::{BTreeMap, HashMap};
 #[cfg(feature = "rayon")]
@@ -472,8 +472,10 @@ pub struct Ilu {
     /// Permutation arrays (HYPRE: perm, qperm)
     #[allow(dead_code)]
     row_perm: Vec<usize>,
+    row_perm_inv: Vec<usize>,
     #[allow(dead_code)]
     col_perm: Vec<usize>,
+    col_perm_inv: Vec<usize>,
     /// Consolidated preallocated workspace vectors for all operations
     workspace: IluWorkspace,
     #[cfg(feature = "rayon")]
@@ -676,7 +678,9 @@ impl Ilu {
             u: CsrMatrix::from_csr(0, 0, vec![0], Vec::new(), Vec::new()),
             inv_diag_u: Vec::new(),
             row_perm: Vec::new(),
+            row_perm_inv: Vec::new(),
             col_perm: Vec::new(),
+            col_perm_inv: Vec::new(),
             workspace: IluWorkspace::new(0),
             #[cfg(feature = "rayon")]
             levels_l: Levels::default(),
@@ -1315,33 +1319,134 @@ impl Ilu {
         Ok(())
     }
 
-    /// Compute the preprocessing permutation used by ILU(k)/ILUT setup.
-    fn compute_factor_permutation(&self, matrix: &Mat<f64>) -> Permutation {
+    fn compose_perm(new_then_old: &Permutation, old: &Permutation) -> Permutation {
+        let n = old.len();
+        let p: Vec<usize> = (0..n).map(|i| old.p[new_then_old.p[i]]).collect();
+        let mut pinv = vec![0usize; n];
+        for (new_i, &old_i) in p.iter().enumerate() {
+            pinv[old_i] = new_i;
+        }
+        Permutation { p, pinv }
+    }
+
+    fn maximum_transversal_permutations(matrix: &Mat<f64>) -> (Permutation, Permutation) {
         let n = matrix.nrows();
+        let mut row_order: Vec<usize> = (0..n).collect();
+        row_order.sort_unstable_by(|&a, &b| {
+            let aa = matrix[(a, a)].abs();
+            let bb = matrix[(b, b)].abs();
+            aa.partial_cmp(&bb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.cmp(&b))
+        });
+
+        let mut row_neighbors = vec![Vec::<usize>::new(); n];
+        for i in 0..n {
+            for j in 0..n {
+                if matrix[(i, j)] != 0.0 {
+                    row_neighbors[i].push(j);
+                }
+            }
+            row_neighbors[i].sort_unstable_by(|&a, &b| {
+                let aa = matrix[(i, a)].abs();
+                let bb = matrix[(i, b)].abs();
+                bb.partial_cmp(&aa)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.cmp(&b))
+            });
+        }
+
+        fn dfs_augment(
+            r: usize,
+            seen: &mut [bool],
+            row_neighbors: &[Vec<usize>],
+            col_match: &mut [Option<usize>],
+        ) -> bool {
+            for &c in &row_neighbors[r] {
+                if seen[c] {
+                    continue;
+                }
+                seen[c] = true;
+                let can_claim = match col_match[c] {
+                    None => true,
+                    Some(prev_r) => dfs_augment(prev_r, seen, row_neighbors, col_match),
+                };
+                if can_claim {
+                    col_match[c] = Some(r);
+                    return true;
+                }
+            }
+            false
+        }
+
+        let mut col_match = vec![None; n];
+        for &r in &row_order {
+            let mut seen = vec![false; n];
+            let _ = dfs_augment(r, &mut seen, &row_neighbors, &mut col_match);
+        }
+
+        let mut row_to_col = vec![None; n];
+        for (c, &r) in col_match.iter().enumerate() {
+            if let Some(rr) = r {
+                row_to_col[rr] = Some(c);
+            }
+        }
+
+        let mut free_cols: Vec<usize> = (0..n).filter(|&c| col_match[c].is_none()).collect();
+        let mut pairs = Vec::with_capacity(n);
+        for (r, maybe_c) in row_to_col.iter().enumerate().take(n) {
+            let c = maybe_c.unwrap_or_else(|| free_cols.pop().unwrap_or(r));
+            pairs.push((r, c));
+        }
+        pairs.sort_unstable_by_key(|&(_r, c)| c);
+
+        let row_order: Vec<usize> = pairs.iter().map(|&(r, _)| r).collect();
+        let col_order: Vec<usize> = pairs.iter().map(|&(_, c)| c).collect();
+        (
+            permutation_from_order(row_order),
+            permutation_from_order(col_order),
+        )
+    }
+
+    /// Compute the preprocessing permutation used by ILU(k)/ILUT setup.
+    fn compute_factor_permutations(&self, matrix: &Mat<f64>) -> (Permutation, Permutation) {
+        let n = matrix.nrows();
+        let (mut row_perm, mut col_perm) = Self::maximum_transversal_permutations(matrix);
+        let matched = Self::permute_dense_nonsymmetric(matrix, &row_perm, &col_perm);
+
         let mut adj = vec![Vec::new(); n];
         for i in 0..n {
             for j in (i + 1)..n {
-                if matrix[(i, j)] != 0.0 || matrix[(j, i)] != 0.0 {
+                if matched[(i, j)] != 0.0 || matched[(j, i)] != 0.0 {
                     adj[i].push(j);
                     adj[j].push(i);
                 }
             }
         }
 
-        match self.config.reordering_type {
-            ReorderingType::None | ReorderingType::Natural => Permutation::identity(n),
-            ReorderingType::RCM => rcm_from_adj(&mut adj),
-            ReorderingType::AMD => amd_from_adj(&mut adj),
+        let reorder = match self.config.reordering_type {
+            ReorderingType::None | ReorderingType::Natural => None,
+            ReorderingType::RCM => Some(rcm_from_adj(&mut adj)),
+            ReorderingType::AMD => Some(amd_from_adj(&mut adj)),
+        };
+        if let Some(sym) = reorder {
+            row_perm = Self::compose_perm(&sym, &row_perm);
+            col_perm = Self::compose_perm(&sym, &col_perm);
         }
+        (row_perm, col_perm)
     }
 
-    fn permute_dense_symmetric(matrix: &Mat<f64>, perm: &Permutation) -> Mat<f64> {
+    fn permute_dense_nonsymmetric(
+        matrix: &Mat<f64>,
+        row_perm: &Permutation,
+        col_perm: &Permutation,
+    ) -> Mat<f64> {
         let n = matrix.nrows();
         let mut result = Mat::zeros(n, n);
         for i in 0..n {
-            let old_i = perm.p[i];
+            let old_i = row_perm.p[i];
             for j in 0..n {
-                let old_j = perm.p[j];
+                let old_j = col_perm.p[j];
                 result[(i, j)] = matrix[(old_i, old_j)];
             }
         }
@@ -1377,10 +1482,12 @@ impl Ilu {
     /// cause quadratic memory growth and quickly become the setup bottleneck for demo ladders.
     fn compute_iluk(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
         let n = matrix.nrows();
-        let perm = self.compute_factor_permutation(matrix);
-        self.row_perm = perm.p.clone();
-        self.col_perm = perm.p.clone();
-        let factor_matrix = Self::permute_dense_symmetric(matrix, &perm);
+        let (row_perm, col_perm) = self.compute_factor_permutations(matrix);
+        self.row_perm = row_perm.p.clone();
+        self.row_perm_inv = row_perm.pinv.clone();
+        self.col_perm = col_perm.p.clone();
+        self.col_perm_inv = col_perm.pinv.clone();
+        let factor_matrix = Self::permute_dense_nonsymmetric(matrix, &row_perm, &col_perm);
         let lfill = self.config.level_of_fill;
 
         let mut l_rows = vec![BTreeMap::<usize, f64>::new(); n];
@@ -1520,10 +1627,12 @@ impl Ilu {
     /// remain practical on large sparse matrices.
     fn compute_ilut(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
         let n = matrix.nrows();
-        let perm = self.compute_factor_permutation(matrix);
-        self.row_perm = perm.p.clone();
-        self.col_perm = perm.p.clone();
-        let factor_matrix = Self::permute_dense_symmetric(matrix, &perm);
+        let (row_perm, col_perm) = self.compute_factor_permutations(matrix);
+        self.row_perm = row_perm.p.clone();
+        self.row_perm_inv = row_perm.pinv.clone();
+        self.col_perm = col_perm.p.clone();
+        self.col_perm_inv = col_perm.pinv.clone();
+        let factor_matrix = Self::permute_dense_nonsymmetric(matrix, &row_perm, &col_perm);
         let drop_tol: f64 = self.config.drop_tolerance;
         let max_fill = self.config.max_fill_per_row;
 
@@ -2396,6 +2505,10 @@ impl Preconditioner<Mat<f64>, Vec<f64>> for Ilu {
         self.running_max_u = Real::default();
         self.pivot_stats = PivotStats::default();
         self.history = None;
+        self.row_perm = (0..n).collect();
+        self.row_perm_inv = (0..n).collect();
+        self.col_perm = (0..n).collect();
+        self.col_perm_inv = (0..n).collect();
 
         #[cfg(feature = "logging")]
         if self.config.logging_level > 0 {
@@ -2535,8 +2648,9 @@ impl Ilu {
         }
 
         let _timer = SolveTimer::start(&self.solve_ctrs);
-        let has_perm =
-            !self.row_perm.is_empty() && self.row_perm.iter().enumerate().any(|(i, &p)| i != p);
+        let has_perm = !self.row_perm.is_empty()
+            && (self.row_perm.iter().enumerate().any(|(i, &p)| i != p)
+                || self.col_perm.iter().enumerate().any(|(i, &p)| i != p));
 
         if has_perm {
             let mut perm_in = self.workspace.borrow_solve_buf(n);
@@ -2567,7 +2681,7 @@ impl Ilu {
             }
 
             for old_i in 0..n {
-                y[old_i] = solve_out[self.col_perm[old_i]];
+                y[old_i] = solve_out[self.col_perm_inv[old_i]];
             }
             return Ok(());
         }
@@ -2714,6 +2828,7 @@ mod tests {
     use crate::algebra::parallel::par_sum_abs2_local;
     use crate::algebra::prelude::*;
     use crate::error::KError;
+    use crate::matrix::sparse::CsrMatrix;
     use crate::preconditioner::PcSide;
     use crate::preconditioner::legacy::Preconditioner;
     #[cfg(not(feature = "complex"))]
@@ -3004,6 +3119,41 @@ mod tests {
         use crate::preconditioner::legacy::Preconditioner;
         let result = ilu.setup(&matrix);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_matching_permutation_strengthens_diagonal() {
+        let matrix = faer::Mat::from_fn(3, 3, |i, j| match (i, j) {
+            (0, 1) => 2.0,
+            (1, 0) => 3.0,
+            (2, 2) => 4.0,
+            _ => 0.0,
+        });
+        let (row_perm, col_perm) = Ilu::maximum_transversal_permutations(&matrix);
+        let permuted = Ilu::permute_dense_nonsymmetric(&matrix, &row_perm, &col_perm);
+        for i in 0..3 {
+            assert_ne!(permuted[(i, i)], 0.0, "diagonal entry at {i} should be nonzero");
+        }
+    }
+
+    #[test]
+    fn test_apply_respects_distinct_row_col_permutations() {
+        let mut ilu = Ilu::new();
+        ilu.l = CsrMatrix::from_csr(2, 2, vec![0, 1, 2], vec![0, 1], vec![1.0, 1.0]);
+        ilu.u = CsrMatrix::from_csr(2, 2, vec![0, 1, 2], vec![0, 1], vec![1.0, 1.0]);
+        ilu.inv_diag_u = vec![1.0, 1.0];
+        ilu.row_perm = vec![1, 0];
+        ilu.row_perm_inv = vec![1, 0];
+        ilu.col_perm = vec![0, 1];
+        ilu.col_perm_inv = vec![0, 1];
+        ilu.setup_workspace(2);
+
+        let x = vec![2.0, 5.0];
+        let mut y = vec![0.0; 2];
+        use crate::preconditioner::legacy::Preconditioner;
+        ilu.apply(PcSide::Left, &x, &mut y)
+            .expect("apply with nonsymmetric mapping should succeed");
+        assert_eq!(y, vec![5.0, 2.0]);
     }
 
     #[cfg(not(feature = "complex"))]
