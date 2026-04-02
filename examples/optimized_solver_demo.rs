@@ -94,6 +94,11 @@ use std::str::FromStr;
 use std::sync::Arc;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::time::Instant;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[path = "support/benchmark_catalog.rs"]
+mod benchmark_catalog;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use benchmark_catalog::{ComparisonConfidence, compare_best_iterative, expectation_for};
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -1932,12 +1937,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let benchmark_delta = if iterative_row {
                         best_iterative
                             .map(|attempt| {
-                                let delta = attempt.iterations as isize
-                                    - decision.expected_iterations as isize;
-                                if delta == 0 {
-                                    "0".to_string()
+                                if let Some(catalog_delta) = compare_best_iterative(
+                                    matrix_name,
+                                    &attempt.solver,
+                                    &attempt.preconditioner,
+                                    attempt.iterations,
+                                    attempt.accepted,
+                                ) {
+                                    let expectation = expectation_for(matrix_name)
+                                        .expect("benchmark catalog entry should exist");
+                                    let method = if catalog_delta.method_family_match {
+                                        "method=match"
+                                    } else {
+                                        "method=mismatch"
+                                    };
+                                    let range_status = if attempt.iterations
+                                        < expectation.iteration_range.min
+                                    {
+                                        format!(
+                                            "iter=below({:+})",
+                                            catalog_delta.iteration_delta_low
+                                        )
+                                    } else if attempt.iterations > expectation.iteration_range.max
+                                    {
+                                        format!(
+                                            "iter=above({:+})",
+                                            catalog_delta.iteration_delta_high
+                                        )
+                                    } else {
+                                        "iter=in-range(0)".to_string()
+                                    };
+                                    let tolerance = if catalog_delta.tolerance_pass {
+                                        "tol=pass"
+                                    } else {
+                                        "tol=fail"
+                                    };
+                                    let confidence = match expectation.confidence {
+                                        ComparisonConfidence::Exact => "exact",
+                                        ComparisonConfidence::Approximate => "approx",
+                                    };
+                                    let time_note = expectation
+                                        .time_note
+                                        .map(|note| format!("; note={note}"))
+                                        .unwrap_or_default();
+                                    format!(
+                                        "{method}; {range_status}; {tolerance}; conf={confidence}{time_note}"
+                                    )
                                 } else {
-                                    format!("{delta:+}")
+                                    "catalog=missing".to_string()
                                 }
                             })
                             .unwrap_or_else(|| "-".to_string())
