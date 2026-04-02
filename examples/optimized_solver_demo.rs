@@ -92,6 +92,8 @@ use kryst::utils::{
 use std::str::FromStr;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use std::time::Instant;
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -159,12 +161,82 @@ struct AmgDecision {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[derive(Clone, Debug)]
 struct DirectReferenceComparison {
     abs_error_norm: f64,
     rel_error_norm: f64,
     matches_verified_answer: bool,
     reference_solve_executed: bool,
     note: String,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[derive(Clone, Debug)]
+struct AttemptRecord {
+    rung_id: usize,
+    rung_label: String,
+    solver: String,
+    preconditioner: String,
+    preprocessing_profile: String,
+    iterations: usize,
+    true_abs_residual: f64,
+    true_rel_residual: f64,
+    solver_reported_residual: f64,
+    solver_reported_status: String,
+    acceptance_status: String,
+    acceptance_reason: String,
+    elapsed_seconds: f64,
+    accepted: bool,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[derive(Clone, Debug)]
+struct TruthReference {
+    selected_as_winner: bool,
+    reference_solve_executed: bool,
+    elapsed_seconds: Option<f64>,
+    true_abs_residual: Option<f64>,
+    true_rel_residual: Option<f64>,
+    comparison: Option<DirectReferenceComparison>,
+    note: String,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[derive(Clone, Debug)]
+struct SolverTestResult {
+    primary_method: String,
+    chosen_method: String,
+    solver_reason: String,
+    outcome_code: String,
+    diagnostics: String,
+    converged: bool,
+    attempts: Vec<AttemptRecord>,
+    truth_reference: Option<TruthReference>,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+impl SolverTestResult {
+    fn best_iterative_attempt(&self) -> Option<&AttemptRecord> {
+        self.attempts
+            .iter()
+            .filter(|attempt| attempt.accepted)
+            .min_by(|a, b| {
+                a.iterations
+                    .cmp(&b.iterations)
+                    .then_with(|| a.true_rel_residual.total_cmp(&b.true_rel_residual))
+            })
+    }
+
+    fn best_verified_attempt(&self) -> Option<&AttemptRecord> {
+        if self
+            .truth_reference
+            .as_ref()
+            .is_some_and(|truth| truth.selected_as_winner)
+        {
+            return None;
+        }
+        self.best_iterative_attempt()
+    }
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -631,23 +703,7 @@ fn test_optimal_solver(
     prep_trace: &str,
     is_root_rank: bool,
     direct_truth_policy: DirectTruthPolicy,
-) -> Result<
-    (
-        String,
-        String,
-        String,
-        String,
-        String,
-        f64,
-        f64,
-        f64,
-        usize,
-        String,
-        bool,
-        Option<DirectReferenceComparison>,
-    ),
-    Box<dyn std::error::Error>,
-> {
+) -> Result<SolverTestResult, Box<dyn std::error::Error>> {
     let mut solution = vec![0.0; rhs.len()];
     let csr_a_matrix = Arc::new(a_mat.clone());
     let a_op: Arc<dyn LinOp<S = f64>> = Arc::new(CsrOp::new(Arc::clone(&csr_a_matrix)));
@@ -819,8 +875,11 @@ fn test_optimal_solver(
         decision.primary_solver.to_uppercase(),
         decision.primary_pc.to_uppercase()
     );
-
+    let mut attempts = Vec::<AttemptRecord>::new();
+    let mut truth_reference: Option<TruthReference> = None;
+    let solve_started = Instant::now();
     let result = ksp.solve(&rhs_vec, &mut solution);
+    let solve_elapsed = solve_started.elapsed().as_secs_f64();
 
     let (primary_failure, primary_reason) = match result {
         Ok(stats) => {
@@ -834,30 +893,59 @@ fn test_optimal_solver(
                 CONTRACT_ATOL,
                 CONTRACT_SLACK,
             );
+            let solver_reason = solver_reason_code(stats.reason, acceptance_status).to_string();
+            let acceptance_reason = format!(
+                "solver_reason={} | internal_classical_retry={}",
+                stats.reason.petsc_reason(),
+                stats.gmres_classical_retry
+            );
+            attempts.push(AttemptRecord {
+                rung_id: 0,
+                rung_label: "primary".to_string(),
+                solver: decision.primary_solver.to_uppercase(),
+                preconditioner: decision.primary_pc.to_uppercase(),
+                preprocessing_profile: prep_trace.to_string(),
+                iterations: stats.iterations,
+                true_abs_residual: true_abs_res,
+                true_rel_residual: true_rel_res,
+                solver_reported_residual: stats.final_residual,
+                solver_reported_status: solver_reason.clone(),
+                acceptance_status: acceptance_status.as_str().to_string(),
+                acceptance_reason: acceptance_reason.clone(),
+                elapsed_seconds: solve_elapsed,
+                accepted: acceptance_status.is_accepted(),
+            });
             if acceptance_status.is_accepted() {
-                let solver_reason = solver_reason_code(stats.reason, acceptance_status).to_string();
                 let reason = format!(
                     "solver_reason={} | rung=primary | {} | internal_classical_retry={}",
                     stats.reason.petsc_reason(),
                     prep_trace,
                     stats.gmres_classical_retry
                 );
-                let direct_comparison =
-                    compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &solution)?;
-                return Ok((
+                truth_reference = Some(TruthReference {
+                    selected_as_winner: false,
+                    reference_solve_executed: false,
+                    elapsed_seconds: None,
+                    true_abs_residual: None,
+                    true_rel_residual: None,
+                    comparison: compare_with_direct_reference(
+                        matrix_name,
+                        a_mat,
+                        &rhs_vec,
+                        &solution,
+                    )?,
+                    note: "iterative winner with direct-reference side-channel check".to_string(),
+                });
+                return Ok(SolverTestResult {
                     primary_method,
-                    "-".to_string(),
+                    chosen_method: "-".to_string(),
                     solver_reason,
-                    "PRIMARY_ACCEPTED".to_string(),
-                    reason,
-                    true_abs_res,
-                    true_rel_res,
-                    stats.final_residual,
-                    stats.iterations,
-                    acceptance_status.as_str().to_string(),
-                    true,
-                    direct_comparison,
-                ));
+                    outcome_code: "PRIMARY_ACCEPTED".to_string(),
+                    diagnostics: reason,
+                    converged: true,
+                    attempts,
+                    truth_reference,
+                });
             }
             (
                 acceptance_status.as_str().to_string(),
@@ -910,8 +998,10 @@ fn test_optimal_solver(
         ksp_fallback.set_operators(Arc::clone(&a_op), p_op.clone());
         ksp_fallback.setup()?;
 
+        let fallback_started = Instant::now();
         match ksp_fallback.solve(&rhs_vec, &mut sol_fb) {
             Ok(stats_fallback) => {
+                let fallback_elapsed = fallback_started.elapsed().as_secs_f64();
                 let (true_abs_res, true_rel_res) =
                     true_residual_metrics(a_op.as_ref(), &rhs_vec, &sol_fb);
                 let acceptance_status = classify_acceptance(
@@ -928,31 +1018,60 @@ fn test_optimal_solver(
                     step.solver.to_uppercase(),
                     step.pc.to_uppercase()
                 );
+                let solver_reason =
+                    solver_reason_code(stats_fallback.reason, acceptance_status).to_string();
+                attempts.push(AttemptRecord {
+                    rung_id: step.rung,
+                    rung_label: format!("fallback_r{}", step.rung),
+                    solver: step.solver.to_uppercase(),
+                    preconditioner: step.pc.to_uppercase(),
+                    preprocessing_profile: prep_trace.to_string(),
+                    iterations: stats_fallback.iterations,
+                    true_abs_residual: true_abs_res,
+                    true_rel_residual: true_rel_res,
+                    solver_reported_residual: stats_fallback.final_residual,
+                    solver_reported_status: solver_reason.clone(),
+                    acceptance_status: acceptance_status.as_str().to_string(),
+                    acceptance_reason: format!(
+                        "solver_reason={} | {}",
+                        stats_fallback.reason.petsc_reason(),
+                        step.note
+                    ),
+                    elapsed_seconds: fallback_elapsed,
+                    accepted: acceptance_status.is_accepted(),
+                });
                 if acceptance_status.is_accepted() {
-                    let solver_reason =
-                        solver_reason_code(stats_fallback.reason, acceptance_status).to_string();
                     let reason = format!(
                         "solver_reason={} | {} | attempted: {}",
                         stats_fallback.reason.petsc_reason(),
                         step.note,
                         attempt_log.join(" -> ")
                     );
-                    let direct_comparison =
-                        compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &sol_fb)?;
-                    return Ok((
+                    truth_reference = Some(TruthReference {
+                        selected_as_winner: false,
+                        reference_solve_executed: false,
+                        elapsed_seconds: None,
+                        true_abs_residual: None,
+                        true_rel_residual: None,
+                        comparison: compare_with_direct_reference(
+                            matrix_name,
+                            a_mat,
+                            &rhs_vec,
+                            &sol_fb,
+                        )?,
+                        note: "iterative winner with direct-reference side-channel check"
+                            .to_string(),
+                    });
+                    return Ok(SolverTestResult {
                         primary_method,
-                        fallback_method,
+                        chosen_method: fallback_method,
                         solver_reason,
-                        "FALLBACK_ACCEPTED".to_string(),
-                        reason,
-                        true_abs_res,
-                        true_rel_res,
-                        stats_fallback.final_residual,
-                        stats_fallback.iterations,
-                        acceptance_status.as_str().to_string(),
-                        true,
-                        direct_comparison,
-                    ));
+                        outcome_code: "FALLBACK_ACCEPTED".to_string(),
+                        diagnostics: reason,
+                        converged: true,
+                        attempts,
+                        truth_reference,
+                    });
                 }
                 fallback_contract_unmet |=
                     matches!(acceptance_status, AcceptanceStatus::ContractMismatch);
@@ -965,6 +1084,24 @@ fn test_optimal_solver(
                 ));
             }
             Err(fallback_err) => {
+                let fallback_elapsed = fallback_started.elapsed().as_secs_f64();
+                let failure = classify_failure(&fallback_err.to_string()).to_ascii_uppercase();
+                attempts.push(AttemptRecord {
+                    rung_id: step.rung,
+                    rung_label: format!("fallback_r{}", step.rung),
+                    solver: step.solver.to_uppercase(),
+                    preconditioner: step.pc.to_uppercase(),
+                    preprocessing_profile: prep_trace.to_string(),
+                    iterations: 0,
+                    true_abs_residual: f64::NAN,
+                    true_rel_residual: f64::NAN,
+                    solver_reported_residual: f64::NAN,
+                    solver_reported_status: failure.clone(),
+                    acceptance_status: "failed".to_string(),
+                    acceptance_reason: fallback_err.to_string(),
+                    elapsed_seconds: fallback_elapsed,
+                    accepted: false,
+                });
                 attempt_log.push(format!(
                     "rung={} [{}]: {}",
                     step.rung,
@@ -981,8 +1118,10 @@ fn test_optimal_solver(
         {
             let dense_mat = a_mat.to_dense()?;
             let mut x_direct = vec![0.0; rhs_vec.len()];
+            let direct_started = Instant::now();
             match dense_lu::solve(&dense_mat, &rhs_vec, &mut x_direct) {
                 Ok(()) => {
+                    let direct_elapsed = direct_started.elapsed().as_secs_f64();
                     let (true_abs_res, true_rel_res) =
                         true_residual_metrics(a_op.as_ref(), &rhs_vec, &x_direct);
                     let cmp = DirectReferenceComparison {
@@ -992,41 +1131,85 @@ fn test_optimal_solver(
                         reference_solve_executed: true,
                         note: format!("truth_path: {direct_policy_reason}"),
                     };
-                    return Ok((
+                    truth_reference = Some(TruthReference {
+                        selected_as_winner: true,
+                        reference_solve_executed: true,
+                        elapsed_seconds: Some(direct_elapsed),
+                        true_abs_residual: Some(true_abs_res),
+                        true_rel_residual: Some(true_rel_res),
+                        comparison: Some(cmp),
+                        note: format!("truth_path: {direct_policy_reason}"),
+                    });
+                    return Ok(SolverTestResult {
                         primary_method,
-                        "R3 DIRECT_LU (truth path)".to_string(),
-                        "DIRECT_TRUTH_PATH".to_string(),
-                        "DIRECT_TRUTH_PATH".to_string(),
-                        format!(
+                        chosen_method: "R3 DIRECT_LU (truth path)".to_string(),
+                        solver_reason: "DIRECT_TRUTH_PATH".to_string(),
+                        outcome_code: "DIRECT_TRUTH_PATH".to_string(),
+                        diagnostics: format!(
                             "rung=3 direct truth path selected: {} | attempted: {}",
                             direct_policy_reason,
                             attempt_log.join(" -> ")
                         ),
-                        true_abs_res,
-                        true_rel_res,
-                        true_abs_res,
-                        0,
-                        "ok_with_warning".to_string(),
-                        true,
-                        Some(cmp),
-                    ));
+                        converged: true,
+                        attempts,
+                        truth_reference,
+                    });
                 }
                 Err(err) => {
                     attempt_log.push(format!("rung=3 [failed]: direct LU error: {err}"));
+                    truth_reference = Some(TruthReference {
+                        selected_as_winner: false,
+                        reference_solve_executed: false,
+                        elapsed_seconds: Some(direct_started.elapsed().as_secs_f64()),
+                        true_abs_residual: None,
+                        true_rel_residual: None,
+                        comparison: None,
+                        note: format!("truth_path attempted but failed: {err}"),
+                    });
                 }
             }
         }
         #[cfg(not(feature = "dense-direct"))]
         {
             attempt_log.push("rung=3 [failed]: dense-direct feature disabled".to_string());
+            truth_reference = Some(TruthReference {
+                selected_as_winner: false,
+                reference_solve_executed: false,
+                elapsed_seconds: None,
+                true_abs_residual: None,
+                true_rel_residual: None,
+                comparison: None,
+                note: "truth_path unavailable: dense-direct feature disabled".to_string(),
+            });
         }
     } else if allow_direct && !direct_truth_policy.allow_truth_path_winner {
         attempt_log.push(format!(
             "rung=3 [suppressed]: mode={} keeps direct reference as side-channel only ({})",
             direct_truth_policy.mode_label, direct_policy_reason
         ));
+        truth_reference = Some(TruthReference {
+            selected_as_winner: false,
+            reference_solve_executed: false,
+            elapsed_seconds: None,
+            true_abs_residual: None,
+            true_rel_residual: None,
+            comparison: None,
+            note: format!(
+                "truth_path suppressed by mode={} ({})",
+                direct_truth_policy.mode_label, direct_policy_reason
+            ),
+        });
     } else {
         attempt_log.push(format!("rung=3 [skipped]: {}", direct_policy_reason));
+        truth_reference = Some(TruthReference {
+            selected_as_winner: false,
+            reference_solve_executed: false,
+            elapsed_seconds: None,
+            true_abs_residual: None,
+            true_rel_residual: None,
+            comparison: None,
+            note: format!("truth_path skipped: {direct_policy_reason}"),
+        });
     }
 
     let terminal_reason_code = if fallback_contract_unmet {
@@ -1034,20 +1217,16 @@ fn test_optimal_solver(
     } else {
         "FALLBACK_EXHAUSTED"
     };
-    Ok((
+    Ok(SolverTestResult {
         primary_method,
-        "-".to_string(),
-        "NO_ACCEPTED_SOLVE".to_string(),
-        terminal_reason_code.to_string(),
-        format!("all rungs exhausted: {}", attempt_log.join(" -> ")),
-        f64::NAN,
-        f64::NAN,
-        f64::NAN,
-        0,
-        "failed".to_string(),
-        false,
-        None,
-    ))
+        chosen_method: "-".to_string(),
+        solver_reason: "NO_ACCEPTED_SOLVE".to_string(),
+        outcome_code: terminal_reason_code.to_string(),
+        diagnostics: format!("all rungs exhausted: {}", attempt_log.join(" -> ")),
+        converged: false,
+        attempts,
+        truth_reference,
+    })
 }
 
 #[cfg(not(feature = "complex"))]
@@ -1691,21 +1870,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 is_root_rank,
                 policy,
             ) {
-                Ok((
-                    primary,
-                    fallback,
-                    solver_reason,
-                    outcome_code,
-                    diagnostics,
-                    true_abs_res,
-                    true_rel_res,
-                    prec_residual,
-                    iters,
-                    status,
-                    converged,
-                    direct_comparison,
-                )) => {
-                    let row_category = classify_row_category(&outcome_code, &fallback, converged);
+                Ok(test_result) => {
+                    let primary = test_result.primary_method.as_str();
+                    let fallback = test_result.chosen_method.as_str();
+                    let solver_reason = test_result.solver_reason.as_str();
+                    let outcome_code = test_result.outcome_code.as_str();
+                    let diagnostics = test_result.diagnostics.as_str();
+                    let converged = test_result.converged;
+                    let direct_comparison = test_result
+                        .truth_reference
+                        .as_ref()
+                        .and_then(|truth| truth.comparison.as_ref());
+                    let best_iterative = test_result.best_iterative_attempt();
+                    let best_verified = test_result.best_verified_attempt();
+                    let row_category = classify_row_category(outcome_code, fallback, converged);
+                    let display_attempt = if row_category == "verified_by_direct_reference" {
+                        best_verified.or(best_iterative)
+                    } else {
+                        best_iterative
+                    };
+                    let true_abs_res = display_attempt
+                        .map(|attempt| attempt.true_abs_residual)
+                        .unwrap_or(f64::NAN);
+                    let true_rel_res = display_attempt
+                        .map(|attempt| attempt.true_rel_residual)
+                        .unwrap_or(f64::NAN);
+                    let prec_residual = display_attempt
+                        .map(|attempt| attempt.solver_reported_residual)
+                        .unwrap_or(f64::NAN);
+                    let iters = display_attempt
+                        .map(|attempt| attempt.iterations)
+                        .unwrap_or(0);
+                    let status = display_attempt
+                        .map(|attempt| attempt.acceptance_status.as_str())
+                        .unwrap_or("failed");
                     // Compare with benchmark expectations
                     let iter_performance = if row_category == "verified_by_direct_reference" {
                         "N/A (verification row)"
@@ -1720,7 +1918,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
 
                     let verified = format_direct_verification_status(
-                        direct_comparison.as_ref(),
+                        direct_comparison,
                         direct_verification_capability,
                     );
 
@@ -1751,7 +1949,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             prec_residual,
                             verified
                         );
-                        if let Some(cmp) = direct_comparison.as_ref() {
+                        if let Some(cmp) = direct_comparison {
                             let reference_phase = if cmp.reference_solve_executed {
                                 "executed"
                             } else {
@@ -1764,6 +1962,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 cmp.rel_error_norm,
                                 cmp.matches_verified_answer,
                                 cmp.note
+                            );
+                        }
+                        if let Some(best) = best_iterative {
+                            println!(
+                                "    → Best iterative attempt: rung={} [{}], {} + {}, iters={}, true_rel_res={:.3e}, elapsed={:.3e}s",
+                                best.rung_id,
+                                best.rung_label,
+                                best.solver,
+                                best.preconditioner,
+                                best.iterations,
+                                best.true_rel_residual,
+                                best.elapsed_seconds
+                            );
+                            println!(
+                                "      acceptance={} ({}) | solver_status={} | preprocessing={}",
+                                best.acceptance_status,
+                                best.acceptance_reason,
+                                best.solver_reported_status,
+                                best.preprocessing_profile
+                            );
+                        }
+                        if let Some(truth) = test_result.truth_reference.as_ref() {
+                            println!(
+                                "    → Truth reference: selected_as_winner={}, executed={}, elapsed={:?}, true_abs_res={:?}, true_rel_res={:?}, note={}",
+                                truth.selected_as_winner,
+                                truth.reference_solve_executed,
+                                truth.elapsed_seconds,
+                                truth.true_abs_residual,
+                                truth.true_rel_residual,
+                                truth.note
                             );
                         }
                         println!("    ↳ detail: {diagnostics}");
