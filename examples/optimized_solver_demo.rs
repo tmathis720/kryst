@@ -883,8 +883,10 @@ fn test_optimal_solver(
     if allow_direct {
         #[cfg(feature = "dense-direct")]
         {
-            match dense_lu::solve(a_mat, &rhs_vec) {
-                Ok(x_direct) => {
+            let dense_mat = a_mat.to_dense()?;
+            let mut x_direct = vec![0.0; rhs_vec.len()];
+            match dense_lu::solve(&dense_mat, &rhs_vec, &mut x_direct) {
+                Ok(()) => {
                     let (true_abs_res, true_rel_res) =
                         true_residual_metrics(a_op.as_ref(), &rhs_vec, &x_direct);
                     let cmp = DirectReferenceComparison {
