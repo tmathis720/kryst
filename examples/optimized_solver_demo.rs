@@ -51,7 +51,6 @@ use std::str::FromStr;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::sync::Arc;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use std::time::Instant;
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::config::options::PcOptions;
@@ -97,7 +96,6 @@ struct OptimalConfig {
     _description: &'static str,
     expected_iterations: usize,
     fallback_solver: &'static str,
-    fallback_pc: &'static str,
     amg_nonsymmetric_override: bool,
 }
 
@@ -116,13 +114,21 @@ struct ScreenReport {
 struct SelectionDecision {
     primary_solver: String,
     primary_pc: String,
-    fallback_solver: String,
-    fallback_pc: String,
+    fallback_ladder: Vec<FallbackStep>,
     rationale: Vec<String>,
     contract_checks: Vec<String>,
     expected_iterations: usize,
     amg_mode: AmgMode,
     amg_status_label: String,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[derive(Clone, Debug)]
+struct FallbackStep {
+    solver: String,
+    pc: String,
+    rung: usize,
+    note: String,
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -176,7 +182,6 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             _description: "CG (AMG) - use default AMG only when SPD-like checks pass",
             expected_iterations: 100,
             fallback_solver: "gmres",
-            fallback_pc: "ilu",
             amg_nonsymmetric_override: false,
         },
         "e05r0100" => OptimalConfig {
@@ -185,7 +190,6 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             _description: "GMRES (no precond) - benchmark baseline for E05r0100",
             expected_iterations: 250,
             fallback_solver: "bicgstab",
-            fallback_pc: "ilut",
             amg_nonsymmetric_override: false,
         },
         "fidap001" => OptimalConfig {
@@ -194,7 +198,6 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             _description: "GMRES (ILUT) - nonsymmetric-safe structural default",
             expected_iterations: 500,
             fallback_solver: "bicgstab",
-            fallback_pc: "jacobi",
             amg_nonsymmetric_override: false,
         },
         "sherman3" => OptimalConfig {
@@ -203,7 +206,6 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             _description: "GMRES (ILU) - benchmark-preferred for Sherman3",
             expected_iterations: 50,
             fallback_solver: "bicgstab",
-            fallback_pc: "ilut",
             amg_nonsymmetric_override: false,
         },
         "add20" => OptimalConfig {
@@ -212,7 +214,6 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             _description: "CG (ILU) - benchmark-preferred for Add20",
             expected_iterations: 10,
             fallback_solver: "bicgstab",
-            fallback_pc: "ilu",
             amg_nonsymmetric_override: false,
         },
         "memplus" => OptimalConfig {
@@ -221,7 +222,6 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             _description: "BiCGStab (ILU) - benchmark-preferred for Memplus",
             expected_iterations: 10,
             fallback_solver: "gmres",
-            fallback_pc: "ilu",
             amg_nonsymmetric_override: false,
         },
         _ => OptimalConfig {
@@ -230,7 +230,6 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
             _description: "GMRES (ILUT) - general nonsymmetric-safe sparse default",
             expected_iterations: 500,
             fallback_solver: "bicgstab",
-            fallback_pc: "jacobi",
             amg_nonsymmetric_override: false,
         },
     }
@@ -357,7 +356,7 @@ fn build_preconditioner_options(
     solver: &str,
     pc: &str,
     amg_mode: AmgMode,
-    is_fallback: bool,
+    fallback_rung: Option<usize>,
 ) -> Option<PcOptions> {
     if pc == "amg" {
         if amg_mode == AmgMode::ExplicitNonSpd {
@@ -389,7 +388,7 @@ fn build_preconditioner_options(
     opts.pc_scale_norm = Some("inf".to_string());
 
     match matrix_name {
-        "e05r0100" if is_fallback && pc == "ilut" => {
+        "e05r0100" if fallback_rung == Some(1) && pc == "ilut" => {
             opts.ilu_max_fill_per_row = Some(48);
             opts.ilu_offdiag_drop_tolerance = Some(1e-6);
             opts.ilu_reordering_type = Some("amd".to_string());
@@ -398,7 +397,7 @@ fn build_preconditioner_options(
             opts.ilu_pivot_threshold = Some(1e-12);
         }
         "sherman3" => {
-            if is_fallback {
+            if fallback_rung.is_some() {
                 opts.ilu_type = Some("ilut".to_string());
                 opts.ilu_max_fill_per_row = Some(64);
                 opts.ilu_offdiag_drop_tolerance = Some(5e-7);
@@ -435,6 +434,15 @@ fn build_preconditioner_options(
         }
         _ => {}
     }
+    if fallback_rung == Some(1) && matches!(solver, "gmres" | "fgmres") && pc == "ilut" {
+        opts.ilu_type = Some("ilut".to_string());
+        opts.ilu_max_fill_per_row = Some(opts.ilu_max_fill_per_row.unwrap_or(48).max(64));
+        opts.ilu_offdiag_drop_tolerance = Some(opts.ilu_offdiag_drop_tolerance.unwrap_or(1e-6).min(5e-7));
+        opts.ilu_reordering_type = Some("amd".to_string());
+        opts.ilu_reordering = Some("amd_nonsym".to_string());
+        opts.ilu_triangular_solve = Some("exact".to_string());
+        opts.ilu_pivot_threshold = Some(1e-12);
+    }
 
     Some(opts)
 }
@@ -466,21 +474,15 @@ fn test_optimal_solver(
     ),
     Box<dyn std::error::Error>,
 > {
-    let _ = matrix_name;
     let mut solution = vec![0.0; rhs.len()];
-
-    // Sparse-first path: keep A/P in CSR form so AMG/ILU/Jacobi comparisons reflect
-    // actual sparse operator semantics used by iterative methods.
     let csr_a_matrix = Arc::new(a_mat.clone());
     let a_op: Arc<dyn LinOp<S = f64>> = Arc::new(CsrOp::new(Arc::clone(&csr_a_matrix)));
-    // Optional repaired/scaled matrix for preconditioner construction only (also sparse).
     let p_op: Option<Arc<dyn LinOp<S = f64>>> = match p_mat {
         Some(p) => Some(Arc::new(CsrOp::new(Arc::new(p.clone())))),
         None => None,
     };
     let rhs_vec = rhs.to_vec();
 
-    // Try primary configuration
     let mut ksp = KspContext::new();
     let st = SolverType::from_str(&decision.primary_solver)?;
     let pct = PcType::from_str(&decision.primary_pc)?;
@@ -489,11 +491,10 @@ fn test_optimal_solver(
         &decision.primary_solver,
         &decision.primary_pc,
         decision.amg_mode,
-        false,
+        None,
     );
-    let primary_opts_ref = primary_opts.as_ref();
     ksp.set_type(st)?
-        .set_pc_type(pct, primary_opts_ref)?
+        .set_pc_type(pct, primary_opts.as_ref())?
         .set_tolerances(1e-6, 1e-12, 1e3, 1000);
     if matches!(decision.primary_solver.as_str(), "gmres" | "fgmres") {
         let difficult_nonsymmetric =
@@ -501,12 +502,9 @@ fn test_optimal_solver(
         let gmres_profile = benchmark_demo_gmres_profile(difficult_nonsymmetric);
         ksp.set_from_options(&gmres_profile)?;
     }
-
-    // Solve and residual checks both use the same A_op.
     ksp.set_operators(Arc::clone(&a_op), p_op.clone());
     ksp.setup()?;
 
-    let result = ksp.solve(&rhs_vec, &mut solution);
     const CONTRACT_RTOL: f64 = 1e-6;
     const CONTRACT_ATOL: f64 = 1e-12;
     const CONTRACT_SLACK: f64 = 1.05;
@@ -563,18 +561,10 @@ fn test_optimal_solver(
         let meets_any_contract = rtol_ok || atol_ok;
         match reason {
             ConvergedReason::ConvergedRtol => {
-                if rtol_ok {
-                    AcceptanceStatus::Ok
-                } else {
-                    AcceptanceStatus::ContractMismatch
-                }
+                if rtol_ok { AcceptanceStatus::Ok } else { AcceptanceStatus::ContractMismatch }
             }
             ConvergedReason::ConvergedAtol => {
-                if atol_ok {
-                    AcceptanceStatus::Ok
-                } else {
-                    AcceptanceStatus::ContractMismatch
-                }
+                if atol_ok { AcceptanceStatus::Ok } else { AcceptanceStatus::ContractMismatch }
             }
             ConvergedReason::DivergedBreakdown
             | ConvergedReason::DivergedBreakdownBiCG
@@ -582,221 +572,51 @@ fn test_optimal_solver(
             | ConvergedReason::DivergedInf
             | ConvergedReason::DivergedIndefiniteMatrix
             | ConvergedReason::DivergedIndefinitePC => {
-                if meets_any_contract {
-                    AcceptanceStatus::OkWithWarning
-                } else {
-                    AcceptanceStatus::Breakdown
-                }
+                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Breakdown }
             }
             ConvergedReason::ConvergedTrustRegion | ConvergedReason::ConvergedHappyBreakdown => {
-                if meets_any_contract {
-                    AcceptanceStatus::OkWithWarning
-                } else {
-                    AcceptanceStatus::ContractMismatch
-                }
+                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::ContractMismatch }
             }
             ConvergedReason::DivergedDtol
             | ConvergedReason::DivergedMaxIts
             | ConvergedReason::StoppedByMonitor => {
-                if meets_any_contract {
-                    AcceptanceStatus::OkWithWarning
-                } else {
-                    AcceptanceStatus::Stagnated
-                }
+                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Stagnated }
             }
             ConvergedReason::DivergedPcSetupFailed
             | ConvergedReason::DivergedPcFailed
             | ConvergedReason::Continued => {
-                if meets_any_contract {
-                    AcceptanceStatus::OkWithWarning
-                } else {
-                    AcceptanceStatus::Failed
-                }
+                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Failed }
             }
         }
     }
 
-    fn needs_fallback(
-        stats: &kryst::utils::convergence::SolveStats<f64>,
-        true_abs_res: f64,
-        true_rel_res: f64,
-        rtol: f64,
-        atol: f64,
-        slack: f64,
-    ) -> bool {
-        !classify_acceptance(stats.reason, true_abs_res, true_rel_res, rtol, atol, slack)
-            .is_accepted()
-    }
+    let primary_method = format!(
+        "{} + {}",
+        decision.primary_solver.to_uppercase(),
+        decision.primary_pc.to_uppercase()
+    );
 
-    match result {
+    let result = ksp.solve(&rhs_vec, &mut solution);
+
+    let (primary_failure, primary_reason) = match result {
         Ok(stats) => {
-            let (true_abs_res, true_rel_res) =
-                true_residual_metrics(a_op.as_ref(), &rhs_vec, &solution);
-            let primary_method = format!(
-                "{} + {}",
-                decision.primary_solver.to_uppercase(),
-                decision.primary_pc.to_uppercase()
-            );
-            if needs_fallback(
-                &stats,
+            let (true_abs_res, true_rel_res) = true_residual_metrics(a_op.as_ref(), &rhs_vec, &solution);
+            let acceptance_status = classify_acceptance(
+                stats.reason,
                 true_abs_res,
                 true_rel_res,
                 CONTRACT_RTOL,
                 CONTRACT_ATOL,
                 CONTRACT_SLACK,
-            ) {
-                let primary_reason = format!(
-                    "soft failure: reason={:?}, true_abs_res={:.3e}, true_rel_res={:.3e} (rtol={:.3e}, atol={:.3e}, slack={:.3}), internal_classical_retry={}",
-                    stats.reason,
-                    true_abs_res,
-                    true_rel_res,
-                    CONTRACT_RTOL,
-                    CONTRACT_ATOL,
-                    CONTRACT_SLACK,
-                    stats.gmres_classical_retry
-                );
-                let primary_failure = classify_acceptance(
-                    stats.reason,
-                    true_abs_res,
-                    true_rel_res,
-                    CONTRACT_RTOL,
-                    CONTRACT_ATOL,
-                    CONTRACT_SLACK,
-                )
-                .as_str();
-                if is_root_rank {
-                    println!(
-                        "    Primary method did not meet convergence contract, trying fallback..."
-                    );
-                }
-                let mut solution_fallback = vec![0.0; rhs.len()];
-
-                let mut ksp_fallback = KspContext::new();
-                let st_fb = SolverType::from_str(&decision.fallback_solver)?;
-                let pc_fb = PcType::from_str(&decision.fallback_pc)?;
-                let fallback_opts = build_preconditioner_options(
-                    matrix_name,
-                    &decision.fallback_solver,
-                    &decision.fallback_pc,
-                    AmgMode::Disabled,
-                    true,
-                );
-                ksp_fallback
-                    .set_type(st_fb)?
-                    .set_pc_type(pc_fb, fallback_opts.as_ref())?
-                    .set_tolerances(1e-6, 1e-12, 1e3, 1000);
-                if matches!(decision.fallback_solver.as_str(), "gmres" | "fgmres") {
-                    let difficult_nonsymmetric = !screen.symmetry_hint
-                        && screen.condition_heuristic >= 1.0e4
-                        && !screen.spd_like_hint;
-                    let gmres_profile = benchmark_demo_gmres_profile(difficult_nonsymmetric);
-                    ksp_fallback.set_from_options(&gmres_profile)?;
-                }
-                ksp_fallback.set_operators(Arc::clone(&a_op), p_op.clone());
-                ksp_fallback.setup()?;
-
-                let start_fallback = Instant::now();
-                let fallback_solve = ksp_fallback.solve(&rhs_vec, &mut solution_fallback);
-                let solve_time_fallback = start_fallback.elapsed().as_secs_f64();
-                let fallback_method = format!(
-                    "{} + {}",
-                    decision.fallback_solver.to_uppercase(),
-                    decision.fallback_pc.to_uppercase()
-                );
-                match fallback_solve {
-                    Ok(stats_fallback) => {
-                        let (true_abs_res, true_rel_res) =
-                            true_residual_metrics(a_op.as_ref(), &rhs_vec, &solution_fallback);
-                        let acceptance_status = classify_acceptance(
-                            stats_fallback.reason,
-                            true_abs_res,
-                            true_rel_res,
-                            CONTRACT_RTOL,
-                            CONTRACT_ATOL,
-                            CONTRACT_SLACK,
-                        );
-                        let status = acceptance_status.as_str().to_string();
-                        let converged = acceptance_status.is_accepted();
-                        let fallback_outcome = if acceptance_status.is_accepted() {
-                            "succeeded"
-                        } else {
-                            "completed"
-                        };
-                        let solver_reason = stats_fallback.reason.petsc_reason().to_string();
-                        let reason = format!(
-                            "solver_reason={} | primary {}: {}; fallback {} with {} (internal_classical_retry={})",
-                            solver_reason,
-                            primary_failure,
-                            primary_reason,
-                            fallback_outcome,
-                            fallback_method,
-                            stats_fallback.gmres_classical_retry
-                        );
-                        let direct_comparison = compare_with_direct_reference(
-                            matrix_name,
-                            a_mat,
-                            &rhs_vec,
-                            &solution_fallback,
-                        )?;
-                        let _ = solve_time_fallback;
-                        Ok((
-                            primary_method,
-                            fallback_method,
-                            solver_reason,
-                            reason,
-                            true_abs_res,
-                            true_rel_res,
-                            stats_fallback.final_residual,
-                            stats_fallback.iterations,
-                            status,
-                            converged,
-                            direct_comparison,
-                        ))
-                    }
-                    Err(fallback_err) => {
-                        let fallback_reason = fallback_err.to_string();
-                        let fallback_failure = classify_failure(&fallback_reason);
-                        let status = if primary_failure == "contract_mismatch" {
-                            "contract_mismatch".to_string()
-                        } else {
-                            fallback_failure.to_string()
-                        };
-                        Ok((
-                            primary_method,
-                            fallback_method,
-                            "N/A".to_string(),
-                            format!(
-                                "primary {}: {}; fallback {}: {}",
-                                primary_failure, primary_reason, fallback_failure, fallback_reason
-                            ),
-                            f64::NAN,
-                            f64::NAN,
-                            f64::NAN,
-                            0,
-                            status,
-                            false,
-                            None,
-                        ))
-                    }
-                }
-            } else {
-                let acceptance_status = classify_acceptance(
-                    stats.reason,
-                    true_abs_res,
-                    true_rel_res,
-                    CONTRACT_RTOL,
-                    CONTRACT_ATOL,
-                    CONTRACT_SLACK,
-                );
-                let status = acceptance_status.as_str().to_string();
+            );
+            if acceptance_status.is_accepted() {
                 let solver_reason = stats.reason.petsc_reason().to_string();
                 let reason = format!(
-                    "solver_reason={} | internal_classical_retry={}",
+                    "solver_reason={} | rung=primary | internal_classical_retry={}",
                     solver_reason, stats.gmres_classical_retry
                 );
-                let direct_comparison =
-                    compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &solution)?;
-                Ok((
+                let direct_comparison = compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &solution)?;
+                return Ok((
                     primary_method,
                     "-".to_string(),
                     solver_reason,
@@ -805,95 +625,84 @@ fn test_optimal_solver(
                     true_rel_res,
                     stats.final_residual,
                     stats.iterations,
-                    status,
-                    acceptance_status.is_accepted(),
+                    acceptance_status.as_str().to_string(),
+                    true,
                     direct_comparison,
-                ))
+                ));
             }
+            (
+                acceptance_status.as_str().to_string(),
+                format!(
+                    "soft failure: reason={:?}, true_abs_res={:.3e}, true_rel_res={:.3e}, internal_classical_retry={}",
+                    stats.reason, true_abs_res, true_rel_res, stats.gmres_classical_retry
+                ),
+            )
         }
         Err(primary_err) => {
-            let primary_reason = primary_err.to_string();
-            let primary_failure = classify_failure(&primary_reason).to_string();
-            let primary_method = format!(
-                "{} + {}",
-                decision.primary_solver.to_uppercase(),
-                decision.primary_pc.to_uppercase()
-            );
-            // Try fallback configuration
-            if is_root_rank {
-                println!("    Primary method failed, trying fallback...");
-            }
-            let mut solution_fallback = vec![0.0; rhs.len()];
+            let msg = primary_err.to_string();
+            (classify_failure(&msg).to_string(), msg)
+        }
+    };
 
-            let mut ksp_fallback = KspContext::new();
-            let st_fb = SolverType::from_str(&decision.fallback_solver)?;
-            let pc_fb = PcType::from_str(&decision.fallback_pc)?;
-            let fallback_opts = build_preconditioner_options(
-                matrix_name,
-                &decision.fallback_solver,
-                &decision.fallback_pc,
-                AmgMode::Disabled,
-                true,
-            );
-            ksp_fallback
-                .set_type(st_fb)?
-                .set_pc_type(pc_fb, fallback_opts.as_ref())?
-                .set_tolerances(1e-6, 1e-12, 1e3, 1000);
-            if matches!(decision.fallback_solver.as_str(), "gmres" | "fgmres") {
-                let difficult_nonsymmetric = !screen.symmetry_hint
-                    && screen.condition_heuristic >= 1.0e4
-                    && !screen.spd_like_hint;
-                let gmres_profile = benchmark_demo_gmres_profile(difficult_nonsymmetric);
-                ksp_fallback.set_from_options(&gmres_profile)?;
-            }
-            ksp_fallback.set_operators(Arc::clone(&a_op), p_op);
-            ksp_fallback.setup()?;
+    if is_root_rank {
+        println!("    Primary rung failed, entering fallback ladder...");
+    }
 
-            let start_fallback = Instant::now();
-            let fallback_solve = ksp_fallback.solve(&rhs_vec, &mut solution_fallback);
-            let solve_time_fallback = start_fallback.elapsed().as_secs_f64();
-            let fallback_method = format!(
-                "{} + {}",
-                decision.fallback_solver.to_uppercase(),
-                decision.fallback_pc.to_uppercase()
-            );
-            match fallback_solve {
-                Ok(stats_fallback) => {
-                    let (true_abs_res, true_rel_res) =
-                        true_residual_metrics(a_op.as_ref(), &rhs_vec, &solution_fallback);
-                    let acceptance_status = classify_acceptance(
-                        stats_fallback.reason,
-                        true_abs_res,
-                        true_rel_res,
-                        CONTRACT_RTOL,
-                        CONTRACT_ATOL,
-                        CONTRACT_SLACK,
-                    );
-                    let status = acceptance_status.as_str().to_string();
-                    let converged = acceptance_status.is_accepted();
-                    let fallback_outcome = if acceptance_status.is_accepted() {
-                        "succeeded"
-                    } else {
-                        "completed"
-                    };
+    let mut attempt_log = vec![format!("rung=primary [{}]: {}", primary_failure, primary_reason)];
+
+    for step in &decision.fallback_ladder {
+        let mut sol_fb = vec![0.0; rhs.len()];
+        let mut ksp_fallback = KspContext::new();
+        let st_fb = SolverType::from_str(&step.solver)?;
+        let pc_fb = PcType::from_str(&step.pc)?;
+        let fallback_opts = build_preconditioner_options(
+            matrix_name,
+            &step.solver,
+            &step.pc,
+            AmgMode::Disabled,
+            Some(step.rung),
+        );
+        ksp_fallback
+            .set_type(st_fb)?
+            .set_pc_type(pc_fb, fallback_opts.as_ref())?
+            .set_tolerances(1e-6, 1e-12, 1e3, 1000);
+        if matches!(step.solver.as_str(), "gmres" | "fgmres") {
+            let difficult_nonsymmetric =
+                !screen.symmetry_hint && screen.condition_heuristic >= 1.0e4 && !screen.spd_like_hint;
+            let mut gmres_profile = benchmark_demo_gmres_profile(difficult_nonsymmetric);
+            gmres_profile.pc_side = Some("right".to_string());
+            ksp_fallback.set_from_options(&gmres_profile)?;
+        }
+        ksp_fallback.set_operators(Arc::clone(&a_op), p_op.clone());
+        ksp_fallback.setup()?;
+
+        match ksp_fallback.solve(&rhs_vec, &mut sol_fb) {
+            Ok(stats_fallback) => {
+                let (true_abs_res, true_rel_res) = true_residual_metrics(a_op.as_ref(), &rhs_vec, &sol_fb);
+                let acceptance_status = classify_acceptance(
+                    stats_fallback.reason,
+                    true_abs_res,
+                    true_rel_res,
+                    CONTRACT_RTOL,
+                    CONTRACT_ATOL,
+                    CONTRACT_SLACK,
+                );
+                let fallback_method = format!(
+                    "R{} {} + {}",
+                    step.rung,
+                    step.solver.to_uppercase(),
+                    step.pc.to_uppercase()
+                );
+                if acceptance_status.is_accepted() {
                     let solver_reason = stats_fallback.reason.petsc_reason().to_string();
                     let reason = format!(
-                        "solver_reason={} | primary {}: {}; fallback {} with {} (internal_classical_retry={})",
+                        "solver_reason={} | {} | attempted: {}",
                         solver_reason,
-                        primary_failure,
-                        primary_reason,
-                        fallback_outcome,
-                        fallback_method,
-                        stats_fallback.gmres_classical_retry
+                        step.note,
+                        attempt_log.join(" -> ")
                     );
-                    let direct_comparison = compare_with_direct_reference(
-                        matrix_name,
-                        a_mat,
-                        &rhs_vec,
-                        &solution_fallback,
-                    )?;
-                    let _ = solve_time_fallback;
-                    Ok((
+                    let direct_comparison = compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, &sol_fb)?;
+                    return Ok((
                         primary_method,
                         fallback_method,
                         solver_reason,
@@ -902,39 +711,83 @@ fn test_optimal_solver(
                         true_rel_res,
                         stats_fallback.final_residual,
                         stats_fallback.iterations,
-                        status,
-                        converged,
+                        acceptance_status.as_str().to_string(),
+                        true,
                         direct_comparison,
-                    ))
+                    ));
                 }
-                Err(fallback_err) => {
-                    let fallback_reason = fallback_err.to_string();
-                    let fallback_failure = classify_failure(&fallback_reason);
-                    let status = if primary_failure == "contract_mismatch" {
-                        "contract_mismatch".to_string()
-                    } else {
-                        fallback_failure.to_string()
-                    };
-                    Ok((
-                        primary_method,
-                        fallback_method,
-                        "N/A".to_string(),
-                        format!(
-                            "primary {}: {}; fallback {}: {}",
-                            primary_failure, primary_reason, fallback_failure, fallback_reason
-                        ),
-                        f64::NAN,
-                        f64::NAN,
-                        f64::NAN,
-                        0,
-                        status,
-                        false,
-                        None,
-                    ))
-                }
+                attempt_log.push(format!(
+                    "rung={} [{}]: reason={:?}, true_rel_res={:.3e}",
+                    step.rung,
+                    acceptance_status.as_str(),
+                    stats_fallback.reason,
+                    true_rel_res
+                ));
+            }
+            Err(fallback_err) => {
+                attempt_log.push(format!(
+                    "rung={} [{}]: {}",
+                    step.rung,
+                    classify_failure(&fallback_err.to_string()),
+                    fallback_err
+                ));
             }
         }
     }
+
+    let (allow_direct, direct_policy_reason) = direct_reference_policy(a_mat);
+    if allow_direct {
+        #[cfg(feature = "dense-direct")]
+        {
+            match dense_lu::solve(a_mat, &rhs_vec) {
+                Ok(x_direct) => {
+                    let (true_abs_res, true_rel_res) = true_residual_metrics(a_op.as_ref(), &rhs_vec, &x_direct);
+                    let cmp = DirectReferenceComparison {
+                        abs_error_norm: 0.0,
+                        rel_error_norm: 0.0,
+                        matches_verified_answer: true,
+                        note: format!("truth_path: {direct_policy_reason}"),
+                    };
+                    return Ok((
+                        primary_method,
+                        "R3 DIRECT_LU (truth path)".to_string(),
+                        "direct_truth_path".to_string(),
+                        format!("rung=3 direct truth path selected: {} | attempted: {}", direct_policy_reason, attempt_log.join(" -> ")),
+                        true_abs_res,
+                        true_rel_res,
+                        true_abs_res,
+                        0,
+                        "ok_with_warning".to_string(),
+                        true,
+                        Some(cmp),
+                    ));
+                }
+                Err(err) => {
+                    attempt_log.push(format!("rung=3 [failed]: direct LU error: {err}"));
+                }
+            }
+        }
+        #[cfg(not(feature = "dense-direct"))]
+        {
+            attempt_log.push("rung=3 [failed]: dense-direct feature disabled".to_string());
+        }
+    } else {
+        attempt_log.push(format!("rung=3 [skipped]: {}", direct_policy_reason));
+    }
+
+    Ok((
+        primary_method,
+        "-".to_string(),
+        "N/A".to_string(),
+        format!("all rungs exhausted: {}", attempt_log.join(" -> ")),
+        f64::NAN,
+        f64::NAN,
+        f64::NAN,
+        0,
+        "failed".to_string(),
+        false,
+        None,
+    ))
 }
 
 #[cfg(not(feature = "complex"))]
@@ -1036,6 +889,25 @@ fn compare_structural_cg_screen_enabled() -> bool {
 
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn default_fallback_ladder() -> Vec<FallbackStep> {
+    vec![
+        FallbackStep {
+            solver: "fgmres".to_string(),
+            pc: "ilut".to_string(),
+            rung: 1,
+            note: "rung=1 fallback: GMRES/FGMRES(right) + stronger ILUT profile".to_string(),
+        },
+        FallbackStep {
+            solver: "bicgstab".to_string(),
+            pc: "ilut".to_string(),
+            rung: 2,
+            note: "rung=2 fallback: BiCGStab + ILUT".to_string(),
+        },
+    ]
+}
+
+#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn select_solver_policy(
     matrix_name: &str,
     screen: &ScreenReport,
@@ -1045,8 +917,7 @@ fn select_solver_policy(
     let baseline = get_optimal_config(matrix_name);
     let mut primary_solver = baseline.solver.to_string();
     let mut primary_pc = baseline.preconditioner.to_string();
-    let mut fallback_solver = baseline.fallback_solver.to_string();
-    let mut fallback_pc = baseline.fallback_pc.to_string();
+    let mut fallback_ladder = default_fallback_ladder();
     let mut rationale = vec![format!(
         "matrix hint '{}': {}",
         matrix_name, baseline._description
@@ -1173,10 +1044,8 @@ fn select_solver_policy(
         "e05r0100" => {
             primary_solver = "gmres".to_string();
             primary_pc = "none".to_string();
-            fallback_solver = "bicgstab".to_string();
-            fallback_pc = "ilut".to_string();
             rationale.push(
-                "policy override: keep GMRES+NONE baseline and route fallback to tuned BiCGStab+ILUT"
+                "policy override: benchmark-aligned primary plus full fallback ladder for hard nonsymmetric case"
                     .to_string(),
             );
         }
@@ -1190,10 +1059,8 @@ fn select_solver_policy(
                     100.0 * SYMMETRY_MAX_ASYMMETRY_RATE
                 );
             }
-            fallback_solver = "bicgstab".to_string();
-            fallback_pc = "ilut".to_string();
             rationale.push(
-                "policy override: on stagnation promote from baseline ILU to stronger ILUT profile"
+                "policy override: hard nonsymmetric sequence = primary, rung1 FGMRES(right)+ILUT, rung2 BiCGStab+ILUT"
                     .to_string(),
             );
         }
@@ -1201,10 +1068,8 @@ fn select_solver_policy(
             if cg_screen.is_hard_reject {
                 primary_solver = "gmres".to_string();
                 primary_pc = "ilut".to_string();
-                fallback_solver = "bicgstab".to_string();
-                fallback_pc = "ilut".to_string();
                 rationale.push(
-                    "policy override: CG hard reject; go directly to tuned nonsymmetric ILUT path"
+                    "policy override: CG hard reject; keep nonsymmetric fallback ladder"
                         .to_string(),
                 );
             }
@@ -1226,12 +1091,14 @@ fn select_solver_policy(
                     .to_string(),
             );
         }
-        if fallback_pc == "jacobi" {
-            fallback_pc = "ilut".to_string();
-            rationale.push(
-                "diagonal-bad screen: avoided plain Jacobi fallback (enable KRYST_DEMO_JACOBI_STRENGTH=fixdiag|rowl1 to allow Jacobi)"
-                    .to_string(),
-            );
+        for step in &mut fallback_ladder {
+            if step.pc == "jacobi" {
+                step.pc = "ilut".to_string();
+                rationale.push(
+                    "diagonal-bad screen: avoided plain Jacobi fallback (enable KRYST_DEMO_JACOBI_STRENGTH=fixdiag|rowl1 to allow Jacobi)"
+                        .to_string(),
+                );
+            }
         }
     } else if !screen.diagonal_healthy && jacobi_strength_mode != JacobiStrengthMode::Plain {
         rationale.push(format!(
@@ -1243,8 +1110,7 @@ fn select_solver_policy(
     SelectionDecision {
         primary_solver,
         primary_pc,
-        fallback_solver,
-        fallback_pc,
+        fallback_ladder,
         rationale,
         contract_checks,
         expected_iterations: baseline.expected_iterations,
