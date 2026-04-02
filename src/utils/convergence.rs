@@ -510,6 +510,12 @@ pub struct SolveStats<R> {
     /// True when GMRES internally retried by resetting `x` and falling back to
     /// a classical GMRES pass.
     pub gmres_classical_retry: bool,
+    /// Contract acceptance status from true residual + stop reason classification.
+    pub acceptance_status: AcceptanceStatus,
+    /// Breakdown/divergence reason captured before any residual-based override.
+    pub breakdown_reason: Option<ConvergedReason>,
+    /// Optional note describing residual-based acceptance override decisions.
+    pub residual_override_note: Option<String>,
 }
 
 impl<R: Default> SolveStats<R> {
@@ -529,6 +535,13 @@ impl<R: Default> SolveStats<R> {
             nested_pc_failure: None,
             reason_counters: ReasonDiagnosticsCounters::default(),
             gmres_classical_retry: false,
+            acceptance_status: if reason.is_converged() {
+                AcceptanceStatus::Ok
+            } else {
+                AcceptanceStatus::Failed
+            },
+            breakdown_reason: None,
+            residual_override_note: None,
         }
     }
 
