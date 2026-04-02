@@ -70,9 +70,9 @@ use kryst::matrix::sparse::CsrMatrix;
 ))]
 use kryst::solver::dense_lu;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::conditioning::analyze_csr;
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_market::{MatrixMarketSymmetry, read_matrix_market};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -529,7 +529,11 @@ fn test_optimal_solver(
         }
     }
 
-    fn true_residual_metrics(a_op: &dyn LinOp<S = f64>, rhs: &[f64], solution: &[f64]) -> (f64, f64) {
+    fn true_residual_metrics(
+        a_op: &dyn LinOp<S = f64>,
+        rhs: &[f64],
+        solution: &[f64],
+    ) -> (f64, f64) {
         let true_abs_res = true_residual_norm(a_op, rhs, solution);
         let b_norm = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
         let true_rel_res = if b_norm > 0.0 {
@@ -555,10 +559,18 @@ fn test_optimal_solver(
         let meets_any_contract = rtol_ok || atol_ok;
         match reason {
             ConvergedReason::ConvergedRtol => {
-                if rtol_ok { AcceptanceStatus::Ok } else { AcceptanceStatus::ContractMismatch }
+                if rtol_ok {
+                    AcceptanceStatus::Ok
+                } else {
+                    AcceptanceStatus::ContractMismatch
+                }
             }
             ConvergedReason::ConvergedAtol => {
-                if atol_ok { AcceptanceStatus::Ok } else { AcceptanceStatus::ContractMismatch }
+                if atol_ok {
+                    AcceptanceStatus::Ok
+                } else {
+                    AcceptanceStatus::ContractMismatch
+                }
             }
             ConvergedReason::DivergedBreakdown
             | ConvergedReason::DivergedBreakdownBiCG
@@ -566,20 +578,36 @@ fn test_optimal_solver(
             | ConvergedReason::DivergedInf
             | ConvergedReason::DivergedIndefiniteMatrix
             | ConvergedReason::DivergedIndefinitePC => {
-                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Breakdown }
+                if meets_any_contract {
+                    AcceptanceStatus::OkWithWarning
+                } else {
+                    AcceptanceStatus::Breakdown
+                }
             }
             ConvergedReason::ConvergedTrustRegion | ConvergedReason::ConvergedHappyBreakdown => {
-                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::ContractMismatch }
+                if meets_any_contract {
+                    AcceptanceStatus::OkWithWarning
+                } else {
+                    AcceptanceStatus::ContractMismatch
+                }
             }
             ConvergedReason::DivergedDtol
             | ConvergedReason::DivergedMaxIts
             | ConvergedReason::StoppedByMonitor => {
-                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Stagnated }
+                if meets_any_contract {
+                    AcceptanceStatus::OkWithWarning
+                } else {
+                    AcceptanceStatus::Stagnated
+                }
             }
             ConvergedReason::DivergedPcSetupFailed
             | ConvergedReason::DivergedPcFailed
             | ConvergedReason::Continued => {
-                if meets_any_contract { AcceptanceStatus::OkWithWarning } else { AcceptanceStatus::Failed }
+                if meets_any_contract {
+                    AcceptanceStatus::OkWithWarning
+                } else {
+                    AcceptanceStatus::Failed
+                }
             }
         }
     }
@@ -592,21 +620,36 @@ fn test_optimal_solver(
         atol: f64,
         slack: f64,
     ) -> bool {
-        !classify_acceptance(stats.reason, true_abs_res, true_rel_res, rtol, atol, slack).is_accepted()
+        !classify_acceptance(stats.reason, true_abs_res, true_rel_res, rtol, atol, slack)
+            .is_accepted()
     }
 
     match result {
         Ok(stats) => {
-            let (true_abs_res, true_rel_res) = true_residual_metrics(a_op.as_ref(), &rhs_vec, &solution);
+            let (true_abs_res, true_rel_res) =
+                true_residual_metrics(a_op.as_ref(), &rhs_vec, &solution);
             let primary_method = format!(
                 "{} + {}",
                 decision.primary_solver.to_uppercase(),
                 decision.primary_pc.to_uppercase()
             );
-            if needs_fallback(&stats, true_abs_res, true_rel_res, CONTRACT_RTOL, CONTRACT_ATOL, CONTRACT_SLACK) {
+            if needs_fallback(
+                &stats,
+                true_abs_res,
+                true_rel_res,
+                CONTRACT_RTOL,
+                CONTRACT_ATOL,
+                CONTRACT_SLACK,
+            ) {
                 let primary_reason = format!(
                     "soft failure: reason={:?}, true_abs_res={:.3e}, true_rel_res={:.3e} (rtol={:.3e}, atol={:.3e}, slack={:.3}), internal_classical_retry={}",
-                    stats.reason, true_abs_res, true_rel_res, CONTRACT_RTOL, CONTRACT_ATOL, CONTRACT_SLACK, stats.gmres_classical_retry
+                    stats.reason,
+                    true_abs_res,
+                    true_rel_res,
+                    CONTRACT_RTOL,
+                    CONTRACT_ATOL,
+                    CONTRACT_SLACK,
+                    stats.gmres_classical_retry
                 );
                 let primary_failure = classify_acceptance(
                     stats.reason,
@@ -1010,7 +1053,7 @@ fn select_solver_policy(
     let jacobi_strength_mode = jacobi_strength_mode_from_env();
 
     let cg_screen = cg_compatibility_screen(matrix, !screen.diagonal_healthy, None, false);
-    if primary_solver == "cg" && !cg_screen.cg_safe {
+    if primary_solver == "cg" && cg_screen.is_hard_reject {
         let safe_solver =
             if baseline.fallback_solver == "gmres" || baseline.fallback_solver == "bicgstab" {
                 baseline.fallback_solver
@@ -1019,7 +1062,7 @@ fn select_solver_policy(
             };
         primary_solver = safe_solver.to_string();
         primary_pc = "ilut".to_string();
-        contract_checks.push(cg_screen.reason);
+        contract_checks.push(cg_screen.reason.clone());
         contract_checks.push(format!(
             "CG diagnostics (base): pairs={}, sym_violations={} ({:.2}%), non_positive_diag={}, weak_gershgorin={}, mm_structural_symmetry_hint={:?}",
             cg_screen.diagnostics.sampled_pair_count,
@@ -1034,7 +1077,13 @@ fn select_solver_policy(
             safe_solver.to_uppercase()
         ));
     } else {
-        contract_checks.push(cg_screen.reason);
+        contract_checks.push(cg_screen.reason.clone());
+        if !cg_screen.warnings.is_empty() {
+            contract_checks.push(format!(
+                "CG soft warnings: {}",
+                cg_screen.warnings.join("; ")
+            ));
+        }
     }
 
     if compare_structural_cg_screen_enabled() {
@@ -1046,18 +1095,18 @@ fn select_solver_policy(
         );
         contract_checks.push(format!(
             "CG structural-compare: base={} vs metadata-expanded={}",
-            if cg_screen.cg_safe {
-                "accept"
+            if cg_screen.is_hard_reject {
+                "hard-reject"
             } else {
-                "reject"
+                "accept"
             },
-            if cg_screen_structural.cg_safe {
-                "accept"
+            if cg_screen_structural.is_hard_reject {
+                "hard-reject"
             } else {
-                "reject"
+                "accept"
             }
         ));
-        if !cg_screen.cg_safe || !cg_screen_structural.cg_safe {
+        if cg_screen.is_hard_reject || cg_screen_structural.is_hard_reject {
             contract_checks.push(format!(
                 "CG diagnostics (metadata-expanded): pairs={}, sym_violations={} ({:.2}%), non_positive_diag={}, weak_gershgorin={}, mm_structural_symmetry_hint={:?}",
                 cg_screen_structural.diagnostics.sampled_pair_count,
@@ -1066,6 +1115,11 @@ fn select_solver_policy(
                 cg_screen_structural.diagnostics.non_positive_diagonal_count,
                 cg_screen_structural.diagnostics.weak_gershgorin_count,
                 cg_screen_structural.diagnostics.structural_symmetry_hint
+            ));
+        } else if !cg_screen_structural.warnings.is_empty() {
+            contract_checks.push(format!(
+                "CG structural soft warnings: {}",
+                cg_screen_structural.warnings.join("; ")
             ));
         }
     }
@@ -1120,13 +1174,13 @@ fn select_solver_policy(
             );
         }
         "fidap001" => {
-            if !cg_screen.cg_safe {
+            if cg_screen.is_hard_reject {
                 primary_solver = "gmres".to_string();
                 primary_pc = "ilut".to_string();
                 fallback_solver = "bicgstab".to_string();
                 fallback_pc = "ilut".to_string();
                 rationale.push(
-                    "policy override: CG screen failed; go directly to tuned nonsymmetric ILUT path"
+                    "policy override: CG hard reject; go directly to tuned nonsymmetric ILUT path"
                         .to_string(),
                 );
             }
