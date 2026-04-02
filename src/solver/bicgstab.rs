@@ -642,7 +642,7 @@ impl BiCgStabSolver {
             if omega_den.abs() <= eps_omega || !omega_den.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega_den ~ 0 at iter {k}");
-                let stats = finalize_true_residual_exit(
+                let stats = finalize_breakdown_salvage_exit(
                     a,
                     b,
                     x,
@@ -654,6 +654,7 @@ impl BiCgStabSolver {
                     self.rtol,
                     k,
                     ReasonEmitter::breakdown_bicg(),
+                    "omega denominator near-zero/non-finite",
                 );
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
@@ -665,7 +666,7 @@ impl BiCgStabSolver {
             if omega.abs() <= eps_omega || !omega.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega ~ 0 at iter {k}");
-                let stats = finalize_true_residual_exit(
+                let stats = finalize_breakdown_salvage_exit(
                     a,
                     b,
                     x,
@@ -677,6 +678,7 @@ impl BiCgStabSolver {
                     self.rtol,
                     k,
                     ReasonEmitter::breakdown_bicg(),
+                    "omega near-zero/non-finite",
                 );
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
