@@ -72,11 +72,11 @@ use kryst::utils::conditioning::{ConditioningOptions, ScaleDirection, ScaleNorm}
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::matrix_market::{read_matrix_market, MatrixMarketSymmetry};
+use kryst::utils::matrix_market::{MatrixMarketSymmetry, read_matrix_market};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_screening::{
-    assess_symmetry, cg_compatibility_screen, repair_diagonal_csr, SymmetryAssessment,
-    SYMMETRY_MAX_ASYMMETRY_RATE,
+    SYMMETRY_MAX_ASYMMETRY_RATE, SymmetryAssessment, assess_symmetry, cg_compatibility_screen,
+    repair_diagonal_csr,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
@@ -86,7 +86,7 @@ use kryst::utils::preconditioning_pipeline::apply_preconditioning_pipeline;
 use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::{
-    format_direct_verification_status, DirectReferenceLike, DirectVerificationCapability,
+    DirectReferenceLike, DirectVerificationCapability, format_direct_verification_status,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::str::FromStr;
@@ -1088,6 +1088,15 @@ fn compare_structural_cg_screen_enabled() -> bool {
 
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn cg_reject_has_strong_evidence(
+    symmetry_violation_count: usize,
+    non_positive_diagonal_count: usize,
+) -> bool {
+    symmetry_violation_count > 0 || non_positive_diagonal_count > 0
+}
+
+#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn default_fallback_ladder() -> Vec<FallbackStep> {
     vec![
         FallbackStep {
@@ -1126,7 +1135,11 @@ fn select_solver_policy(
     let jacobi_strength_mode = jacobi_strength_mode_from_env();
 
     let cg_screen = cg_compatibility_screen(matrix, !screen.diagonal_healthy, None, false);
-    if primary_solver == "cg" && cg_screen.is_hard_reject {
+    let base_strong_reject_evidence = cg_reject_has_strong_evidence(
+        cg_screen.diagnostics.symmetry.symmetry_violation_count,
+        cg_screen.diagnostics.non_positive_diagonal_count,
+    );
+    if primary_solver == "cg" && cg_screen.is_hard_reject && base_strong_reject_evidence {
         let safe_solver =
             if baseline.fallback_solver == "gmres" || baseline.fallback_solver == "bicgstab" {
                 baseline.fallback_solver
@@ -1154,6 +1167,20 @@ fn select_solver_policy(
             safe_solver.to_uppercase()
         ));
     } else {
+        if primary_solver == "cg"
+            && cg_screen.is_hard_reject
+            && cg_screen.diagnostics.weak_gershgorin_count > 0
+            && !base_strong_reject_evidence
+        {
+            contract_checks.push(
+                "CG hard-reject downgraded to warning: weak Gershgorin evidence alone is treated as non-fatal in this demo"
+                    .to_string(),
+            );
+            rationale.push(
+                "Retained CG primary: Gershgorin weakness is warning-level unless reinforced by asymmetry/diagonal failures"
+                    .to_string(),
+            );
+        }
         contract_checks.push(cg_screen.reason.clone());
         contract_checks.push(format!(
             "CG symmetry verdict (base): {}",
@@ -1167,26 +1194,65 @@ fn select_solver_policy(
         }
     }
 
-    if compare_structural_cg_screen_enabled() {
+    let compare_structural = compare_structural_cg_screen_enabled() || matrix_name == "add20";
+    if compare_structural {
         let cg_screen_structural = cg_compatibility_screen(
             matrix,
             !screen.diagonal_healthy,
             structural_symmetry_hint,
             true,
         );
+        let structural_strong_reject_evidence = cg_reject_has_strong_evidence(
+            cg_screen_structural
+                .diagnostics
+                .symmetry
+                .symmetry_violation_count,
+            cg_screen_structural.diagnostics.non_positive_diagonal_count,
+        );
         contract_checks.push(format!(
-            "CG structural-compare: base={} vs metadata-expanded={}",
+            "CG structural-compare: base={} (strong_evidence={}) vs metadata-expanded={} (strong_evidence={})",
             if cg_screen.is_hard_reject {
                 "hard-reject"
             } else {
                 "accept"
             },
+            base_strong_reject_evidence,
             if cg_screen_structural.is_hard_reject {
                 "hard-reject"
             } else {
                 "accept"
-            }
+            },
+            structural_strong_reject_evidence
         ));
+        if matrix_name == "add20" {
+            let asymmetry_interpretation = if cg_screen.is_hard_reject
+                && !base_strong_reject_evidence
+                && !cg_screen_structural.is_hard_reject
+            {
+                "likely structural metadata artifact (base asymmetry warning not confirmed after metadata expansion)"
+            } else if cg_screen.is_hard_reject
+                && cg_screen_structural.is_hard_reject
+                && (base_strong_reject_evidence || structural_strong_reject_evidence)
+            {
+                "likely true hard reject (strong asymmetry/diagonal evidence persists)"
+            } else {
+                "inconclusive / warning-only asymmetry evidence"
+            };
+            contract_checks.push(format!(
+                "add20 CG verdicts: base={} | metadata-expanded={} | asymmetry_interpretation={}",
+                if cg_screen.is_hard_reject {
+                    "hard-reject"
+                } else {
+                    "accept"
+                },
+                if cg_screen_structural.is_hard_reject {
+                    "hard-reject"
+                } else {
+                    "accept"
+                },
+                asymmetry_interpretation
+            ));
+        }
         if cg_screen.is_hard_reject || cg_screen_structural.is_hard_reject {
             contract_checks.push(format!(
                 "CG diagnostics (metadata-expanded): pairs={}, sym_violations={} ({:.2}%), non_positive_diag={}, weak_gershgorin={}, mm_structural_symmetry_hint={:?}",
@@ -1364,6 +1430,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Optimized Matrix Market Solver Demonstration");
         println!("===========================================");
         println!("Using benchmark-proven optimal configurations");
+        println!(
+            "Recommended structural-CG compare workflow: KRYST_DEMO_COMPARE_STRUCTURAL_CG_SCREEN=1 cargo run --example optimized_solver_demo --features backend-faer"
+        );
         // Note: this demo does not perform distributed coordination unless explicitly added.
         println!();
     }
@@ -1495,6 +1564,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("    → Preconditioner prep: {prep_trace}.");
         }
         let rhs = rhs_data.to_vector()?;
+        let rhs_norm = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let acceptance_threshold = f64::max(1e-6 * rhs_norm, 1e-12);
 
         let screen = screen_matrix(&a_op);
         let structural_symmetry_hint = Some(matches!(
@@ -1579,8 +1650,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
                     println!(
-                        "    ↳ diagnostics: true_abs_res={:.2e}, true_rel_res={:.2e}, stats_res={:.2e}, verified={}",
-                        true_abs_res, true_rel_res, prec_residual, verified
+                        "    ↳ diagnostics: ||b||={:.2e}, acceptance_threshold=max(rtol*||b||, atol)={:.2e}, true_abs_res={:.2e}, true_rel_res={:.2e}, stats_res={:.2e}, verified={}",
+                        rhs_norm,
+                        acceptance_threshold,
+                        true_abs_res,
+                        true_rel_res,
+                        prec_residual,
+                        verified
                     );
                     if let Some(cmp) = direct_comparison.as_ref() {
                         let reference_phase = if cmp.reference_solve_executed {
@@ -1589,10 +1665,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "skipped"
                         };
                         println!(
-                        "    → Direct reference check: status={}, abs_err_norm={:.3e}, rel_diff={:.3e}, matches_verified_answer={}, policy={}",
-                        reference_phase,
-                        cmp.abs_error_norm,
-                        cmp.rel_error_norm,
+                            "    → Direct reference check: status={}, abs_err_norm={:.3e}, rel_diff={:.3e}, matches_verified_answer={}, policy={}",
+                            reference_phase,
+                            cmp.abs_error_norm,
+                            cmp.rel_error_norm,
                             cmp.matches_verified_answer,
                             cmp.note
                         );
