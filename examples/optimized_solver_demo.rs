@@ -458,6 +458,14 @@ fn build_preconditioner_options(
     amg_mode: AmgMode,
     fallback_rung: Option<usize>,
 ) -> Option<PcOptions> {
+    if pc == "block_jacobi" {
+        let mut opts = PcOptions::default();
+        let n = matrix_rows_hint(matrix_name);
+        let block_size = block_jacobi_block_size_for(n);
+        opts.jacobi_block_size = Some(block_size);
+        return Some(opts);
+    }
+
     if pc == "amg" {
         if amg_mode == AmgMode::ExplicitNonSpd {
             let mut opts = PcOptions::default();
@@ -558,6 +566,37 @@ fn build_preconditioner_options(
     }
 
     Some(opts)
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn matrix_rows_hint(matrix_name: &str) -> usize {
+    match matrix_name {
+        "fidap005" => 27,
+        "e05r0100" => 236,
+        "fidap001" => 216,
+        "add20" => 2395,
+        "sherman3" => 5005,
+        "memplus" => 17758,
+        _ => 1024,
+    }
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn block_jacobi_block_size_for(nrows: usize) -> usize {
+    let target_blocks = (nrows / 1200).clamp(2, 16);
+    ((nrows + target_blocks - 1) / target_blocks).max(64)
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn block_jacobi_local_factorization_kind() -> &'static str {
+    #[cfg(feature = "dense-direct")]
+    {
+        "block_lu"
+    }
+    #[cfg(not(feature = "dense-direct"))]
+    {
+        "block_ilu0"
+    }
 }
 
 /// Test a solver configuration and return detailed results
@@ -1210,6 +1249,35 @@ fn default_fallback_ladder() -> Vec<FallbackStep> {
 
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn maybe_block_jacobi_rescue_rung(
+    screen: &ScreenReport,
+    matrix: &CsrMatrix<f64>,
+) -> Option<FallbackStep> {
+    const MIN_ROWS: usize = 3500;
+    const MIN_NNZ: usize = 30_000;
+    const MAX_DENSITY: f64 = 0.02;
+
+    let nrows = matrix.nrows();
+    let nnz = matrix.nnz();
+    if nrows < MIN_ROWS || nnz < MIN_NNZ || screen.density > MAX_DENSITY {
+        return None;
+    }
+
+    let block_size = block_jacobi_block_size_for(nrows);
+    let block_count = nrows.div_ceil(block_size);
+    let local_factorization = block_jacobi_local_factorization_kind();
+    Some(FallbackStep {
+        solver: "fgmres".to_string(),
+        pc: "block_jacobi".to_string(),
+        rung: 3,
+        note: format!(
+            "rung=3 fallback: FGMRES(right) + BlockJacobi | guard[nrows>={MIN_ROWS}, nnz>={MIN_NNZ}, density<={MAX_DENSITY:.3}] | block_type=contiguous | block_count={block_count} | block_size={block_size} | local_factorization={local_factorization}"
+        ),
+    })
+}
+
+#[cfg(not(feature = "complex"))]
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn select_solver_policy(
     matrix_name: &str,
     screen: &ScreenReport,
@@ -1468,6 +1536,19 @@ fn select_solver_policy(
         ));
     }
 
+    if let Some(block_jacobi_rung) = maybe_block_jacobi_rescue_rung(screen, matrix) {
+        rationale.push(
+            "late rescue rung enabled: BlockJacobi intended for larger sparse/MPI-like cases"
+                .to_string(),
+        );
+        fallback_ladder.push(block_jacobi_rung);
+    } else {
+        rationale.push(
+            "late rescue rung disabled: BlockJacobi guardrails (size/sparsity thresholds) not met"
+                .to_string(),
+        );
+    }
+
     SelectionDecision {
         primary_solver,
         primary_pc,
@@ -1574,16 +1655,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         attempts: &[AttemptRecord],
         truth: Option<&TruthReference<DirectReferenceComparison>>,
     ) -> String {
-        let baseline = attempts.iter().find(|attempt| attempt.rung_id == 0);
-        let rescue_1 = attempts.iter().find(|attempt| attempt.rung_id == 1);
-        let rescue_2 = attempts.iter().find(|attempt| attempt.rung_id == 2);
-        [
-            compact_attempt_rung(baseline, "baseline"),
-            compact_attempt_rung(rescue_1, "rescue1"),
-            compact_attempt_rung(rescue_2, "rescue2"),
-            compact_truth_rung(truth),
-        ]
-        .join(" | ")
+        let mut parts = vec![compact_attempt_rung(
+            attempts.iter().find(|attempt| attempt.rung_id == 0),
+            "baseline",
+        )];
+        let mut rescue_rungs = attempts
+            .iter()
+            .filter(|attempt| attempt.rung_id > 0)
+            .map(|attempt| attempt.rung_id)
+            .collect::<Vec<_>>();
+        rescue_rungs.sort_unstable();
+        rescue_rungs.dedup();
+        for rung in rescue_rungs {
+            parts.push(compact_attempt_rung(
+                attempts.iter().find(|attempt| attempt.rung_id == rung),
+                &format!("rescue{rung}"),
+            ));
+        }
+        parts.push(compact_truth_rung(truth));
+        parts.join(" | ")
     }
 
     fn classify_failure_family(
