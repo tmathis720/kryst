@@ -242,11 +242,14 @@ impl BiCgStabSolver {
         }
         let mons = monitors.unwrap_or(&[]);
 
+        if matches!(pc_side, PcSide::Symmetric) {
+            return Err(KError::InvalidInput(
+                "BiCGStab: PcSide::Symmetric is unsupported; use PcSide::Left or PcSide::Right"
+                    .into(),
+            ));
+        }
         let pc_apply_side = pc_side;
-        let side = match pc_side {
-            PcSide::Symmetric => PcSide::Left,
-            s => s,
-        };
+        let side = pc_side;
         let work =
             work.ok_or_else(|| KError::InvalidInput("BiCGStab requires a Workspace".into()))?;
         let red = ReductCtx::new(comm, Some(&*work));

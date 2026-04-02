@@ -3,8 +3,9 @@
 use faer::Mat;
 use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::KspContext;
+use kryst::error::KError;
 use kryst::parallel::{NoComm, UniverseComm};
-use kryst::solver::LinearSolver;
+use kryst::preconditioner::PcSide;
 use kryst::solver::{BiCgStabSolver, BiCgStabVariant};
 use std::sync::Arc;
 
@@ -88,4 +89,38 @@ fn bicgstab_variant_selectable_from_ksp_options() {
         stats.reduction_model.as_ref().map(|m| m.variant),
         Some("bicgstab-lowsync")
     );
+}
+
+#[test]
+fn bicgstab_rejects_symmetric_pc_side() {
+    let n = 24;
+    let a = nonsym_tridiag(n);
+    let b = vec![1.0; n];
+    let mut x = vec![0.0; n];
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut solver = BiCgStabSolver::new(1e-9, 100);
+    let mut ws = kryst::context::ksp_context::Workspace::default();
+
+    let err = solver
+        .solve_f64(
+            &a,
+            None,
+            &b,
+            &mut x,
+            PcSide::Symmetric,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
+        .expect_err("BiCGStab must reject PcSide::Symmetric");
+
+    match err {
+        KError::InvalidInput(msg) => {
+            assert!(msg.contains("PcSide::Symmetric"));
+            assert!(msg.contains("unsupported"));
+            assert!(msg.contains("PcSide::Left"));
+            assert!(msg.contains("PcSide::Right"));
+        }
+        other => panic!("expected InvalidInput for symmetric side, got: {other:?}"),
+    }
 }
