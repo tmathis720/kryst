@@ -33,7 +33,8 @@ use crate::solver::MonitorCallback;
 use crate::solver::common::ReductCtx;
 use crate::solver::common::call_monitors;
 use crate::solver::common::exit_checks::{
-    true_residual_converged_reason, true_residual_norm as eval_true_residual_norm,
+    reconcile_reason_with_true_residual, true_residual_converged_reason,
+    true_residual_norm as eval_true_residual_norm,
 };
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
@@ -648,14 +649,18 @@ impl GmresSolver {
         }
         if res <= thr {
             let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
-            let (true_reason, _) = self.conv.check(true_res, bnorm, total_iters);
-            stats.reason = if true_reason.is_converged() {
-                true_reason
-            } else if res <= self.conv.atol {
+            let nominal_reason = if res <= self.conv.atol {
                 ConvergedReason::ConvergedAtol
             } else {
                 ConvergedReason::ConvergedRtol
             };
+            stats.reason = reconcile_reason_with_true_residual(
+                nominal_reason,
+                true_res,
+                bnorm,
+                self.conv.atol,
+                self.conv.rtol,
+            );
             stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
             let async_reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
@@ -1242,9 +1247,13 @@ impl GmresSolver {
 
         let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
         let (reason, _) = self.conv.check(res, bnorm, total_iters);
-        stats.reason =
-            true_residual_converged_reason(true_res, bnorm, self.conv.atol, self.conv.rtol)
-                .unwrap_or(reason);
+        stats.reason = reconcile_reason_with_true_residual(
+            reason,
+            true_res,
+            bnorm,
+            self.conv.atol,
+            self.conv.rtol,
+        );
         stats.final_residual = true_res;
 
         let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
@@ -1530,14 +1539,18 @@ impl GmresSolver {
         }
         if res <= thr {
             let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
-            let (true_reason, _) = self.conv.check(true_res, bnorm, total_iters);
-            stats.reason = if true_reason.is_converged() {
-                true_reason
-            } else if res <= self.conv.atol {
+            let nominal_reason = if res <= self.conv.atol {
                 ConvergedReason::ConvergedAtol
             } else {
                 ConvergedReason::ConvergedRtol
             };
+            stats.reason = reconcile_reason_with_true_residual(
+                nominal_reason,
+                true_res,
+                bnorm,
+                self.conv.atol,
+                self.conv.rtol,
+            );
             stats.final_residual = true_res;
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
             let async_reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1;
@@ -2196,12 +2209,13 @@ impl GmresSolver {
 
         let true_res = Self::true_residual_norm(a, b, x, &red, &mut ws.tmp1, &mut ws.bridge);
         let (reason, _) = self.conv.check(res, bnorm, total_iters);
-        let (true_reason, _) = self.conv.check(true_res, bnorm, total_iters);
-        stats.reason = if true_reason.is_converged() {
-            true_reason
-        } else {
-            reason
-        };
+        stats.reason = reconcile_reason_with_true_residual(
+            reason,
+            true_res,
+            bnorm,
+            self.conv.atol,
+            self.conv.rtol,
+        );
         stats.final_residual = true_res;
 
         let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
