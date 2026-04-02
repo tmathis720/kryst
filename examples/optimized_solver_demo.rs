@@ -76,7 +76,10 @@ use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_market::{MatrixMarketSymmetry, read_matrix_market};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::matrix_screening::{cg_compatibility_screen, repair_diagonal_csr};
+use kryst::utils::matrix_screening::{
+    SYMMETRY_MAX_ASYMMETRY_RATE, SymmetryAssessment, assess_symmetry, cg_compatibility_screen,
+    repair_diagonal_csr,
+};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -102,6 +105,7 @@ struct OptimalConfig {
 struct ScreenReport {
     symmetry_hint: bool,
     spd_like_hint: bool,
+    symmetry: SymmetryAssessment,
     diagonal_healthy: bool,
     density: f64,
     size_class: &'static str,
@@ -981,10 +985,8 @@ fn screen_matrix(matrix: &CsrMatrix<f64>) -> ScreenReport {
     let tiny_threshold = 1e-14;
     let stats = analyze_csr(matrix, tiny_threshold);
     let diag_issues = stats.diag_tiny_count > 0 || stats.diag_missing_count > 0;
-    let approx_symmetric = stats
-        .symmetry_estimate
-        .map(|sym| sym >= 0.99)
-        .unwrap_or(false);
+    let symmetry = assess_symmetry(matrix, None, false);
+    let approx_symmetric = symmetry.passes_threshold;
     let density = matrix.nnz() as f64 / (matrix.nrows() * matrix.ncols()) as f64;
     let condition_heuristic = if stats.diag_min_abs > 0.0 {
         stats.row_norm_1.max / stats.diag_min_abs
@@ -1003,6 +1005,7 @@ fn screen_matrix(matrix: &CsrMatrix<f64>) -> ScreenReport {
     ScreenReport {
         symmetry_hint: approx_symmetric,
         spd_like_hint,
+        symmetry,
         diagonal_healthy: !diag_issues,
         density,
         size_class,
@@ -1065,12 +1068,16 @@ fn select_solver_policy(
         contract_checks.push(cg_screen.reason.clone());
         contract_checks.push(format!(
             "CG diagnostics (base): pairs={}, sym_violations={} ({:.2}%), non_positive_diag={}, weak_gershgorin={}, mm_structural_symmetry_hint={:?}",
-            cg_screen.diagnostics.sampled_pair_count,
-            cg_screen.diagnostics.symmetry_violation_count,
-            100.0 * cg_screen.diagnostics.symmetry_violation_rate,
+            cg_screen.diagnostics.symmetry.sampled_pair_count,
+            cg_screen.diagnostics.symmetry.symmetry_violation_count,
+            100.0 * cg_screen.diagnostics.symmetry.symmetry_violation_rate,
             cg_screen.diagnostics.non_positive_diagonal_count,
             cg_screen.diagnostics.weak_gershgorin_count,
-            cg_screen.diagnostics.structural_symmetry_hint
+            cg_screen.diagnostics.symmetry.structural_symmetry_hint
+        ));
+        contract_checks.push(format!(
+            "CG symmetry verdict (base): {}",
+            cg_screen.diagnostics.symmetry.verdict
         ));
         rationale.push(format!(
             "CG screened out; switched primary to {} + ILUT",
@@ -1078,6 +1085,10 @@ fn select_solver_policy(
         ));
     } else {
         contract_checks.push(cg_screen.reason.clone());
+        contract_checks.push(format!(
+            "CG symmetry verdict (base): {}",
+            cg_screen.diagnostics.symmetry.verdict
+        ));
         if !cg_screen.warnings.is_empty() {
             contract_checks.push(format!(
                 "CG soft warnings: {}",
@@ -1109,12 +1120,16 @@ fn select_solver_policy(
         if cg_screen.is_hard_reject || cg_screen_structural.is_hard_reject {
             contract_checks.push(format!(
                 "CG diagnostics (metadata-expanded): pairs={}, sym_violations={} ({:.2}%), non_positive_diag={}, weak_gershgorin={}, mm_structural_symmetry_hint={:?}",
-                cg_screen_structural.diagnostics.sampled_pair_count,
-                cg_screen_structural.diagnostics.symmetry_violation_count,
-                100.0 * cg_screen_structural.diagnostics.symmetry_violation_rate,
+                cg_screen_structural.diagnostics.symmetry.sampled_pair_count,
+                cg_screen_structural.diagnostics.symmetry.symmetry_violation_count,
+                100.0 * cg_screen_structural.diagnostics.symmetry.symmetry_violation_rate,
                 cg_screen_structural.diagnostics.non_positive_diagonal_count,
                 cg_screen_structural.diagnostics.weak_gershgorin_count,
-                cg_screen_structural.diagnostics.structural_symmetry_hint
+                cg_screen_structural.diagnostics.symmetry.structural_symmetry_hint
+            ));
+            contract_checks.push(format!(
+                "CG symmetry verdict (metadata-expanded): {}",
+                cg_screen_structural.diagnostics.symmetry.verdict
             ));
         } else if !cg_screen_structural.warnings.is_empty() {
             contract_checks.push(format!(
@@ -1166,6 +1181,15 @@ fn select_solver_policy(
             );
         }
         "sherman3" => {
+            if screen.spd_like_hint
+                && screen.symmetry.symmetry_violation_rate > SYMMETRY_MAX_ASYMMETRY_RATE
+            {
+                panic!(
+                    "sherman3 invariant violated: SPD-like hint cannot co-exist with high nonsymmetry (sampled asymmetry {:.2}% > {:.2}%)",
+                    100.0 * screen.symmetry.symmetry_violation_rate,
+                    100.0 * SYMMETRY_MAX_ASYMMETRY_RATE
+                );
+            }
             fallback_solver = "bicgstab".to_string();
             fallback_pc = "ilut".to_string();
             rationale.push(
@@ -1451,13 +1475,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
                     println!(
-                        "    → Screen: symmetry_hint={}, spd_like_hint={}, diagonal_healthy={}, density={:.3e}, size_class={}, cond_heuristic={:.2e}",
+                        "    → Screen: symmetry_hint={}, spd_like_hint={}, diagonal_healthy={}, density={:.3e}, size_class={}, cond_heuristic={:.2e}, symmetry_verdict={}",
                         screen.symmetry_hint,
                         screen.spd_like_hint,
                         screen.diagonal_healthy,
                         screen.density,
                         screen.size_class,
-                        screen.condition_heuristic
+                        screen.condition_heuristic,
+                        screen.symmetry.verdict
                     );
                     println!("    → {}", decision.amg_status_label);
                     println!(

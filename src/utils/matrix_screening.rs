@@ -2,16 +2,27 @@
 
 use crate::matrix::sparse::CsrMatrix;
 
+pub const SYMMETRY_SAMPLE_ROW_LIMIT: usize = 1024;
+pub const SYMMETRY_ABS_TOL: f64 = 1e-7;
+pub const SYMMETRY_MAX_ASYMMETRY_RATE: f64 = 0.01; // 1%
+
 #[derive(Clone, Debug)]
-pub struct CgCompatibilityDiagnostics {
+pub struct SymmetryAssessment {
     pub sampled_pair_count: usize,
     pub symmetry_violation_count: usize,
     pub symmetry_violation_rate: f64,
+    pub structural_symmetry_hint: Option<bool>,
+    pub used_structural_symmetry_expansion: bool,
+    pub passes_threshold: bool,
+    pub verdict: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CgCompatibilityDiagnostics {
+    pub symmetry: SymmetryAssessment,
     pub non_positive_diagonal_count: usize,
     pub weak_gershgorin_count: usize,
     pub conditioning_ratio_estimate: Option<f64>,
-    pub structural_symmetry_hint: Option<bool>,
-    pub used_structural_symmetry_expansion: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -131,18 +142,94 @@ pub fn has_positive_diagonal(a: &CsrMatrix<f64>, tol: f64, max_rows: usize) -> b
     true
 }
 
+pub fn assess_symmetry(
+    matrix: &CsrMatrix<f64>,
+    structural_symmetry_hint: Option<bool>,
+    use_structural_symmetry_expansion: bool,
+) -> SymmetryAssessment {
+    let n = matrix.nrows().min(matrix.ncols());
+    let sample_rows = n.min(SYMMETRY_SAMPLE_ROW_LIMIT);
+    let mut sampled_pairs = 0usize;
+    let mut symmetry_violations = 0usize;
+
+    for i in 0..sample_rows {
+        let (cols, vals) = matrix.row(i);
+        for (&j, &a_ij) in cols.iter().zip(vals.iter()) {
+            if j == i || j >= sample_rows {
+                continue;
+            }
+            sampled_pairs += 1;
+            let a_ji = lookup_csr(matrix, j, i).unwrap_or(0.0);
+            if (a_ij - a_ji).abs() > SYMMETRY_ABS_TOL {
+                symmetry_violations += 1;
+            }
+        }
+    }
+
+    let symmetry_violation_rate = if sampled_pairs > 0 {
+        symmetry_violations as f64 / sampled_pairs as f64
+    } else {
+        0.0
+    };
+    let sampled_symmetry_ok =
+        sampled_pairs == 0 || symmetry_violation_rate <= SYMMETRY_MAX_ASYMMETRY_RATE;
+    let passes_threshold = if use_structural_symmetry_expansion {
+        structural_symmetry_hint.unwrap_or(sampled_symmetry_ok) || sampled_symmetry_ok
+    } else {
+        sampled_symmetry_ok
+    };
+    let verdict = if passes_threshold {
+        format!(
+            "symmetry pass: sampled asymmetry {:.2}% <= {:.2}% (pairs={}, metadata_hint={:?}, metadata_expansion={})",
+            100.0 * symmetry_violation_rate,
+            100.0 * SYMMETRY_MAX_ASYMMETRY_RATE,
+            sampled_pairs,
+            structural_symmetry_hint,
+            if use_structural_symmetry_expansion {
+                "on"
+            } else {
+                "off"
+            }
+        )
+    } else {
+        format!(
+            "symmetry fail: sampled asymmetry {:.2}% > {:.2}% (pairs={}, metadata_hint={:?}, metadata_expansion={})",
+            100.0 * symmetry_violation_rate,
+            100.0 * SYMMETRY_MAX_ASYMMETRY_RATE,
+            sampled_pairs,
+            structural_symmetry_hint,
+            if use_structural_symmetry_expansion {
+                "on"
+            } else {
+                "off"
+            }
+        )
+    };
+
+    SymmetryAssessment {
+        sampled_pair_count: sampled_pairs,
+        symmetry_violation_count: symmetry_violations,
+        symmetry_violation_rate,
+        structural_symmetry_hint,
+        used_structural_symmetry_expansion: use_structural_symmetry_expansion,
+        passes_threshold,
+        verdict,
+    }
+}
+
 pub fn cg_compatibility_screen(
     matrix: &CsrMatrix<f64>,
     diag_issues: bool,
     structural_symmetry_hint: Option<bool>,
     use_structural_symmetry_expansion: bool,
 ) -> CgCompatibility {
+    let symmetry = assess_symmetry(
+        matrix,
+        structural_symmetry_hint,
+        use_structural_symmetry_expansion,
+    );
     let n = matrix.nrows().min(matrix.ncols());
-    let sample_rows = n.min(1024);
-    let symmetry_tol = 1e-7;
-
-    let mut sampled_pairs = 0usize;
-    let mut symmetry_violations = 0usize;
+    let sample_rows = n.min(SYMMETRY_SAMPLE_ROW_LIMIT);
     let mut non_positive_diagonal = 0usize;
     let mut weak_gershgorin_rows = 0usize;
     let mut min_pos_diag = f64::INFINITY;
@@ -160,13 +247,6 @@ pub fn cg_compatibility_screen(
                 continue;
             }
             row_abs_offdiag_sum += a_ij.abs();
-            if j < sample_rows {
-                sampled_pairs += 1;
-                let a_ji = lookup_csr(matrix, j, i).unwrap_or(0.0);
-                if (a_ij - a_ji).abs() > symmetry_tol {
-                    symmetry_violations += 1;
-                }
-            }
         }
 
         let d = diag.unwrap_or(0.0);
@@ -184,12 +264,7 @@ pub fn cg_compatibility_screen(
         }
     }
 
-    let sampled_symmetry_ok = sampled_pairs == 0 || symmetry_violations * 100 <= sampled_pairs;
-    let symmetry_ok = if use_structural_symmetry_expansion {
-        structural_symmetry_hint.unwrap_or(sampled_symmetry_ok) || sampled_symmetry_ok
-    } else {
-        sampled_symmetry_ok
-    };
+    let symmetry_ok = symmetry.passes_threshold;
     let diag_ok = non_positive_diagonal == 0 && !diag_issues;
     let gershgorin_ok = weak_gershgorin_rows * 5 <= sample_rows.max(1); // <=20% weak rows
     let conditioning_ratio_estimate = if min_pos_diag.is_finite() && min_pos_diag > 0.0 {
@@ -197,19 +272,9 @@ pub fn cg_compatibility_screen(
     } else {
         None
     };
-    let symmetry_rate = if sampled_pairs > 0 {
-        symmetry_violations as f64 / sampled_pairs as f64
-    } else {
-        0.0
-    };
-
     let mut hard_reject_reasons = Vec::new();
     if !symmetry_ok {
-        hard_reject_reasons.push(format!(
-            "sampled asymmetry {:.2}% exceeds {:.2}% threshold",
-            100.0 * symmetry_rate,
-            1.0
-        ));
+        hard_reject_reasons.push(symmetry.verdict.clone());
     }
     if !diag_ok {
         hard_reject_reasons.push(format!(
@@ -244,14 +309,10 @@ pub fn cg_compatibility_screen(
     }
 
     let diagnostics = CgCompatibilityDiagnostics {
-        sampled_pair_count: sampled_pairs,
-        symmetry_violation_count: symmetry_violations,
-        symmetry_violation_rate: symmetry_rate,
+        symmetry: symmetry.clone(),
         non_positive_diagonal_count: non_positive_diagonal,
         weak_gershgorin_count: weak_gershgorin_rows,
         conditioning_ratio_estimate,
-        structural_symmetry_hint,
-        used_structural_symmetry_expansion: use_structural_symmetry_expansion,
     };
 
     if hard_reject_reasons.is_empty() {
@@ -266,7 +327,7 @@ pub fn cg_compatibility_screen(
             hard_reject_reasons,
             reason: format!(
                 "CG contract accepted: sampled symmetry/SPD hard checks passed (sym diff {:.2}%, weak Gershgorin rows {}/{}, diag issues: {}, structural expansion: {}, warnings: {})",
-                100.0 * symmetry_rate,
+                100.0 * symmetry.symmetry_violation_rate,
                 weak_gershgorin_rows,
                 sample_rows,
                 if diag_issues { "yes" } else { "no" },
