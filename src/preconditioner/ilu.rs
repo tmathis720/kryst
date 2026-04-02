@@ -55,7 +55,9 @@ use crate::preconditioner::{PcSide, legacy::Preconditioner, pivot::*, tri_solve:
 use crate::utils::conditioning::{ConditioningOptions, apply_dense_transforms};
 use crate::utils::metrics::{Counters, SolveTimer};
 use crate::utils::monitor::{Event, Monitor};
+use crate::utils::permutation::{Permutation, amd_from_adj, rcm_from_adj};
 use faer::Mat;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(feature = "rayon")]
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -380,6 +382,15 @@ impl IluBuilder {
     /// Set pivot handling policy
     pub fn pivot_policy(mut self, policy: PivotPolicy) -> Self {
         self.config.pivot_policy = policy;
+        self
+    }
+
+    /// Set absolute pivot floor (`tau`) used by the stabilization policy.
+    ///
+    /// This is exposed as a first-class knob so demo fallback ladders can tighten
+    /// pivot protection alongside drop tolerance and row fill limits.
+    pub fn pivot_floor(mut self, tau: Real) -> Self {
+        self.config.pivot_policy.tau = tau.max(0.0);
         self
     }
 
@@ -1304,176 +1315,319 @@ impl Ilu {
         Ok(())
     }
 
-    /// Compute ILU(k) factorization with level-of-fill control
-    fn compute_iluk(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
+    /// Compute the preprocessing permutation used by ILU(k)/ILUT setup.
+    fn compute_factor_permutation(&self, matrix: &Mat<f64>) -> Permutation {
         let n = matrix.nrows();
-        let mut l = Mat::zeros(n, n);
-        let mut u = Mat::zeros(n, n);
-
-        // Level-of-fill tracking: level[i][j] = fill level of entry (i,j)
-        let mut level = vec![vec![usize::MAX; n]; n];
-
-        // Initialize levels for original nonzeros
+        let mut adj = vec![Vec::new(); n];
         for i in 0..n {
-            for j in 0..n {
-                if matrix[(i, j)] != 0.0 {
-                    level[i][j] = 0;
-                    if i <= j {
-                        u[(i, j)] = matrix[(i, j)];
-                    } else {
-                        l[(i, j)] = matrix[(i, j)];
-                    }
-                }
-            }
-            l[(i, i)] = 1.0; // Unit diagonal for L
-        }
-
-        // ILU(k) factorization with fill-level control
-        for k in 0..n {
-            let mut pivot = u[(k, k)];
-            self.handle_pivot(&mut pivot, k, matrix)?;
-            u[(k, k)] = pivot;
-
-            for i in (k + 1)..n {
-                if level[i][k] <= self.config.level_of_fill {
-                    l[(i, k)] = l[(i, k)] / pivot;
-
-                    for j in (k + 1)..n {
-                        if level[k][j] <= self.config.level_of_fill {
-                            let new_level =
-                                level[i][k].saturating_add(level[k][j]).saturating_add(1);
-
-                            if new_level <= self.config.level_of_fill {
-                                let update = l[(i, k)] * u[(k, j)];
-                                u[(i, j)] = u[(i, j)] - update;
-                                level[i][j] = level[i][j].min(new_level);
-                            }
-                        }
-                    }
-                } else {
-                    l[(i, k)] = 0.0; // Drop high-level fill
+            for j in (i + 1)..n {
+                if matrix[(i, j)] != 0.0 || matrix[(j, i)] != 0.0 {
+                    adj[i].push(j);
+                    adj[j].push(i);
                 }
             }
         }
 
-        // Convert to sparse format and cache inverse diagonal
-        let drop_tol: f64 = 1e-15;
-        self.l = CsrMatrix::from_dense(&l, drop_tol)?;
-        self.u = CsrMatrix::from_dense(&u, drop_tol)?;
-
-        self.inv_diag_u = (0..n).map(|i| 1.0 / u[(i, i)]).collect();
-
-        self.nnz_l = self.l.nnz();
-        self.nnz_u = self.u.nnz();
-
-        Ok(())
+        match self.config.reordering_type {
+            ReorderingType::None | ReorderingType::Natural => Permutation::identity(n),
+            ReorderingType::RCM => rcm_from_adj(&mut adj),
+            ReorderingType::AMD => amd_from_adj(&mut adj),
+        }
     }
 
-    /// Compute ILUT factorization with threshold-based dropping
-    fn compute_ilut(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
+    fn permute_dense_symmetric(matrix: &Mat<f64>, perm: &Permutation) -> Mat<f64> {
         let n = matrix.nrows();
-        let mut l = Mat::zeros(n, n);
-        let mut u = Mat::zeros(n, n);
-        let drop_tol: f64 = self.config.drop_tolerance;
-
-        // Initialize with matrix values above drop tolerance
+        let mut result = Mat::zeros(n, n);
         for i in 0..n {
+            let old_i = perm.p[i];
             for j in 0..n {
-                let val = matrix[(i, j)];
-                if val.abs() >= drop_tol {
-                    if i <= j {
-                        u[(i, j)] = val;
-                    } else {
-                        l[(i, j)] = val;
-                    }
-                }
-            }
-            l[(i, i)] = 1.0; // Unit diagonal for L
-        }
-
-        // ILUT factorization with threshold dropping and fill control
-        for k in 0..n {
-            let mut pivot = u[(k, k)];
-            self.handle_pivot(&mut pivot, k, matrix)?;
-            u[(k, k)] = pivot;
-
-            // Collect potential updates for this elimination step
-            let mut updates = Vec::new();
-
-            for i in (k + 1)..n {
-                if l[(i, k)].abs() >= drop_tol {
-                    l[(i, k)] = l[(i, k)] / pivot;
-
-                    for j in (k + 1)..n {
-                        if u[(k, j)].abs() >= drop_tol {
-                            let update = l[(i, k)] * u[(k, j)];
-                            updates.push((i, j, update));
-                        }
-                    }
-                }
-            }
-
-            // Apply updates with threshold dropping
-            for (i, j, update) in updates {
-                let new_val = u[(i, j)] - update;
-                if new_val.abs() >= drop_tol {
-                    u[(i, j)] = new_val;
-                } else {
-                    u[(i, j)] = 0.0; // Drop small entries
-                }
-            }
-
-            // Apply fill-in control per row if specified
-            if self.config.max_fill_per_row > 0 {
-                for i in (k + 1)..n {
-                    self.apply_fill_control_to_row(&mut u, i, k + 1);
-                }
+                let old_j = perm.p[j];
+                result[(i, j)] = matrix[(old_i, old_j)];
             }
         }
-
-        // Convert to sparse format and cache inverse diagonal
-        let drop_tol: f64 = 1e-15;
-        self.l = CsrMatrix::from_dense(&l, drop_tol)?;
-        self.u = CsrMatrix::from_dense(&u, drop_tol)?;
-
-        self.inv_diag_u = (0..n).map(|i| 1.0 / u[(i, i)]).collect();
-
-        self.nnz_l = self.l.nnz();
-        self.nnz_u = self.u.nnz();
-
-        Ok(())
+        result
     }
 
-    /// Apply fill-in control to a single row, keeping only the largest entries
-    fn apply_fill_control_to_row(&self, matrix: &mut Mat<f64>, row: usize, start_col: usize) {
-        if self.config.max_fill_per_row == 0 {
+    fn prune_row_keep_largest(row: &mut BTreeMap<usize, f64>, max_keep: usize, min_col: usize) {
+        if max_keep == 0 {
             return;
         }
 
-        // Collect (magnitude, column, value) for this row
-        let mut entries: Vec<(f64, usize, f64)> = Vec::new();
-        for j in start_col..matrix.ncols() {
-            let val = matrix[(row, j)];
-            if val != 0.0 {
-                entries.push((val.abs(), j, val));
+        let mut candidates: Vec<(usize, f64)> = row
+            .iter()
+            .filter_map(|(&j, &v)| (j >= min_col).then_some((j, v)))
+            .collect();
+        if candidates.len() <= max_keep {
+            return;
+        }
+        candidates.sort_by(|a, b| {
+            b.1.abs()
+                .partial_cmp(&a.1.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        candidates.truncate(max_keep);
+        let keep: std::collections::HashSet<usize> =
+            candidates.into_iter().map(|(j, _)| j).collect();
+        row.retain(|&j, _| j < min_col || keep.contains(&j));
+    }
+
+    /// Compute ILU(k) factorization with sparse row-oriented level tracking.
+    ///
+    /// This backend is tuned for large sparse problems; dense `n x n` temporary factors
+    /// cause quadratic memory growth and quickly become the setup bottleneck for demo ladders.
+    fn compute_iluk(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
+        let n = matrix.nrows();
+        let perm = self.compute_factor_permutation(matrix);
+        self.row_perm = perm.p.clone();
+        self.col_perm = perm.p.clone();
+        let factor_matrix = Self::permute_dense_symmetric(matrix, &perm);
+        let lfill = self.config.level_of_fill;
+
+        let mut l_rows = vec![BTreeMap::<usize, f64>::new(); n];
+        let mut u_rows = vec![BTreeMap::<usize, f64>::new(); n];
+        let mut level_rows = vec![HashMap::<usize, usize>::new(); n];
+
+        for i in 0..n {
+            l_rows[i].insert(i, 1.0);
+            for j in 0..n {
+                let aij = factor_matrix[(i, j)];
+                if aij == 0.0 {
+                    continue;
+                }
+                level_rows[i].insert(j, 0);
+                if j < i {
+                    l_rows[i].insert(j, aij);
+                } else {
+                    u_rows[i].insert(j, aij);
+                }
             }
         }
 
-        if entries.len() > self.config.max_fill_per_row {
-            // Sort by magnitude (largest first)
-            entries.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        for i in 0..n {
+            let mut w = BTreeMap::<usize, f64>::new();
+            for (&j, &v) in &l_rows[i] {
+                if j < i {
+                    w.insert(j, v);
+                }
+            }
+            for (&j, &v) in &u_rows[i] {
+                w.insert(j, v);
+            }
+            let mut w_level = level_rows[i].clone();
 
-            // Zero out all entries first
-            for j in start_col..matrix.ncols() {
-                matrix[(row, j)] = 0.0;
+            let lower_cols: Vec<usize> = w.keys().copied().filter(|&j| j < i).collect();
+            for k in lower_cols {
+                let Some(&lev_ik) = w_level.get(&k) else {
+                    continue;
+                };
+                if lev_ik > lfill {
+                    continue;
+                }
+
+                let mut ukk = u_rows[k].get(&k).copied().unwrap_or(0.0);
+                self.handle_pivot(&mut ukk, k, &factor_matrix)?;
+                u_rows[k].insert(k, ukk);
+                self.inv_diag_u.resize(n, 0.0);
+                self.inv_diag_u[k] = 1.0 / ukk;
+
+                let lik = w.get(&k).copied().unwrap_or(0.0) / ukk;
+                w.insert(k, lik);
+
+                for (&j, &ukj) in &u_rows[k] {
+                    if j <= k {
+                        continue;
+                    }
+                    let lev_kj = *level_rows[k].get(&j).unwrap_or(&usize::MAX);
+                    if lev_kj == usize::MAX {
+                        continue;
+                    }
+                    let new_level = lev_ik.saturating_add(lev_kj).saturating_add(1);
+                    if new_level > lfill {
+                        continue;
+                    }
+                    let entry = w.entry(j).or_insert(0.0);
+                    *entry -= lik * ukj;
+                    let cur = w_level.get(&j).copied().unwrap_or(usize::MAX);
+                    if new_level < cur {
+                        w_level.insert(j, new_level);
+                    }
+                }
             }
 
-            // Keep only the largest entries
-            for i in 0..self.config.max_fill_per_row.min(entries.len()) {
-                let (_, j, val) = entries[i];
-                matrix[(row, j)] = val;
+            l_rows[i].clear();
+            l_rows[i].insert(i, 1.0);
+            u_rows[i].clear();
+
+            for (j, v) in w {
+                let lev = *w_level.get(&j).unwrap_or(&usize::MAX);
+                if lev > lfill {
+                    continue;
+                }
+                if j < i {
+                    l_rows[i].insert(j, v);
+                } else {
+                    u_rows[i].insert(j, v);
+                }
             }
+
+            let mut pivot = u_rows[i].get(&i).copied().unwrap_or(0.0);
+            self.handle_pivot(&mut pivot, i, &factor_matrix)?;
+            u_rows[i].insert(i, pivot);
+            self.inv_diag_u.resize(n, 0.0);
+            self.inv_diag_u[i] = 1.0 / pivot;
+            level_rows[i] = w_level;
         }
+
+        let mut l_row_ptr = Vec::with_capacity(n + 1);
+        let mut l_cols = Vec::new();
+        let mut l_vals = Vec::new();
+        l_row_ptr.push(0);
+        for (i, row) in l_rows.iter().enumerate() {
+            for (&j, &v) in row {
+                if j <= i {
+                    l_cols.push(j);
+                    l_vals.push(v);
+                }
+            }
+            l_row_ptr.push(l_cols.len());
+        }
+
+        let mut u_row_ptr = Vec::with_capacity(n + 1);
+        let mut u_cols = Vec::new();
+        let mut u_vals = Vec::new();
+        u_row_ptr.push(0);
+        for (i, row) in u_rows.iter().enumerate() {
+            for (&j, &v) in row {
+                if j >= i {
+                    u_cols.push(j);
+                    u_vals.push(v);
+                }
+            }
+            u_row_ptr.push(u_cols.len());
+        }
+
+        self.l = CsrMatrix::from_csr(n, n, l_row_ptr, l_cols, l_vals);
+        self.u = CsrMatrix::from_csr(n, n, u_row_ptr, u_cols, u_vals);
+        self.nnz_l = self.l.nnz();
+        self.nnz_u = self.u.nnz();
+
+        Ok(())
+    }
+
+    /// Compute ILUT with sparse row-oriented dropping/fill caps.
+    ///
+    /// Like ILU(k), this path avoids dense temporary factors so demo preconditioner ladders
+    /// remain practical on large sparse matrices.
+    fn compute_ilut(&mut self, matrix: &Mat<f64>) -> Result<(), KError> {
+        let n = matrix.nrows();
+        let perm = self.compute_factor_permutation(matrix);
+        self.row_perm = perm.p.clone();
+        self.col_perm = perm.p.clone();
+        let factor_matrix = Self::permute_dense_symmetric(matrix, &perm);
+        let drop_tol: f64 = self.config.drop_tolerance;
+        let max_fill = self.config.max_fill_per_row;
+
+        let mut l_rows = vec![BTreeMap::<usize, f64>::new(); n];
+        let mut u_rows = vec![BTreeMap::<usize, f64>::new(); n];
+
+        self.inv_diag_u = vec![0.0; n];
+
+        for i in 0..n {
+            let mut w = BTreeMap::<usize, f64>::new();
+            for j in 0..n {
+                let aij = factor_matrix[(i, j)];
+                if aij.abs() >= drop_tol || j == i {
+                    w.insert(j, aij);
+                }
+            }
+
+            let lower_cols: Vec<usize> = w.keys().copied().filter(|&j| j < i).collect();
+            for k in lower_cols {
+                let wk = w.get(&k).copied().unwrap_or(0.0);
+                if wk.abs() < drop_tol {
+                    w.remove(&k);
+                    continue;
+                }
+                let mut ukk = u_rows[k].get(&k).copied().unwrap_or(0.0);
+                self.handle_pivot(&mut ukk, k, &factor_matrix)?;
+                u_rows[k].insert(k, ukk);
+                self.inv_diag_u[k] = 1.0 / ukk;
+
+                let lik = wk / ukk;
+                if lik.abs() < drop_tol {
+                    w.remove(&k);
+                    continue;
+                }
+                w.insert(k, lik);
+
+                for (&j, &ukj) in &u_rows[k] {
+                    if j <= k {
+                        continue;
+                    }
+                    let new_val = w.get(&j).copied().unwrap_or(0.0) - lik * ukj;
+                    if new_val.abs() >= drop_tol {
+                        w.insert(j, new_val);
+                    } else if j != i {
+                        w.remove(&j);
+                    }
+                }
+            }
+
+            l_rows[i].clear();
+            l_rows[i].insert(i, 1.0);
+            u_rows[i].clear();
+            for (j, v) in w {
+                if j < i {
+                    if v.abs() >= drop_tol {
+                        l_rows[i].insert(j, v);
+                    }
+                } else if j == i || v.abs() >= drop_tol {
+                    u_rows[i].insert(j, v);
+                }
+            }
+            Self::prune_row_keep_largest(&mut l_rows[i], max_fill, 0);
+            l_rows[i].retain(|&j, _| j < i || j == i);
+            Self::prune_row_keep_largest(&mut u_rows[i], max_fill, i + 1);
+
+            let mut pivot = u_rows[i].get(&i).copied().unwrap_or(0.0);
+            self.handle_pivot(&mut pivot, i, &factor_matrix)?;
+            u_rows[i].insert(i, pivot);
+            self.inv_diag_u[i] = 1.0 / pivot;
+        }
+
+        let mut l_row_ptr = Vec::with_capacity(n + 1);
+        let mut l_cols = Vec::new();
+        let mut l_vals = Vec::new();
+        l_row_ptr.push(0);
+        for (i, row) in l_rows.iter().enumerate() {
+            for (&j, &v) in row {
+                if j <= i {
+                    l_cols.push(j);
+                    l_vals.push(v);
+                }
+            }
+            l_row_ptr.push(l_cols.len());
+        }
+
+        let mut u_row_ptr = Vec::with_capacity(n + 1);
+        let mut u_cols = Vec::new();
+        let mut u_vals = Vec::new();
+        u_row_ptr.push(0);
+        for (i, row) in u_rows.iter().enumerate() {
+            for (&j, &v) in row {
+                if j >= i {
+                    u_cols.push(j);
+                    u_vals.push(v);
+                }
+            }
+            u_row_ptr.push(u_cols.len());
+        }
+
+        self.l = CsrMatrix::from_csr(n, n, l_row_ptr, l_cols, l_vals);
+        self.u = CsrMatrix::from_csr(n, n, u_row_ptr, u_cols, u_vals);
+        self.nnz_l = self.l.nnz();
+        self.nnz_u = self.u.nnz();
+        Ok(())
     }
 
     /// Compute the LU product for entry (i, j) using the provided CSR slices.
@@ -2381,10 +2535,45 @@ impl Ilu {
         }
 
         let _timer = SolveTimer::start(&self.solve_ctrs);
+        let has_perm =
+            !self.row_perm.is_empty() && self.row_perm.iter().enumerate().any(|(i, &p)| i != p);
+
+        if has_perm {
+            let mut perm_in = self.workspace.borrow_solve_buf(n);
+            for i in 0..n {
+                perm_in[i] = x[self.row_perm[i]];
+            }
+
+            let mut tmp = self.workspace.temp2.lock().unwrap();
+            let solve_rhs = &perm_in[..n];
+            let solve_out = &mut tmp[..n];
+
+            match self.config.triangular_solve {
+                TriSolveType::Exact => {
+                    solve_out.copy_from_slice(solve_rhs);
+                    self.solve_triangular_exact(true, solve_out);
+                    self.solve_triangular_exact(false, solve_out);
+                }
+                TriSolveType::Jacobi => {
+                    self.solve_triangular_jacobi(true, solve_rhs, solve_out);
+                    self.solve_triangular_jacobi(false, solve_out, &mut perm_in[..n]);
+                    solve_out.copy_from_slice(&perm_in[..n]);
+                }
+                TriSolveType::GaussSeidel => {
+                    self.solve_triangular_gauss_seidel(true, solve_rhs, solve_out);
+                    self.solve_triangular_gauss_seidel(false, solve_out, &mut perm_in[..n]);
+                    solve_out.copy_from_slice(&perm_in[..n]);
+                }
+            }
+
+            for old_i in 0..n {
+                y[old_i] = solve_out[self.col_perm[old_i]];
+            }
+            return Ok(());
+        }
 
         match self.config.triangular_solve {
             TriSolveType::Exact => {
-                // single copy mandated by API
                 y.copy_from_slice(x);
                 self.solve_triangular_exact(true, y);
                 self.solve_triangular_exact(false, y);
