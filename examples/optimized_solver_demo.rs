@@ -1507,6 +1507,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    fn compact_attempt_rung(attempt: Option<&AttemptRecord>, label: &str) -> String {
+        match attempt {
+            Some(attempt) => format!(
+                "{label}:{}+{},it={},t={},res={:.2e},status={}",
+                attempt.solver,
+                attempt.preconditioner,
+                attempt.iterations,
+                format_elapsed_ms(Some(attempt.elapsed_seconds)),
+                attempt.true_rel_residual,
+                attempt.solver_reported_status
+            ),
+            None => format!("{label}:-"),
+        }
+    }
+
+    fn compact_truth_rung(truth: Option<&TruthReference<DirectReferenceComparison>>) -> String {
+        match truth {
+            Some(truth) => {
+                let rel_res = truth
+                    .true_rel_residual
+                    .or_else(|| truth.comparison.as_ref().map(|cmp| cmp.rel_error_norm));
+                let status = if truth.selected_as_winner {
+                    "selected"
+                } else if truth.reference_solve_executed {
+                    "side-channel"
+                } else {
+                    "skipped"
+                };
+                format!(
+                    "truth:DIRECT_LU+none,it=-,t={},res={},status={}",
+                    format_elapsed_ms(truth.elapsed_seconds),
+                    rel_res
+                        .map(|value| format!("{value:.2e}"))
+                        .unwrap_or_else(|| "-".to_string()),
+                    status
+                )
+            }
+            None => "truth:-".to_string(),
+        }
+    }
+
+    fn format_rung_detail_block(
+        attempts: &[AttemptRecord],
+        truth: Option<&TruthReference<DirectReferenceComparison>>,
+    ) -> String {
+        let baseline = attempts.iter().find(|attempt| attempt.rung_id == 0);
+        let rescue_1 = attempts.iter().find(|attempt| attempt.rung_id == 1);
+        let rescue_2 = attempts.iter().find(|attempt| attempt.rung_id == 2);
+        [
+            compact_attempt_rung(baseline, "baseline"),
+            compact_attempt_rung(rescue_1, "rescue1"),
+            compact_attempt_rung(rescue_2, "rescue2"),
+            compact_truth_rung(truth),
+        ]
+        .join(" | ")
+    }
+
     fn is_root_rank() -> bool {
         // If MPI launcher environment variables are present, only rank 0 prints.
         // In regular (non-MPI) runs no rank variable is present, so default to true.
@@ -1849,6 +1906,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         })
                         .unwrap_or_else(|| "-".to_string());
+                    let benchmark_delta_with_rungs = if matches!(
+                        selected_mode,
+                        DemoMode::IterativeBenchmark | DemoMode::Both
+                    ) {
+                        format!(
+                            "{} || {}",
+                            benchmark_delta,
+                            format_rung_detail_block(
+                                &test_result.attempts,
+                                test_result.truth_reference.as_ref(),
+                            )
+                        )
+                    } else {
+                        benchmark_delta
+                    };
 
                     let verified = format_direct_verification_status(
                         direct_comparison,
@@ -1868,7 +1940,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             ref_diff_text,
                             policy_rung,
                             verdict,
-                            benchmark_delta
+                            benchmark_delta_with_rungs
                         );
                         if verbose_details {
                             println!(
