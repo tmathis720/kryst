@@ -88,9 +88,8 @@ use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::{
     AcceptanceContract, AcceptanceStatus, AttemptRecord, DirectReferenceComparison,
-    DirectReferencePolicyInput,
-    DirectVerificationCapability, FallbackStep, SolverTestResult, TruthReference,
-    classify_acceptance, classify_failure, direct_reference_policy,
+    DirectReferencePolicyInput, DirectVerificationCapability, FallbackStep, SolverTestResult,
+    TruthReference, classify_acceptance, classify_failure, direct_reference_policy,
     execute_fallback_ladder, format_direct_verification_status,
     global_direct_reference_policy_allows, render_attempt_chain, solver_reason_code,
 };
@@ -1755,16 +1754,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .truth_reference
                         .as_ref()
                         .and_then(|truth| truth.comparison.as_ref());
-                    let best_iterative = test_result.best_iterative_attempt();
+                    let best_accepted_iterative = test_result.best_accepted_iterative();
+                    let best_attempted_iterative = test_result.best_attempted_iterative();
+                    let best_iterative = best_accepted_iterative.or(best_attempted_iterative);
                     let row_category = classify_row_category(outcome_code, fallback, converged);
                     let iterative_row = row_category == "iterative_accepted";
-                    let best_iter_label = if iterative_row {
-                        best_iterative
-                            .map(|attempt| format!("{}+{}", attempt.solver, attempt.preconditioner))
-                            .unwrap_or_else(|| "-".to_string())
-                    } else {
-                        "N/A".to_string()
-                    };
+                    let best_iter_label = best_iterative
+                        .map(|attempt| format!("{}+{}", attempt.solver, attempt.preconditioner))
+                        .unwrap_or_else(|| "-".to_string());
                     let baseline_attempt = test_result.baseline_attempt();
                     let baseline_iters_time = format_iters_time(
                         baseline_attempt.map(|attempt| attempt.iterations),
@@ -1780,13 +1777,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .as_ref()
                             .and_then(|truth| truth.elapsed_seconds),
                     );
-                    let true_rel_res_text = if iterative_row {
-                        best_iterative
-                            .map(|attempt| format!("{:.2e}", attempt.true_rel_residual))
-                            .unwrap_or_else(|| "-".to_string())
-                    } else {
-                        "N/A".to_string()
-                    };
+                    let true_rel_res_text = best_iterative
+                        .map(|attempt| format!("{:.2e}", attempt.true_rel_residual))
+                        .unwrap_or_else(|| "-".to_string());
                     let reference = test_result
                         .truth_reference
                         .as_ref()
@@ -1808,32 +1801,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         _ => "failed".to_string(),
                     };
-                    let benchmark_delta = if iterative_row {
-                        best_iterative
-                            .map(|attempt| {
-                                if let Some(catalog_delta) = compare_best_iterative(
-                                    matrix_name,
-                                    &attempt.solver,
-                                    &attempt.preconditioner,
-                                    attempt.iterations,
-                                    attempt.accepted,
-                                ) {
-                                    let expectation = expectation_for(matrix_name)
-                                        .expect("benchmark catalog entry should exist");
-                                    let method = if catalog_delta.method_family_match {
-                                        "method=match"
-                                    } else {
-                                        "method=mismatch"
-                                    };
-                                    let range_status = if attempt.iterations
-                                        < expectation.iteration_range.min
-                                    {
-                                        format!(
-                                            "iter=below({:+})",
-                                            catalog_delta.iteration_delta_low
-                                        )
-                                    } else if attempt.iterations > expectation.iteration_range.max
-                                    {
+                    let benchmark_delta = best_iterative
+                        .map(|attempt| {
+                            if let Some(catalog_delta) = compare_best_iterative(
+                                matrix_name,
+                                &attempt.solver,
+                                &attempt.preconditioner,
+                                attempt.iterations,
+                                attempt.accepted,
+                            ) {
+                                let expectation = expectation_for(matrix_name)
+                                    .expect("benchmark catalog entry should exist");
+                                let method = if catalog_delta.method_family_match {
+                                    "method=match"
+                                } else {
+                                    "method=mismatch"
+                                };
+                                let range_status =
+                                    if attempt.iterations < expectation.iteration_range.min {
+                                        format!("iter=below({:+})", catalog_delta.iteration_delta_low)
+                                    } else if attempt.iterations > expectation.iteration_range.max {
                                         format!(
                                             "iter=above({:+})",
                                             catalog_delta.iteration_delta_high
@@ -1841,30 +1828,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         "iter=in-range(0)".to_string()
                                     };
-                                    let tolerance = if catalog_delta.tolerance_pass {
-                                        "tol=pass"
-                                    } else {
-                                        "tol=fail"
-                                    };
-                                    let confidence = match expectation.confidence {
-                                        ComparisonConfidence::Exact => "exact",
-                                        ComparisonConfidence::Approximate => "approx",
-                                    };
-                                    let time_note = expectation
-                                        .time_note
-                                        .map(|note| format!("; note={note}"))
-                                        .unwrap_or_default();
-                                    format!(
-                                        "{method}; {range_status}; {tolerance}; conf={confidence}{time_note}"
-                                    )
+                                let tolerance = if catalog_delta.tolerance_pass {
+                                    "tol=pass"
                                 } else {
-                                    "catalog=missing".to_string()
-                                }
-                            })
-                            .unwrap_or_else(|| "-".to_string())
-                    } else {
-                        "N/A".to_string()
-                    };
+                                    "tol=fail"
+                                };
+                                let confidence = match expectation.confidence {
+                                    ComparisonConfidence::Exact => "exact",
+                                    ComparisonConfidence::Approximate => "approx",
+                                };
+                                let time_note = expectation
+                                    .time_note
+                                    .map(|note| format!("; note={note}"))
+                                    .unwrap_or_default();
+                                format!(
+                                    "{method}; {range_status}; {tolerance}; conf={confidence}{time_note}"
+                                )
+                            } else {
+                                "catalog=missing".to_string()
+                            }
+                        })
+                        .unwrap_or_else(|| "-".to_string());
 
                     let verified = format_direct_verification_status(
                         direct_comparison,

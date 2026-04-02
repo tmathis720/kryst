@@ -56,7 +56,7 @@ impl<TComparison> SolverTestResult<TComparison> {
         self.attempts.iter().find(|attempt| attempt.rung_id == 0)
     }
 
-    pub fn best_iterative_attempt(&self) -> Option<&AttemptRecord> {
+    pub fn best_accepted_iterative(&self) -> Option<&AttemptRecord> {
         self.attempts
             .iter()
             .filter(|attempt| attempt.accepted)
@@ -67,6 +67,16 @@ impl<TComparison> SolverTestResult<TComparison> {
             })
     }
 
+    pub fn best_attempted_iterative(&self) -> Option<&AttemptRecord> {
+        self.attempts.iter().min_by(|a, b| {
+            a.true_rel_residual
+                .total_cmp(&b.true_rel_residual)
+                .then_with(|| a.true_abs_residual.total_cmp(&b.true_abs_residual))
+                .then_with(|| a.elapsed_seconds.total_cmp(&b.elapsed_seconds))
+                .then_with(|| a.iterations.cmp(&b.iterations))
+        })
+    }
+
     pub fn best_verified_attempt(&self) -> Option<&AttemptRecord> {
         if self
             .truth_reference
@@ -75,7 +85,7 @@ impl<TComparison> SolverTestResult<TComparison> {
         {
             return None;
         }
-        self.best_iterative_attempt()
+        self.best_accepted_iterative()
     }
 
     pub fn policy_rung_fidelity(&self) -> &'static str {
