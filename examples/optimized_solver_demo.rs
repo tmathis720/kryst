@@ -72,11 +72,11 @@ use kryst::utils::conditioning::{ConditioningOptions, ScaleDirection, ScaleNorm}
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::matrix_market::{MatrixMarketSymmetry, read_matrix_market};
+use kryst::utils::matrix_market::{read_matrix_market, MatrixMarketSymmetry};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_screening::{
-    SYMMETRY_MAX_ASYMMETRY_RATE, SymmetryAssessment, assess_symmetry, cg_compatibility_screen,
-    repair_diagonal_csr,
+    assess_symmetry, cg_compatibility_screen, repair_diagonal_csr, SymmetryAssessment,
+    SYMMETRY_MAX_ASYMMETRY_RATE,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
@@ -86,7 +86,7 @@ use kryst::utils::preconditioning_pipeline::apply_preconditioning_pipeline;
 use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::{
-    DirectReferenceLike, DirectVerificationCapability, format_direct_verification_status,
+    format_direct_verification_status, DirectReferenceLike, DirectVerificationCapability,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::str::FromStr;
@@ -1330,6 +1330,16 @@ fn select_solver_policy(
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    fn classify_row_category(outcome_code: &str, fallback: &str, converged: bool) -> &'static str {
+        if outcome_code == "DIRECT_TRUTH_PATH" || fallback.contains("DIRECT_LU (truth path)") {
+            "verified_by_direct_reference"
+        } else if converged {
+            "iterative_accepted"
+        } else {
+            "failed"
+        }
+    }
+
     fn is_root_rank() -> bool {
         // If MPI launcher environment variables are present, only rank 0 prints.
         // In regular (non-MPI) runs no rank variable is present, so default to true.
@@ -1375,18 +1385,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if is_root_rank {
         println!(
-            "{:<12} {:<18} {:<18} {:<16} {:<24} {:<12} {:<8} {}",
+            "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
             "Matrix",
             "Primary",
             "Fallback",
             "SolverCode",
             "OutcomeCode",
+            "Category",
             "Status",
             "Iters",
             "Performance vs Benchmark"
         );
-        println!("{}", "=".repeat(136));
+        println!("{}", "=".repeat(166));
     }
+
+    let mut total_rows = 0usize;
+    let mut iterative_success_rows = 0usize;
+    let mut verification_only_rows = 0usize;
+    let mut failed_rows = 0usize;
 
     for (matrix_name, _description) in test_matrices {
         let base_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -1408,10 +1424,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {
                 if is_root_rank {
                     println!(
-                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<12} {:<8} {}",
-                        matrix_name, "-", "-", "N/A", "FILES_MISSING", "failed", "N/A", "-"
+                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
+                        matrix_name,
+                        "-",
+                        "-",
+                        "N/A",
+                        "FILES_MISSING",
+                        "failed",
+                        "failed",
+                        "N/A",
+                        "-"
                     );
                 }
+                total_rows += 1;
+                failed_rows += 1;
                 continue;
             }
         };
@@ -1481,10 +1507,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if a_op.nrows() > 6000 {
             if is_root_rank {
                 println!(
-                    "{:<12} {:<18} {:<18} {:<16} {:<24} {:<12} {:<8} {}",
-                    matrix_name, "-", "-", "N/A", "TOO_LARGE", "failed", "SKIP", "-"
+                    "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
+                    matrix_name, "-", "-", "N/A", "TOO_LARGE", "failed", "failed", "SKIP", "-"
                 );
             }
+            total_rows += 1;
+            failed_rows += 1;
             continue;
         }
 
@@ -1513,8 +1541,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 converged,
                 direct_comparison,
             )) => {
+                let row_category = classify_row_category(&outcome_code, &fallback, converged);
                 // Compare with benchmark expectations
-                let iter_performance = if converged && iters <= decision.expected_iterations {
+                let iter_performance = if row_category == "verified_by_direct_reference" {
+                    "N/A (verification row)"
+                } else if converged && iters <= decision.expected_iterations {
                     "Better than expected"
                 } else if converged && iters <= decision.expected_iterations * 2 {
                     "Within expected range"
@@ -1531,16 +1562,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if is_root_rank {
                     println!(
-                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<12} {:<8} {}",
+                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
                         matrix_name,
                         primary,
                         fallback,
                         solver_reason,
                         outcome_code,
+                        row_category,
                         status,
                         iters,
                         iter_performance
                     );
+                    if row_category == "verified_by_direct_reference" {
+                        println!(
+                            "    ⇢ VERIFICATION ROW: direct reference metrics are authoritative for this result."
+                        );
+                    }
                     println!(
                         "    ↳ diagnostics: true_abs_res={:.2e}, true_rel_res={:.2e}, stats_res={:.2e}, verified={}",
                         true_abs_res, true_rel_res, prec_residual, verified
@@ -1552,10 +1589,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "skipped"
                         };
                         println!(
-                            "    → Direct reference check: status={}, abs_err_norm={:.3e}, rel_diff={:.3e}, matches_verified_answer={}, policy={}",
-                            reference_phase,
-                            cmp.abs_error_norm,
-                            cmp.rel_error_norm,
+                        "    → Direct reference check: status={}, abs_err_norm={:.3e}, rel_diff={:.3e}, matches_verified_answer={}, policy={}",
+                        reference_phase,
+                        cmp.abs_error_norm,
+                        cmp.rel_error_norm,
                             cmp.matches_verified_answer,
                             cmp.note
                         );
@@ -1582,6 +1619,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                 }
 
+                total_rows += 1;
+                match row_category {
+                    "iterative_accepted" => iterative_success_rows += 1,
+                    "verified_by_direct_reference" => verification_only_rows += 1,
+                    _ => failed_rows += 1,
+                }
+
                 // Additional diagnostics for interesting cases
                 if is_root_rank && screen.condition_heuristic >= 100.0 {
                     println!(
@@ -1605,15 +1649,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => {
                 if is_root_rank {
                     println!(
-                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<12} {:<8} {}",
-                        matrix_name, "-", "-", "N/A", "FAILED", "failed", "N/A", e
+                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
+                        matrix_name, "-", "-", "N/A", "FAILED", "failed", "failed", "N/A", e
                     );
                 }
+                total_rows += 1;
+                failed_rows += 1;
             }
         }
     }
 
     if is_root_rank {
+        println!();
+        println!("Acceptance Summary:");
+        println!("===================");
+        println!("• Total rows: {total_rows}");
+        println!("• Iterative accepted rows: {iterative_success_rows}");
+        println!("• Verification-only rows (direct truth path): {verification_only_rows}");
+        println!("• Failed rows: {failed_rows}");
         println!();
         println!("Benchmark Insights Summary:");
         println!("==========================");
