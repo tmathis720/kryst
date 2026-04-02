@@ -72,11 +72,11 @@ use kryst::utils::conditioning::{ConditioningOptions, ScaleDirection, ScaleNorm}
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::matrix_market::{MatrixMarketSymmetry, read_matrix_market};
+use kryst::utils::matrix_market::{read_matrix_market, MatrixMarketSymmetry};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_screening::{
-    SYMMETRY_MAX_ASYMMETRY_RATE, SymmetryAssessment, assess_symmetry, cg_compatibility_screen,
-    repair_diagonal_csr,
+    assess_symmetry, cg_compatibility_screen, repair_diagonal_csr, SymmetryAssessment,
+    SYMMETRY_MAX_ASYMMETRY_RATE,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
@@ -86,7 +86,7 @@ use kryst::utils::preconditioning_pipeline::apply_preconditioning_pipeline;
 use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::{
-    DirectReferenceLike, DirectVerificationCapability, format_direct_verification_status,
+    format_direct_verification_status, DirectReferenceLike, DirectVerificationCapability,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::str::FromStr;
@@ -98,7 +98,7 @@ use std::time::Instant;
 #[path = "support/benchmark_catalog.rs"]
 mod benchmark_catalog;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use benchmark_catalog::{ComparisonConfidence, compare_best_iterative, expectation_for};
+use benchmark_catalog::{compare_best_iterative, expectation_for, ComparisonConfidence};
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -710,6 +710,7 @@ fn test_optimal_solver(
     verbose_details: bool,
     direct_truth_policy: DirectTruthPolicy,
 ) -> Result<SolverTestResult, Box<dyn std::error::Error>> {
+    let iterative_benchmark_mode = !direct_truth_policy.allow_truth_path_winner;
     let mut solution = vec![0.0; rhs.len()];
     let csr_a_matrix = Arc::new(a_mat.clone());
     let a_op: Arc<dyn LinOp<S = f64>> = Arc::new(CsrOp::new(Arc::clone(&csr_a_matrix)));
@@ -881,6 +882,13 @@ fn test_optimal_solver(
         decision.primary_solver.to_uppercase(),
         decision.primary_pc.to_uppercase()
     );
+    let mut best_iterative_solution: Option<Vec<f64>> = None;
+    let mut best_iterative_method = "-".to_string();
+    let mut best_iterative_reason = "NO_ACCEPTED_SOLVE".to_string();
+    let mut best_iterative_outcome = "NO_ACCEPTED_SOLVE".to_string();
+    let mut best_iterative_diagnostics = String::new();
+    let mut best_iterative_iterations: Option<usize> = None;
+    let mut best_iterative_rel_residual: Option<f64> = None;
     let mut attempts = Vec::<AttemptRecord>::new();
     let mut truth_reference: Option<TruthReference> = None;
     let solve_started = Instant::now();
@@ -928,30 +936,42 @@ fn test_optimal_solver(
                     prep_trace,
                     stats.gmres_classical_retry
                 );
-                truth_reference = Some(TruthReference {
-                    selected_as_winner: false,
-                    reference_solve_executed: false,
-                    elapsed_seconds: None,
-                    true_abs_residual: None,
-                    true_rel_residual: None,
-                    comparison: compare_with_direct_reference(
-                        matrix_name,
-                        a_mat,
-                        &rhs_vec,
-                        &solution,
-                    )?,
-                    note: "iterative winner with direct-reference side-channel check".to_string(),
-                });
-                return Ok(SolverTestResult {
-                    primary_method,
-                    chosen_method: "-".to_string(),
-                    solver_reason,
-                    outcome_code: "PRIMARY_ACCEPTED".to_string(),
-                    diagnostics: reason,
-                    converged: true,
-                    attempts,
-                    truth_reference,
-                });
+                best_iterative_solution = Some(solution.clone());
+                best_iterative_method = "-".to_string();
+                best_iterative_reason = solver_reason.clone();
+                best_iterative_outcome = "PRIMARY_ACCEPTED".to_string();
+                best_iterative_diagnostics = reason.clone();
+                best_iterative_iterations = Some(stats.iterations);
+                best_iterative_rel_residual = Some(true_rel_res);
+                if iterative_benchmark_mode {
+                    // Continue through all fallback rungs and decide by the best iterative attempt.
+                } else {
+                    truth_reference = Some(TruthReference {
+                        selected_as_winner: false,
+                        reference_solve_executed: false,
+                        elapsed_seconds: None,
+                        true_abs_residual: None,
+                        true_rel_residual: None,
+                        comparison: compare_with_direct_reference(
+                            matrix_name,
+                            a_mat,
+                            &rhs_vec,
+                            &solution,
+                        )?,
+                        note: "iterative winner with direct-reference side-channel check"
+                            .to_string(),
+                    });
+                    return Ok(SolverTestResult {
+                        primary_method,
+                        chosen_method: "-".to_string(),
+                        solver_reason,
+                        outcome_code: "PRIMARY_ACCEPTED".to_string(),
+                        diagnostics: reason,
+                        converged: true,
+                        attempts,
+                        truth_reference,
+                    });
+                }
             }
             (
                 acceptance_status.as_str().to_string(),
@@ -967,7 +987,10 @@ fn test_optimal_solver(
         }
     };
 
-    if is_root_rank && verbose_details {
+    if is_root_rank
+        && verbose_details
+        && !matches!(primary_failure.as_str(), "ok" | "ok_with_warning")
+    {
         println!("    Primary rung failed, entering fallback ladder...");
     }
 
@@ -1053,6 +1076,35 @@ fn test_optimal_solver(
                         step.note,
                         attempt_log.join(" -> ")
                     );
+                    let replace_best =
+                        match (best_iterative_iterations, best_iterative_rel_residual) {
+                            (None, _) => true,
+                            (Some(best_iters), Some(best_rel)) => {
+                                stats_fallback.iterations < best_iters
+                                    || (stats_fallback.iterations == best_iters
+                                        && true_rel_res.total_cmp(&best_rel).is_lt())
+                            }
+                            (Some(_), None) => true,
+                        };
+                    if replace_best {
+                        best_iterative_solution = Some(sol_fb.clone());
+                        best_iterative_method = fallback_method.clone();
+                        best_iterative_reason = solver_reason.clone();
+                        best_iterative_outcome = "FALLBACK_ACCEPTED".to_string();
+                        best_iterative_diagnostics = reason.clone();
+                        best_iterative_iterations = Some(stats_fallback.iterations);
+                        best_iterative_rel_residual = Some(true_rel_res);
+                    }
+                    if iterative_benchmark_mode {
+                        attempt_log.push(format!(
+                            "rung={} [{}]: accepted reason={:?}, true_rel_res={:.3e}",
+                            step.rung,
+                            acceptance_status.as_str(),
+                            stats_fallback.reason,
+                            true_rel_res
+                        ));
+                        continue;
+                    }
                     truth_reference = Some(TruthReference {
                         selected_as_winner: false,
                         reference_solve_executed: false,
@@ -1189,6 +1241,11 @@ fn test_optimal_solver(
             });
         }
     } else if allow_direct && !direct_truth_policy.allow_truth_path_winner {
+        let comparison = if let Some(solution) = best_iterative_solution.as_ref() {
+            compare_with_direct_reference(matrix_name, a_mat, &rhs_vec, solution)?
+        } else {
+            None
+        };
         attempt_log.push(format!(
             "rung=3 [suppressed]: mode={} keeps direct reference as side-channel only ({})",
             direct_truth_policy.mode_label, direct_policy_reason
@@ -1199,7 +1256,7 @@ fn test_optimal_solver(
             elapsed_seconds: None,
             true_abs_residual: None,
             true_rel_residual: None,
-            comparison: None,
+            comparison,
             note: format!(
                 "truth_path suppressed by mode={} ({})",
                 direct_truth_policy.mode_label, direct_policy_reason
@@ -1215,6 +1272,19 @@ fn test_optimal_solver(
             true_rel_residual: None,
             comparison: None,
             note: format!("truth_path skipped: {direct_policy_reason}"),
+        });
+    }
+
+    if iterative_benchmark_mode && best_iterative_solution.is_some() {
+        return Ok(SolverTestResult {
+            primary_method,
+            chosen_method: best_iterative_method,
+            solver_reason: best_iterative_reason,
+            outcome_code: best_iterative_outcome,
+            diagnostics: best_iterative_diagnostics,
+            converged: true,
+            attempts,
+            truth_reference,
         });
     }
 
