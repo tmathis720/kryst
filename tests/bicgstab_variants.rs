@@ -32,6 +32,57 @@ struct NanOnceOp {
     calls: AtomicUsize,
 }
 
+struct ScriptedMatvecOp {
+    n: usize,
+    scripted_outputs: Vec<Vec<f64>>,
+    calls: AtomicUsize,
+}
+
+impl ScriptedMatvecOp {
+    fn new(n: usize, scripted_outputs: Vec<Vec<f64>>) -> Self {
+        Self {
+            n,
+            scripted_outputs,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn matvec_impl(&self, x: &[f64], y: &mut [f64]) {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(scripted) = self.scripted_outputs.get(call) {
+            y.copy_from_slice(scripted);
+            return;
+        }
+        y.copy_from_slice(x);
+    }
+}
+
+impl LinOp for ScriptedMatvecOp {
+    type S = f64;
+
+    fn dims(&self) -> (usize, usize) {
+        (self.n, self.n)
+    }
+
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        self.matvec_impl(x, y);
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl LinOpF64 for ScriptedMatvecOp {
+    fn dims(&self) -> (usize, usize) {
+        <Self as LinOp>::dims(self)
+    }
+
+    fn matvec(&self, x: &[f64], y: &mut [f64]) {
+        self.matvec_impl(x, y);
+    }
+}
+
 impl NanOnceOp {
     fn new(a: Mat<f64>, nan_call: usize) -> Self {
         Self {
@@ -266,4 +317,61 @@ fn bicgstab_rho_breakdown_policy_refresh_shadow_recovers() {
 
     assert!(stats.counters.residual_replacements >= 1);
     assert!(stats.iterations > strict_stats.iterations);
+}
+
+#[test]
+fn bicgstab_handles_t_zero_and_s_zero_as_converged_for_left_and_right() {
+    let comm = UniverseComm::NoComm(NoComm);
+    let b = vec![1.0, -2.0];
+    for side in [PcSide::Left, PcSide::Right] {
+        let op = ScriptedMatvecOp::new(
+            2,
+            vec![
+                vec![0.0, 0.0], // initial A*x0
+                vec![1.0, -2.0], // v = A*p
+                vec![0.0, 0.0], // t = A*s
+            ],
+        );
+        let mut solver = BiCgStabSolver::new(1e-12, 10);
+        solver.set_variant(BiCgStabVariant::LowSync);
+        let mut ws = kryst::context::ksp_context::Workspace::default();
+        let mut x = vec![0.0, 0.0];
+        let stats = solver
+            .solve_f64(&op, None, &b, &mut x, side, &comm, None, Some(&mut ws))
+            .expect("solve should return stats");
+
+        assert!(stats.reason.is_converged(), "side={side:?}, stats={stats:?}");
+        assert!(stats.final_residual <= 1e-10, "side={side:?}, stats={stats:?}");
+    }
+}
+
+#[test]
+fn bicgstab_handles_t_zero_and_s_nonzero_as_breakdown_for_left_and_right() {
+    let comm = UniverseComm::NoComm(NoComm);
+    let b = vec![1.0, 1.0];
+    for side in [PcSide::Left, PcSide::Right] {
+        let op = ScriptedMatvecOp::new(
+            2,
+            vec![
+                vec![0.0, 0.0], // initial A*x0
+                vec![1.0, 0.0], // v = A*p -> s != 0 after alpha step
+                vec![0.0, 0.0], // t = A*s
+            ],
+        );
+        let mut solver = BiCgStabSolver::new(1e-12, 10);
+        solver.set_variant(BiCgStabVariant::LowSync);
+        solver.atol = 0.0;
+        solver.rtol = 0.0;
+        let mut ws = kryst::context::ksp_context::Workspace::default();
+        let mut x = vec![0.0, 0.0];
+        let stats = solver
+            .solve_f64(&op, None, &b, &mut x, side, &comm, None, Some(&mut ws))
+            .expect("solve should return stats");
+
+        assert_eq!(
+            stats.reason,
+            ConvergedReason::DivergedBreakdownBiCG,
+            "side={side:?}, stats={stats:?}"
+        );
+    }
 }
