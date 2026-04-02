@@ -81,7 +81,9 @@ use kryst::utils::matrix_screening::{
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::preconditioning_pipeline::apply_preconditioning_pipeline;
+use kryst::utils::preconditioning_pipeline::{
+    apply_preconditioning_pipeline, PreconditioningMetadata,
+};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -557,7 +559,7 @@ fn select_reordering_for_preprocessing(
                 symmetric: false,
                 deterministic: true,
             };
-            return (mode, "amd_nonsym(transversal+amd)".to_string(), None);
+            return (mode, "amd_nonsym(greedy_matching+amd)".to_string(), None);
         }
         let fallback = ReorderingOptions {
             kind: ReorderingKind::None,
@@ -582,6 +584,17 @@ fn select_reordering_for_preprocessing(
         },
         "none".to_string(),
         None,
+    )
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn preprocessing_metadata_trace(meta: &PreconditioningMetadata) -> String {
+    let matched_pairs = meta.matched_pairs.as_ref().map_or(0usize, Vec::len);
+    format!(
+        "meta[row_scaled={}, col_scaled={}, nonsym_pairs={}]",
+        meta.row_scaling.is_some(),
+        meta.col_scaling.is_some(),
+        matched_pairs
     )
 }
 
@@ -1873,23 +1886,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 scale_norm: ScaleNorm::Inf,
                 ..ConditioningOptions::default()
             };
-            let (reordering, reordering_trace, mut fallback_note) =
+            let (reordering, reordering_trace, fallback_note) =
                 select_reordering_for_preprocessing(&prep_cfg, &a_op);
             let preprocessed = apply_preconditioning_pipeline(&a_op, &conditioning, &reordering)?;
             let (p_candidate, repaired) = repair_diagonal_csr(&preprocessed.matrix, 1e-14, 1e-8);
             let p_mat = Some(p_candidate);
-            if prep_cfg.nonsymmetric_matching && preprocessed.metadata.matched_pairs.is_none() {
-                fallback_note = Some(
-                "requested nonsymmetric matching is unavailable for this build/matrix path; fell back without matching"
-                    .to_string(),
-            );
-            }
+            let preprocessing_meta = preprocessing_metadata_trace(&preprocessed.metadata);
             let prep_trace = if repaired > 0 {
                 format!(
-                    "{} -> reorder[kind={}, symmetric={}]{} -> diag_repair[count={}, tol=1e-14, tau=1e-8]",
+                    "{} -> reorder[kind={}, symmetric={}] -> {}{} -> diag_repair[count={}, tol=1e-14, tau=1e-8]",
                     prep_cfg.as_trace(),
                     reordering_trace,
                     reordering.symmetric,
+                    preprocessing_meta,
                     fallback_note
                         .as_ref()
                         .map(|note| format!(" -> note[{note}]"))
@@ -1898,10 +1907,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             } else {
                 format!(
-                    "{} -> reorder[kind={}, symmetric={}]{} -> diag_repair[count=0]",
+                    "{} -> reorder[kind={}, symmetric={}] -> {}{} -> diag_repair[count=0]",
                     prep_cfg.as_trace(),
                     reordering_trace,
                     reordering.symmetric,
+                    preprocessing_meta,
                     fallback_note
                         .as_ref()
                         .map(|note| format!(" -> note[{note}]"))
