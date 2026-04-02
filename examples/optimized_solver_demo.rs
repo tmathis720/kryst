@@ -72,11 +72,11 @@ use kryst::utils::conditioning::{ConditioningOptions, ScaleDirection, ScaleNorm}
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::matrix_market::{read_matrix_market, MatrixMarketSymmetry};
+use kryst::utils::matrix_market::{MatrixMarketSymmetry, read_matrix_market};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_screening::{
-    assess_symmetry, cg_compatibility_screen, repair_diagonal_csr, SymmetryAssessment,
-    SYMMETRY_MAX_ASYMMETRY_RATE,
+    SYMMETRY_MAX_ASYMMETRY_RATE, SymmetryAssessment, assess_symmetry, cg_compatibility_screen,
+    repair_diagonal_csr,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
@@ -86,7 +86,7 @@ use kryst::utils::preconditioning_pipeline::apply_preconditioning_pipeline;
 use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::{
-    format_direct_verification_status, DirectReferenceLike, DirectVerificationCapability,
+    DirectReferenceLike, DirectVerificationCapability, format_direct_verification_status,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::str::FromStr;
@@ -163,6 +163,7 @@ struct DirectReferenceComparison {
     abs_error_norm: f64,
     rel_error_norm: f64,
     matches_verified_answer: bool,
+    reference_solve_executed: bool,
     note: String,
 }
 
@@ -242,37 +243,43 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn direct_reference_policy(a_mat: &CsrMatrix<f64>) -> (bool, String) {
-    let small_matrix_gate = a_mat.nrows() <= 1024 && a_mat.ncols() <= 1024;
-    if !small_matrix_gate {
-        return (
-            false,
-            format!(
-                "skip: size gate failed ({}x{})",
-                a_mat.nrows(),
-                a_mat.ncols()
-            ),
-        );
-    }
+    const ALWAYS_DIRECT_MAX_N: usize = 512;
+    const MODERATE_DENSITY_MAX_N: usize = 1024;
+    const MODERATE_DENSITY_THRESHOLD: f64 = 0.05;
+    let n = a_mat.nrows().max(a_mat.ncols());
     let density = a_mat.nnz() as f64 / (a_mat.nrows() * a_mat.ncols()) as f64;
-    let dense_threshold = 0.10;
     let env_override = std::env::var("KRYST_ENABLE_DIRECT_REFERENCE")
         .ok()
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
     match env_override {
         Some(true) => (true, "env override: forced on".to_string()),
         Some(false) => (false, "env override: forced off".to_string()),
-        None if density >= dense_threshold => (
+        None if n <= ALWAYS_DIRECT_MAX_N => (
             true,
             format!(
-                "auto: density {:.3e} >= {:.3e} and size gate passed",
-                density, dense_threshold
+                "auto: n={} <= {} (always direct-reference band)",
+                n, ALWAYS_DIRECT_MAX_N
+            ),
+        ),
+        None if n <= MODERATE_DENSITY_MAX_N && density >= MODERATE_DENSITY_THRESHOLD => (
+            true,
+            format!(
+                "auto: n={} in ({}, {}] and density {:.3e} >= {:.3e}",
+                n, ALWAYS_DIRECT_MAX_N, MODERATE_DENSITY_MAX_N, density, MODERATE_DENSITY_THRESHOLD
+            ),
+        ),
+        None if n <= MODERATE_DENSITY_MAX_N => (
+            false,
+            format!(
+                "auto skip: n={} in ({}, {}] but density {:.3e} < {:.3e}",
+                n, ALWAYS_DIRECT_MAX_N, MODERATE_DENSITY_MAX_N, density, MODERATE_DENSITY_THRESHOLD
             ),
         ),
         None => (
             false,
             format!(
-                "auto skip: density {:.3e} < {:.3e} (size gate passed)",
-                density, dense_threshold
+                "auto skip: n={} > {} (explicit opt-in required for large matrices)",
+                n, MODERATE_DENSITY_MAX_N
             ),
         ),
     }
@@ -287,6 +294,11 @@ fn global_direct_reference_policy_allows() -> bool {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn is_forced_direct_reference_matrix(matrix_name: &str) -> bool {
+    matches!(matrix_name, "fidap005")
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn compare_with_direct_reference(
     matrix_name: &str,
     a_mat: &CsrMatrix<f64>,
@@ -294,7 +306,7 @@ fn compare_with_direct_reference(
     iterative_solution: &[f64],
 ) -> Result<Option<DirectReferenceComparison>, Box<dyn std::error::Error>> {
     let (enabled, mut policy_note) = direct_reference_policy(a_mat);
-    let force_direct = matrix_name == "fidap005";
+    let force_direct = is_forced_direct_reference_matrix(matrix_name);
     if force_direct {
         policy_note =
             "forced: fidap005 policy prioritizes direct reference path for side-by-side checks"
@@ -305,6 +317,7 @@ fn compare_with_direct_reference(
             abs_error_norm: f64::NAN,
             rel_error_norm: f64::NAN,
             matches_verified_answer: false,
+            reference_solve_executed: false,
             note: policy_note,
         }));
     }
@@ -318,6 +331,7 @@ fn compare_with_direct_reference(
                 abs_error_norm: f64::NAN,
                 rel_error_norm: f64::NAN,
                 matches_verified_answer: false,
+                reference_solve_executed: true,
                 note: format!("{}; direct LU failed ({err})", policy_note),
             }));
         }
@@ -336,6 +350,7 @@ fn compare_with_direct_reference(
             abs_error_norm,
             rel_error_norm,
             matches_verified_answer,
+            reference_solve_executed: true,
             note: policy_note,
         }));
     }
@@ -347,6 +362,7 @@ fn compare_with_direct_reference(
             abs_error_norm: f64::NAN,
             rel_error_norm: f64::NAN,
             matches_verified_answer: false,
+            reference_solve_executed: false,
             note: format!(
                 "{}; direct LU failed (dense-direct feature is disabled)",
                 policy_note
@@ -840,6 +856,7 @@ fn test_optimal_solver(
                         abs_error_norm: 0.0,
                         rel_error_norm: 0.0,
                         matches_verified_answer: true,
+                        reference_solve_executed: true,
                         note: format!("truth_path: {direct_policy_reason}"),
                     };
                     return Ok((
@@ -1452,8 +1469,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         iter_performance
                     );
                     if let Some(cmp) = direct_comparison.as_ref() {
+                        let reference_phase = if cmp.reference_solve_executed {
+                            "executed"
+                        } else {
+                            "skipped"
+                        };
                         println!(
-                            "    → Direct reference check: abs_err_norm={:.3e}, rel_diff={:.3e}, matches_verified_answer={}, policy={}",
+                            "    → Direct reference check: status={}, abs_err_norm={:.3e}, rel_diff={:.3e}, matches_verified_answer={}, policy={}",
+                            reference_phase,
                             cmp.abs_error_norm,
                             cmp.rel_error_norm,
                             cmp.matches_verified_answer,
