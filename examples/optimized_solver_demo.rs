@@ -71,27 +71,27 @@ use kryst::utils::conditioning::analyze_csr;
 use kryst::utils::conditioning::{ConditioningOptions, ScaleDirection, ScaleNorm};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::matrix_market::{read_matrix_market, MatrixMarketSymmetry};
+use kryst::utils::matrix_market::{MatrixMarketSymmetry, read_matrix_market};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_screening::{
-    assess_symmetry, cg_compatibility_screen, repair_diagonal_csr, SymmetryAssessment,
-    SYMMETRY_MAX_ASYMMETRY_RATE,
+    SYMMETRY_MAX_ASYMMETRY_RATE, SymmetryAssessment, assess_symmetry, cg_compatibility_screen,
+    repair_diagonal_csr,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::preconditioning_pipeline::{
-    apply_preconditioning_pipeline, PreconditioningMetadata,
+    PreconditioningMetadata, apply_preconditioning_pipeline,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::{
-    classify_acceptance, classify_failure, direct_reference_policy, execute_fallback_ladder,
-    format_direct_verification_status, global_direct_reference_policy_allows, render_attempt_chain,
-    solver_reason_code, AcceptanceContract, AcceptanceStatus, AttemptRecord,
-    DirectReferenceComparison, DirectReferencePolicyInput, DirectVerificationCapability,
-    FallbackStep, SolverTestResult, TruthReference,
+    AcceptanceContract, AcceptanceStatus, AttemptRecord, DirectReferenceComparison,
+    DirectReferencePolicyInput, DirectVerificationCapability, FallbackStep, SolverTestResult,
+    TruthReference, classify_acceptance, classify_failure, direct_reference_policy,
+    execute_fallback_ladder, format_direct_verification_status,
+    global_direct_reference_policy_allows, render_attempt_chain, solver_reason_code,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::str::FromStr;
@@ -103,7 +103,7 @@ use std::time::Instant;
 #[path = "support/benchmark_catalog.rs"]
 mod benchmark_catalog;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use benchmark_catalog::{compare_best_iterative, expectation_for, ComparisonConfidence};
+use benchmark_catalog::{ComparisonConfidence, compare_best_iterative, expectation_for};
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -191,8 +191,8 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
         },
         "sherman3" => OptimalConfig {
             solver: "gmres",
-            preconditioner: "ilu",
-            _description: "GMRES (ILU) - benchmark-preferred for Sherman3",
+            preconditioner: "none",
+            _description: "GMRES (no precond) baseline for hard nonsymmetric ladder",
             expected_iterations: 50,
             fallback_solver: "bicgstab",
             amg_nonsymmetric_override: false,
@@ -676,6 +676,9 @@ fn test_optimal_solver(
                 true_abs_residual: true_abs_res,
                 true_rel_residual: true_rel_res,
                 solver_reported_residual: stats.final_residual,
+                monitor_residual: stats.final_residual,
+                ls_residual: stats.final_residual,
+                gmres_classical_retry: stats.gmres_classical_retry,
                 solver_reported_status: solver_reason.clone(),
                 acceptance_status: acceptance_status.as_str().to_string(),
                 acceptance_reason: acceptance_reason.clone(),
@@ -820,6 +823,9 @@ fn test_optimal_solver(
                     true_abs_residual: true_abs_res,
                     true_rel_residual: true_rel_res,
                     solver_reported_residual: stats_fallback.final_residual,
+                    monitor_residual: stats_fallback.final_residual,
+                    ls_residual: stats_fallback.final_residual,
+                    gmres_classical_retry: stats_fallback.gmres_classical_retry,
                     solver_reported_status: solver_reason.clone(),
                     acceptance_status: acceptance_status.as_str().to_string(),
                     acceptance_reason: format!(
@@ -916,6 +922,9 @@ fn test_optimal_solver(
                     true_abs_residual: f64::NAN,
                     true_rel_residual: f64::NAN,
                     solver_reported_residual: f64::NAN,
+                    monitor_residual: f64::NAN,
+                    ls_residual: f64::NAN,
+                    gmres_classical_retry: false,
                     solver_reported_status: failure.clone(),
                     acceptance_status: "failed".to_string(),
                     acceptance_reason: fallback_err.to_string(),
@@ -1093,15 +1102,12 @@ fn choose_amg_mode_with_override(
         };
     }
 
-    if allow_nonsymmetric_override && !diag_issues {
-        return AmgDecision {
-            mode: AmgMode::ExplicitNonSpd,
-            reason: "accepted: explicit nonsymmetric AMG override selected (require_spd=false, Jacobi smoother, ILU-like coarse solve)".to_string(),
-        };
-    }
-
     let mut causes = Vec::new();
-    if !allow_nonsymmetric_override {
+    if allow_nonsymmetric_override {
+        causes.push(
+            "nonsymmetric AMG override is disabled in this demo to keep AMG/CG gated to strong SPD/HPD screens",
+        );
+    } else {
         causes.push("default AMG is SPD-only and no nonsymmetric override was selected");
     }
     if diag_issues {
@@ -1412,8 +1418,10 @@ fn select_solver_policy(
                     100.0 * SYMMETRY_MAX_ASYMMETRY_RATE
                 );
             }
+            primary_solver = "gmres".to_string();
+            primary_pc = "none".to_string();
             rationale.push(
-                "policy override: hard nonsymmetric sequence = primary, rung1 FGMRES(right)+ILUT, rung2 BiCGStab+ILUT"
+                "policy override: hard nonsymmetric ladder ordering = baseline GMRES+NONE, rung1 FGMRES(right)+ILUT, rung2 BiCGStab+ILUT"
                     .to_string(),
             );
         }
@@ -1510,13 +1518,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fn compact_attempt_rung(attempt: Option<&AttemptRecord>, label: &str) -> String {
         match attempt {
             Some(attempt) => format!(
-                "{label}:{}+{},it={},t={},res={:.2e},status={}",
+                "{label}:{}+{},it={},t={},res={:.2e},status={},monitor_residual={:.2e},true_residual={:.2e},ls_residual={:.2e},gmres_classical_retry={}",
                 attempt.solver,
                 attempt.preconditioner,
                 attempt.iterations,
                 format_elapsed_ms(Some(attempt.elapsed_seconds)),
                 attempt.true_rel_residual,
-                attempt.solver_reported_status
+                attempt.solver_reported_status,
+                attempt.monitor_residual,
+                attempt.true_abs_residual,
+                attempt.ls_residual,
+                attempt.gmres_classical_retry
             ),
             None => format!("{label}:-"),
         }
@@ -1572,6 +1584,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             compact_truth_rung(truth),
         ]
         .join(" | ")
+    }
+
+    fn classify_failure_family(
+        test_result: &SolverTestResult<DirectReferenceComparison>,
+    ) -> &'static str {
+        if test_result.attempts.iter().any(|attempt| {
+            attempt
+                .acceptance_status
+                .eq_ignore_ascii_case("contract_mismatch")
+        }) {
+            "contract_mismatch"
+        } else if test_result.attempts.iter().any(|attempt| {
+            attempt.acceptance_status.eq_ignore_ascii_case("breakdown")
+                || attempt
+                    .solver_reported_status
+                    .to_ascii_lowercase()
+                    .contains("breakdown")
+        }) {
+            "breakdown"
+        } else {
+            "stagnation"
+        }
     }
 
     fn is_root_rank() -> bool {
@@ -1932,19 +1966,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         "source=missing; missing-data=no iterative attempts".to_string()
                     };
-                    let benchmark_delta_with_rungs =
-                        if matches!(selected_mode, DemoMode::IterativeBenchmark | DemoMode::Both) {
+                    let benchmark_delta_with_rungs = if matches!(
+                        selected_mode,
+                        DemoMode::IterativeBenchmark | DemoMode::Both
+                    ) {
+                        let rung_details = format_rung_detail_block(
+                            &test_result.attempts,
+                            test_result.truth_reference.as_ref(),
+                        );
+                        let failure_summary = if row_category == "failed" {
+                            let best_iter_reason = best_iterative
+                                .map(|attempt| attempt.solver_reported_status.as_str())
+                                .unwrap_or("NO_ATTEMPT");
+                            let best_true_rel_res = best_iterative
+                                .map(|attempt| format!("{:.2e}", attempt.true_rel_residual))
+                                .unwrap_or_else(|| "-".to_string());
+                            let best_time = best_iterative
+                                .map(|attempt| format_elapsed_ms(Some(attempt.elapsed_seconds)))
+                                .unwrap_or_else(|| "-".to_string());
                             format!(
-                                "{} || {}",
-                                benchmark_delta,
-                                format_rung_detail_block(
-                                    &test_result.attempts,
-                                    test_result.truth_reference.as_ref(),
-                                )
+                                "best_iter_method={best_iter_label}; best_iter_reason={best_iter_reason}; best_true_rel_res={best_true_rel_res}; best_time={best_time}; failure_family={}",
+                                classify_failure_family(&test_result)
                             )
                         } else {
-                            benchmark_delta
+                            String::new()
                         };
+                        format!(
+                            "{} || {}",
+                            benchmark_delta,
+                            if failure_summary.is_empty() {
+                                rung_details
+                            } else {
+                                format!("{failure_summary} || {rung_details}")
+                            }
+                        )
+                    } else {
+                        benchmark_delta
+                    };
 
                     let verified = format_direct_verification_status(
                         direct_comparison,
