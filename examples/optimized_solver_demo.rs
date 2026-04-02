@@ -71,27 +71,27 @@ use kryst::utils::conditioning::analyze_csr;
 use kryst::utils::conditioning::{ConditioningOptions, ScaleDirection, ScaleNorm};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::matrix_market::{MatrixMarketSymmetry, read_matrix_market};
+use kryst::utils::matrix_market::{read_matrix_market, MatrixMarketSymmetry};
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::matrix_screening::{
-    SYMMETRY_MAX_ASYMMETRY_RATE, SymmetryAssessment, assess_symmetry, cg_compatibility_screen,
-    repair_diagonal_csr,
+    assess_symmetry, cg_compatibility_screen, repair_diagonal_csr, SymmetryAssessment,
+    SYMMETRY_MAX_ASYMMETRY_RATE,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::metrics::true_residual_norm;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::preconditioning_pipeline::{
-    PreconditioningMetadata, apply_preconditioning_pipeline,
+    apply_preconditioning_pipeline, PreconditioningMetadata,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::solver_policy::benchmark_demo_gmres_profile;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use kryst::utils::{
-    AcceptanceContract, AcceptanceStatus, AttemptRecord, DirectReferenceComparison,
-    DirectReferencePolicyInput, DirectVerificationCapability, FallbackStep, SolverTestResult,
-    TruthReference, classify_acceptance, classify_failure, direct_reference_policy,
-    execute_fallback_ladder, format_direct_verification_status,
-    global_direct_reference_policy_allows, render_attempt_chain, solver_reason_code,
+    classify_acceptance, classify_failure, direct_reference_policy, execute_fallback_ladder,
+    format_direct_verification_status, global_direct_reference_policy_allows, render_attempt_chain,
+    solver_reason_code, AcceptanceContract, AcceptanceStatus, AttemptRecord,
+    DirectReferenceComparison, DirectReferencePolicyInput, DirectVerificationCapability,
+    FallbackStep, SolverTestResult, TruthReference,
 };
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 use std::str::FromStr;
@@ -103,7 +103,7 @@ use std::time::Instant;
 #[path = "support/benchmark_catalog.rs"]
 mod benchmark_catalog;
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use benchmark_catalog::{ComparisonConfidence, compare_best_iterative, expectation_for};
+use benchmark_catalog::{compare_best_iterative, expectation_for, ComparisonConfidence};
 
 /// Matrix-specific optimal solver configurations based on benchmark results
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
@@ -1548,6 +1548,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    fn format_nearest_attempt_diagnostics(attempt: &AttemptRecord) -> String {
+        format!(
+            "nearest-attempt(res={:.2e}, it={}, time={}, reason={})",
+            attempt.true_rel_residual,
+            attempt.iterations,
+            format_elapsed_ms(Some(attempt.elapsed_seconds)),
+            attempt.acceptance_reason
+        )
+    }
+
     fn format_rung_detail_block(
         attempts: &[AttemptRecord],
         truth: Option<&TruthReference<DirectReferenceComparison>>,
@@ -1814,6 +1824,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let best_accepted_iterative = test_result.best_accepted_iterative();
                     let best_attempted_iterative = test_result.best_attempted_iterative();
                     let best_iterative = best_accepted_iterative.or(best_attempted_iterative);
+                    let best_iterative_source = if best_accepted_iterative.is_some() {
+                        "best_accepted_iterative"
+                    } else if best_attempted_iterative.is_some() {
+                        "best_attempted_iterative"
+                    } else {
+                        "missing"
+                    };
                     let row_category = classify_row_category(outcome_code, fallback, converged);
                     let iterative_row = row_category == "iterative_accepted";
                     let best_iter_label = best_iterative
@@ -1858,69 +1875,76 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         _ => "failed".to_string(),
                     };
-                    let benchmark_delta = best_iterative
-                        .map(|attempt| {
-                            if let Some(catalog_delta) = compare_best_iterative(
-                                matrix_name,
-                                &attempt.solver,
-                                &attempt.preconditioner,
-                                attempt.iterations,
-                                attempt.accepted,
-                            ) {
-                                let expectation = expectation_for(matrix_name)
-                                    .expect("benchmark catalog entry should exist");
-                                let method = if catalog_delta.method_family_match {
-                                    "method=match"
-                                } else {
-                                    "method=mismatch"
-                                };
-                                let range_status =
-                                    if attempt.iterations < expectation.iteration_range.min {
-                                        format!("iter=below({:+})", catalog_delta.iteration_delta_low)
-                                    } else if attempt.iterations > expectation.iteration_range.max {
-                                        format!(
-                                            "iter=above({:+})",
-                                            catalog_delta.iteration_delta_high
-                                        )
-                                    } else {
-                                        "iter=in-range(0)".to_string()
-                                    };
-                                let tolerance = if catalog_delta.tolerance_pass {
-                                    "tol=pass"
-                                } else {
-                                    "tol=fail"
-                                };
-                                let confidence = match expectation.confidence {
-                                    ComparisonConfidence::Exact => "exact",
-                                    ComparisonConfidence::Approximate => "approx",
-                                };
-                                let time_note = expectation
-                                    .time_note
-                                    .map(|note| format!("; note={note}"))
-                                    .unwrap_or_default();
-                                format!(
-                                    "{method}; {range_status}; {tolerance}; conf={confidence}{time_note}"
-                                )
+                    let benchmark_delta = if let Some(attempt) = best_iterative {
+                        if let Some(catalog_delta) = compare_best_iterative(
+                            matrix_name,
+                            &attempt.solver,
+                            &attempt.preconditioner,
+                            attempt.iterations,
+                            attempt.accepted,
+                        ) {
+                            let expectation = expectation_for(matrix_name)
+                                .expect("benchmark catalog entry should exist");
+                            let method = if catalog_delta.method_family_match {
+                                "method=match"
                             } else {
-                                "catalog=missing".to_string()
-                            }
-                        })
-                        .unwrap_or_else(|| "-".to_string());
-                    let benchmark_delta_with_rungs = if matches!(
-                        selected_mode,
-                        DemoMode::IterativeBenchmark | DemoMode::Both
-                    ) {
-                        format!(
-                            "{} || {}",
-                            benchmark_delta,
-                            format_rung_detail_block(
-                                &test_result.attempts,
-                                test_result.truth_reference.as_ref(),
+                                "method=mismatch"
+                            };
+                            let range_status =
+                                if attempt.iterations < expectation.iteration_range.min {
+                                    format!("iter=below({:+})", catalog_delta.iteration_delta_low)
+                                } else if attempt.iterations > expectation.iteration_range.max {
+                                    format!("iter=above({:+})", catalog_delta.iteration_delta_high)
+                                } else {
+                                    "iter=in-range(0)".to_string()
+                                };
+                            let tolerance = if catalog_delta.tolerance_pass {
+                                "tol=pass"
+                            } else {
+                                "tol=fail"
+                            };
+                            let confidence = match expectation.confidence {
+                                ComparisonConfidence::Exact => "exact",
+                                ComparisonConfidence::Approximate => "approx",
+                            };
+                            let time_note = expectation
+                                .time_note
+                                .map(|note| format!("; note={note}"))
+                                .unwrap_or_default();
+                            let nearest_attempt_note = if attempt.accepted {
+                                String::new()
+                            } else {
+                                format!("; {}", format_nearest_attempt_diagnostics(attempt))
+                            };
+                            format!(
+                                "source={best_iterative_source}; {method}; {range_status}; {tolerance}; conf={confidence}{time_note}{nearest_attempt_note}"
                             )
-                        )
+                        } else {
+                            format!(
+                                "source={best_iterative_source}; catalog=missing{}",
+                                if attempt.accepted {
+                                    String::new()
+                                } else {
+                                    format!("; {}", format_nearest_attempt_diagnostics(attempt))
+                                }
+                            )
+                        }
                     } else {
-                        benchmark_delta
+                        "source=missing; missing-data=no iterative attempts".to_string()
                     };
+                    let benchmark_delta_with_rungs =
+                        if matches!(selected_mode, DemoMode::IterativeBenchmark | DemoMode::Both) {
+                            format!(
+                                "{} || {}",
+                                benchmark_delta,
+                                format_rung_detail_block(
+                                    &test_result.attempts,
+                                    test_result.truth_reference.as_ref(),
+                                )
+                            )
+                        } else {
+                            benchmark_delta
+                        };
 
                     let verified = format_direct_verification_status(
                         direct_comparison,
