@@ -362,6 +362,8 @@ impl BiCgStabSolver {
         let eps_rho = 1e-30;
         let eps_alpha = 1e-30;
         let eps_omega = 1e-30;
+        let eps_t_norm = eps_omega;
+        let eps_s_norm = eps_omega;
 
         let mut sync_reductions = 2usize;
         let mut async_reduction_waits = 0usize;
@@ -639,6 +641,99 @@ impl BiCgStabSolver {
             }
 
             let omega_den = S::from_real(omega_reds.0);
+            let t_norm = omega_reds.0.abs().sqrt();
+            if t_norm <= eps_t_norm {
+                let s_norm = red.norm2(s);
+                sync_reductions += 1;
+                if let Some(reason) = ReasonEmitter::non_finite(s_norm) {
+                    let stats = finalize_true_residual_exit(
+                        a,
+                        b,
+                        x,
+                        &red,
+                        r,
+                        &mut *scratch,
+                        bnorm,
+                        self.atol,
+                        self.rtol,
+                        k,
+                        reason,
+                    );
+                    return Ok(stats.with_counters(SolverCounters {
+                        num_global_reductions: sync_reductions + async_reduction_waits,
+                        overlap_global_reductions: async_reduction_waits,
+                        residual_replacements,
+                    }));
+                }
+                if s_norm <= eps_s_norm {
+                    if need_left {
+                        if let Some(yp) = z_p.as_deref() {
+                            for i in 0..n {
+                                x[i] += alpha * yp[i];
+                            }
+                        } else {
+                            for i in 0..n {
+                                x[i] += alpha * p[i];
+                            }
+                        }
+                    } else {
+                        match (side, pc, z_p.as_deref()) {
+                            (PcSide::Right, Some(_), Some(zp)) => {
+                                for i in 0..n {
+                                    x[i] += alpha * zp[i];
+                                }
+                            }
+                            _ => {
+                                for i in 0..n {
+                                    x[i] += alpha * p[i];
+                                }
+                            }
+                        }
+                    }
+                    let nominal = if s_norm <= self.atol {
+                        ConvergedReason::ConvergedAtol
+                    } else {
+                        ConvergedReason::ConvergedRtol
+                    };
+                    let stats = finalize_true_residual_exit(
+                        a,
+                        b,
+                        x,
+                        &red,
+                        r,
+                        &mut *scratch,
+                        bnorm,
+                        self.atol,
+                        self.rtol,
+                        k,
+                        nominal,
+                    );
+                    return Ok(stats.with_counters(SolverCounters {
+                        num_global_reductions: sync_reductions + async_reduction_waits,
+                        overlap_global_reductions: async_reduction_waits,
+                        residual_replacements,
+                    }));
+                }
+                let stats = finalize_breakdown_salvage_exit(
+                    a,
+                    b,
+                    x,
+                    &red,
+                    r,
+                    &mut *scratch,
+                    bnorm,
+                    self.atol,
+                    self.rtol,
+                    k,
+                    ReasonEmitter::breakdown_bicg(),
+                    "singular preconditioned operator: ||t|| near-zero while ||s|| is not",
+                );
+                return Ok(stats.with_counters(SolverCounters {
+                    num_global_reductions: sync_reductions + async_reduction_waits,
+                    overlap_global_reductions: async_reduction_waits,
+                    residual_replacements,
+                }));
+            }
             if omega_den.abs() <= eps_omega || !omega_den.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega_den ~ 0 at iter {k}");
