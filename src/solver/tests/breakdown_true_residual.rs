@@ -7,7 +7,7 @@ use crate::parallel::{NoComm, UniverseComm};
 use crate::preconditioner::PcSide;
 use crate::solver::bicgstab::BiCgStabSolver;
 use crate::solver::gmres::GmresSolver;
-use crate::utils::convergence::ConvergedReason;
+use crate::utils::convergence::{AcceptanceStatus, ConvergedReason};
 use std::any::Any;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -80,7 +80,16 @@ fn bicgstab_breakdown_reclassified_when_true_residual_meets_tol() {
         )
         .expect("bicgstab should return stats");
 
-    assert_eq!(stats.reason, ConvergedReason::ConvergedAtol);
+    assert_eq!(stats.reason, ConvergedReason::ConvergedHappyBreakdown);
+    assert_eq!(stats.acceptance_status, AcceptanceStatus::OkWithWarning);
+    assert_eq!(stats.breakdown_reason, Some(ConvergedReason::DivergedBreakdownBiCG));
+    assert!(
+        stats
+            .residual_override_note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("BiCGStab breakdown")
+    );
     assert!(stats.final_residual <= solver.atol);
     assert_eq!(stats.iterations, 0);
 }

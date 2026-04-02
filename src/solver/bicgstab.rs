@@ -27,7 +27,7 @@ use crate::solver::MonitorCallback;
 use crate::solver::common::exit_checks::{reconcile_reason_with_true_residual, true_residual_norm};
 use crate::solver::common::{ReductCtx, call_monitors, dot2_async_s};
 use crate::utils::convergence::{
-    ConvergedReason, ReasonEmitter, ReductionModel, SolveStats, SolverCounters,
+    AcceptanceStatus, ConvergedReason, ReasonEmitter, ReductionModel, SolveStats, SolverCounters,
 };
 use crate::utils::reduction::{AllreduceHandle, AllreduceOps, ReductOptions};
 
@@ -124,6 +124,42 @@ fn finalize_true_residual_exit<A: KLinOp<Scalar = S> + ?Sized>(
     let reason =
         reconcile_reason_with_true_residual(nominal_reason, true_residual, bnorm, atol, rtol);
     SolveStats::new(iterations, true_residual, reason)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_breakdown_salvage_exit<A: KLinOp<Scalar = S> + ?Sized>(
+    a: &A,
+    b: &[S],
+    x: &[S],
+    red: &ReductCtx,
+    tmp: &mut [S],
+    scratch: &mut BridgeScratch,
+    bnorm: R,
+    atol: R,
+    rtol: R,
+    iterations: usize,
+    breakdown_reason: ConvergedReason,
+    breakdown_detail: &str,
+) -> SolveStats<R> {
+    let true_residual = true_residual_norm(a, b, x, red, tmp, scratch);
+    let contract_tol = atol.max(rtol * bnorm);
+    let rel_residual = true_residual / bnorm;
+
+    if true_residual.is_finite() && true_residual <= contract_tol {
+        let mut stats = SolveStats::new(
+            iterations,
+            true_residual,
+            ConvergedReason::ConvergedHappyBreakdown,
+        );
+        stats.acceptance_status = AcceptanceStatus::OkWithWarning;
+        stats.breakdown_reason = Some(breakdown_reason);
+        stats.residual_override_note = Some(format!(
+            "BiCGStab breakdown ({breakdown_detail}) salvaged at iter {iterations}: ||r||={true_residual:.6e}, ||r||/||b||={rel_residual:.6e}, tol=max(atol, rtol*||b||)={contract_tol:.6e}"
+        ));
+        return stats;
+    }
+
+    SolveStats::new(iterations, true_residual, breakdown_reason)
 }
 
 /// BiCGStab solver (scalar-generic internal variant)
@@ -333,7 +369,7 @@ impl BiCgStabSolver {
             if rho.abs() <= eps_rho || !rho.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: rho ~ 0 at iter {k}");
-                let stats = finalize_true_residual_exit(
+                let stats = finalize_breakdown_salvage_exit(
                     a,
                     b,
                     x,
@@ -345,6 +381,7 @@ impl BiCgStabSolver {
                     self.rtol,
                     k - 1,
                     ReasonEmitter::breakdown_bicg(),
+                    "rho near-zero/non-finite",
                 );
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
@@ -401,7 +438,7 @@ impl BiCgStabSolver {
             if alpha_den.abs() <= eps_alpha || !alpha_den.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: alpha_den ~ 0 at iter {k}");
-                let stats = finalize_true_residual_exit(
+                let stats = finalize_breakdown_salvage_exit(
                     a,
                     b,
                     x,
@@ -413,6 +450,7 @@ impl BiCgStabSolver {
                     self.rtol,
                     k - 1,
                     ReasonEmitter::breakdown_bicg(),
+                    "alpha denominator near-zero/non-finite",
                 );
                 return Ok(stats.with_counters(SolverCounters {
                     num_global_reductions: sync_reductions + async_reduction_waits,
