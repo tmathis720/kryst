@@ -299,6 +299,61 @@ fn is_forced_direct_reference_matrix(matrix_name: &str) -> bool {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DemoMode {
+    Verify,
+    IterativeBenchmark,
+    Both,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+impl FromStr for DemoMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "verify" => Ok(Self::Verify),
+            "iterative-benchmark" => Ok(Self::IterativeBenchmark),
+            "both" => Ok(Self::Both),
+            _ => Err(format!(
+                "unsupported mode '{value}'. Use one of: verify, iterative-benchmark, both"
+            )),
+        }
+    }
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[derive(Clone, Copy, Debug)]
+struct DirectTruthPolicy {
+    allow_truth_path_winner: bool,
+    mode_label: &'static str,
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+fn mode_to_policy(mode: DemoMode) -> Vec<DirectTruthPolicy> {
+    match mode {
+        DemoMode::Verify => vec![DirectTruthPolicy {
+            allow_truth_path_winner: true,
+            mode_label: "verify",
+        }],
+        DemoMode::IterativeBenchmark => vec![DirectTruthPolicy {
+            allow_truth_path_winner: false,
+            mode_label: "iterative-benchmark",
+        }],
+        DemoMode::Both => vec![
+            DirectTruthPolicy {
+                allow_truth_path_winner: true,
+                mode_label: "verify",
+            },
+            DirectTruthPolicy {
+                allow_truth_path_winner: false,
+                mode_label: "iterative-benchmark",
+            },
+        ],
+    }
+}
+
+#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 fn compare_with_direct_reference(
     matrix_name: &str,
     a_mat: &CsrMatrix<f64>,
@@ -575,6 +630,7 @@ fn test_optimal_solver(
     matrix_name: &str,
     prep_trace: &str,
     is_root_rank: bool,
+    direct_truth_policy: DirectTruthPolicy,
 ) -> Result<
     (
         String,
@@ -920,7 +976,7 @@ fn test_optimal_solver(
     }
 
     let (allow_direct, direct_policy_reason) = direct_reference_policy(a_mat);
-    if allow_direct {
+    if allow_direct && direct_truth_policy.allow_truth_path_winner {
         #[cfg(feature = "dense-direct")]
         {
             let dense_mat = a_mat.to_dense()?;
@@ -964,6 +1020,11 @@ fn test_optimal_solver(
         {
             attempt_log.push("rung=3 [failed]: dense-direct feature disabled".to_string());
         }
+    } else if allow_direct && !direct_truth_policy.allow_truth_path_winner {
+        attempt_log.push(format!(
+            "rung=3 [suppressed]: mode={} keeps direct reference as side-channel only ({})",
+            direct_truth_policy.mode_label, direct_policy_reason
+        ));
     } else {
         attempt_log.push(format!("rung=3 [skipped]: {}", direct_policy_reason));
     }
@@ -1421,6 +1482,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let is_root_rank = is_root_rank();
+    let mut selected_mode = DemoMode::Both;
+    let mut cli_iter = std::env::args().skip(1);
+    while let Some(arg) = cli_iter.next() {
+        if let Some(raw) = arg.strip_prefix("--mode=") {
+            selected_mode =
+                DemoMode::from_str(raw).map_err(|e| format!("invalid --mode argument: {e}"))?;
+        } else if arg == "--mode" {
+            let raw = cli_iter
+                .next()
+                .ok_or("--mode requires a value: verify | iterative-benchmark | both")?;
+            selected_mode =
+                DemoMode::from_str(&raw).map_err(|e| format!("invalid --mode argument: {e}"))?;
+        } else {
+            return Err(format!("unknown argument '{arg}'").into());
+        }
+    }
 
     // Initialize logging if available
     #[cfg(feature = "logging")]
@@ -1434,6 +1511,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "Recommended structural-CG compare workflow: KRYST_DEMO_COMPARE_STRUCTURAL_CG_SCREEN=1 cargo run --example optimized_solver_demo --features backend-faer"
         );
         // Note: this demo does not perform distributed coordination unless explicitly added.
+        println!();
+        println!(
+            "Mode selection: {:?} (supported: verify | iterative-benchmark | both)",
+            selected_mode
+        );
         println!();
     }
 
@@ -1452,298 +1534,313 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("memplus", "Memplus matrix (if available)"),
     ];
 
-    if is_root_rank {
-        println!(
-            "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
-            "Matrix",
-            "Primary",
-            "Fallback",
-            "SolverCode",
-            "OutcomeCode",
-            "Category",
-            "Status",
-            "Iters",
-            "Performance vs Benchmark"
-        );
-        println!("{}", "=".repeat(166));
-    }
+    for policy in mode_to_policy(selected_mode) {
+        if is_root_rank {
+            println!("Reporting mode section: {}", policy.mode_label);
+            println!(
+                "Semantics: direct truth path {} become winning rung.",
+                if policy.allow_truth_path_winner {
+                    "can"
+                } else {
+                    "cannot"
+                }
+            );
+            println!(
+                "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
+                "Matrix",
+                "Primary",
+                "Fallback",
+                "SolverCode",
+                "OutcomeCode",
+                "Category",
+                "Status",
+                "Iters",
+                "Performance vs Benchmark"
+            );
+            println!("{}", "=".repeat(166));
+        }
+        let mut total_rows = 0usize;
+        let mut iterative_success_rows = 0usize;
+        let mut verification_only_rows = 0usize;
+        let mut failed_rows = 0usize;
 
-    let mut total_rows = 0usize;
-    let mut iterative_success_rows = 0usize;
-    let mut verification_only_rows = 0usize;
-    let mut failed_rows = 0usize;
+        for (matrix_name, _description) in &test_matrices {
+            let base_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            let matrix_path = base_dir
+                .join("examples")
+                .join("mtx")
+                .join(format!("{}.mtx", matrix_name));
+            let rhs_path = base_dir
+                .join("examples")
+                .join("mtx")
+                .join(format!("{}_rhs1.mtx", matrix_name));
 
-    for (matrix_name, _description) in test_matrices {
-        let base_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let matrix_path = base_dir
-            .join("examples")
-            .join("mtx")
-            .join(format!("{}.mtx", matrix_name));
-        let rhs_path = base_dir
-            .join("examples")
-            .join("mtx")
-            .join(format!("{}_rhs1.mtx", matrix_name));
+            // Try to read the matrix and RHS
+            let (matrix_data, rhs_data) = match (
+                read_matrix_market(matrix_path.to_str().unwrap()),
+                read_matrix_market(rhs_path.to_str().unwrap()),
+            ) {
+                (Ok(matrix), Ok(rhs)) => (matrix, rhs),
+                _ => {
+                    if is_root_rank {
+                        println!(
+                            "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
+                            matrix_name,
+                            "-",
+                            "-",
+                            "N/A",
+                            "FILES_MISSING",
+                            "failed",
+                            "failed",
+                            "N/A",
+                            "-"
+                        );
+                    }
+                    total_rows += 1;
+                    failed_rows += 1;
+                    continue;
+                }
+            };
 
-        // Try to read the matrix and RHS
-        let (matrix_data, rhs_data) = match (
-            read_matrix_market(matrix_path.to_str().unwrap()),
-            read_matrix_market(rhs_path.to_str().unwrap()),
-        ) {
-            (Ok(matrix), Ok(rhs)) => (matrix, rhs),
-            _ => {
+            // Keep original operator matrix; build a preconditioner matrix with explicit preprocessing first,
+            // then optional diagonal repair as a secondary safeguard.
+            let a_op = matrix_data.to_csr_matrix()?;
+            let prep_cfg = prep_config_for(matrix_name);
+            let conditioning = ConditioningOptions {
+                scale: match (prep_cfg.row_scaling, prep_cfg.col_scaling) {
+                    (true, true) => Some(ScaleDirection::Both),
+                    (true, false) => Some(ScaleDirection::Row),
+                    (false, true) => Some(ScaleDirection::Col),
+                    (false, false) => None,
+                },
+                scale_norm: ScaleNorm::Inf,
+                ..ConditioningOptions::default()
+            };
+            let (reordering, reordering_trace, mut fallback_note) =
+                select_reordering_for_preprocessing(&prep_cfg, &a_op);
+            let preprocessed = apply_preconditioning_pipeline(&a_op, &conditioning, &reordering)?;
+            let (p_candidate, repaired) = repair_diagonal_csr(&preprocessed.matrix, 1e-14, 1e-8);
+            let p_mat = Some(p_candidate);
+            if prep_cfg.nonsymmetric_matching && preprocessed.metadata.matched_pairs.is_none() {
+                fallback_note = Some(
+                "requested nonsymmetric matching is unavailable for this build/matrix path; fell back without matching"
+                    .to_string(),
+            );
+            }
+            let prep_trace = if repaired > 0 {
+                format!(
+                    "{} -> reorder[kind={}, symmetric={}]{} -> diag_repair[count={}, tol=1e-14, tau=1e-8]",
+                    prep_cfg.as_trace(),
+                    reordering_trace,
+                    reordering.symmetric,
+                    fallback_note
+                        .as_ref()
+                        .map(|note| format!(" -> note[{note}]"))
+                        .unwrap_or_default(),
+                    repaired
+                )
+            } else {
+                format!(
+                    "{} -> reorder[kind={}, symmetric={}]{} -> diag_repair[count=0]",
+                    prep_cfg.as_trace(),
+                    reordering_trace,
+                    reordering.symmetric,
+                    fallback_note
+                        .as_ref()
+                        .map(|note| format!(" -> note[{note}]"))
+                        .unwrap_or_default()
+                )
+            };
+            if is_root_rank {
+                println!("    → Preconditioner prep: {prep_trace}.");
+            }
+            let rhs = rhs_data.to_vector()?;
+            let rhs_norm = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
+            let acceptance_threshold = f64::max(1e-6 * rhs_norm, 1e-12);
+
+            let screen = screen_matrix(&a_op);
+            let structural_symmetry_hint = Some(matches!(
+                matrix_data.symmetry,
+                MatrixMarketSymmetry::Symmetric | MatrixMarketSymmetry::Hermitian
+            ));
+            let decision =
+                select_solver_policy(matrix_name, &screen, &a_op, structural_symmetry_hint);
+
+            // Skip very large matrices for this demo
+            if a_op.nrows() > 6000 {
                 if is_root_rank {
                     println!(
                         "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
-                        matrix_name,
-                        "-",
-                        "-",
-                        "N/A",
-                        "FILES_MISSING",
-                        "failed",
-                        "failed",
-                        "N/A",
-                        "-"
+                        matrix_name, "-", "-", "N/A", "TOO_LARGE", "failed", "failed", "SKIP", "-"
                     );
                 }
                 total_rows += 1;
                 failed_rows += 1;
                 continue;
             }
-        };
 
-        // Keep original operator matrix; build a preconditioner matrix with explicit preprocessing first,
-        // then optional diagonal repair as a secondary safeguard.
-        let a_op = matrix_data.to_csr_matrix()?;
-        let prep_cfg = prep_config_for(matrix_name);
-        let conditioning = ConditioningOptions {
-            scale: match (prep_cfg.row_scaling, prep_cfg.col_scaling) {
-                (true, true) => Some(ScaleDirection::Both),
-                (true, false) => Some(ScaleDirection::Row),
-                (false, true) => Some(ScaleDirection::Col),
-                (false, false) => None,
-            },
-            scale_norm: ScaleNorm::Inf,
-            ..ConditioningOptions::default()
-        };
-        let (reordering, reordering_trace, mut fallback_note) =
-            select_reordering_for_preprocessing(&prep_cfg, &a_op);
-        let preprocessed = apply_preconditioning_pipeline(&a_op, &conditioning, &reordering)?;
-        let (p_candidate, repaired) = repair_diagonal_csr(&preprocessed.matrix, 1e-14, 1e-8);
-        let p_mat = Some(p_candidate);
-        if prep_cfg.nonsymmetric_matching && preprocessed.metadata.matched_pairs.is_none() {
-            fallback_note = Some(
-                "requested nonsymmetric matching is unavailable for this build/matrix path; fell back without matching"
-                    .to_string(),
-            );
+            // Test with optimal configuration
+            match test_optimal_solver(
+                &a_op,
+                p_mat.as_ref(),
+                &rhs,
+                &decision,
+                &screen,
+                matrix_name,
+                &prep_trace,
+                is_root_rank,
+                policy,
+            ) {
+                Ok((
+                    primary,
+                    fallback,
+                    solver_reason,
+                    outcome_code,
+                    diagnostics,
+                    true_abs_res,
+                    true_rel_res,
+                    prec_residual,
+                    iters,
+                    status,
+                    converged,
+                    direct_comparison,
+                )) => {
+                    let row_category = classify_row_category(&outcome_code, &fallback, converged);
+                    // Compare with benchmark expectations
+                    let iter_performance = if row_category == "verified_by_direct_reference" {
+                        "N/A (verification row)"
+                    } else if converged && iters <= decision.expected_iterations {
+                        "Better than expected"
+                    } else if converged && iters <= decision.expected_iterations * 2 {
+                        "Within expected range"
+                    } else if converged {
+                        "Slower than expected"
+                    } else {
+                        "-"
+                    };
+
+                    let verified = format_direct_verification_status(
+                        direct_comparison.as_ref(),
+                        direct_verification_capability,
+                    );
+
+                    if is_root_rank {
+                        println!(
+                            "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
+                            matrix_name,
+                            primary,
+                            fallback,
+                            solver_reason,
+                            outcome_code,
+                            row_category,
+                            status,
+                            iters,
+                            iter_performance
+                        );
+                        if row_category == "verified_by_direct_reference" {
+                            println!(
+                                "    ⇢ VERIFICATION ROW: direct reference metrics are authoritative for this result."
+                            );
+                        }
+                        println!(
+                            "    ↳ diagnostics: ||b||={:.2e}, acceptance_threshold=max(rtol*||b||, atol)={:.2e}, true_abs_res={:.2e}, true_rel_res={:.2e}, stats_res={:.2e}, verified={}",
+                            rhs_norm,
+                            acceptance_threshold,
+                            true_abs_res,
+                            true_rel_res,
+                            prec_residual,
+                            verified
+                        );
+                        if let Some(cmp) = direct_comparison.as_ref() {
+                            let reference_phase = if cmp.reference_solve_executed {
+                                "executed"
+                            } else {
+                                "skipped"
+                            };
+                            println!(
+                                "    → Direct reference check: status={}, abs_err_norm={:.3e}, rel_diff={:.3e}, matches_verified_answer={}, policy={}",
+                                reference_phase,
+                                cmp.abs_error_norm,
+                                cmp.rel_error_norm,
+                                cmp.matches_verified_answer,
+                                cmp.note
+                            );
+                        }
+                        println!("    ↳ detail: {diagnostics}");
+                        println!(
+                            "    → Screen: symmetry_hint={}, spd_like_hint={}, diagonal_healthy={}, density={:.3e}, size_class={}, cond_heuristic={:.2e}, symmetry_verdict={}",
+                            screen.symmetry_hint,
+                            screen.spd_like_hint,
+                            screen.diagonal_healthy,
+                            screen.density,
+                            screen.size_class,
+                            screen.condition_heuristic,
+                            screen.symmetry.verdict
+                        );
+                        println!("    → {}", decision.amg_status_label);
+                        println!(
+                            "    → Decision rationale: {}",
+                            decision.rationale.join(" | ")
+                        );
+                        println!(
+                            "    → Contract checks: {}",
+                            decision.contract_checks.join(" | ")
+                        );
+                    }
+
+                    total_rows += 1;
+                    match row_category {
+                        "iterative_accepted" => iterative_success_rows += 1,
+                        "verified_by_direct_reference" => verification_only_rows += 1,
+                        _ => failed_rows += 1,
+                    }
+
+                    // Additional diagnostics for interesting cases
+                    if is_root_rank && screen.condition_heuristic >= 100.0 {
+                        println!(
+                            "    → Ill-conditioned matrix (est. cond. ≈ {:.1e})",
+                            screen.condition_heuristic
+                        );
+                    }
+                    if is_root_rank && screen.density > 0.1 {
+                        println!(
+                            "    → Dense matrix ({:.1}% fill) - direct methods may be preferred",
+                            screen.density * 100.0
+                        );
+                    }
+                    if is_root_rank && converged && iters < decision.expected_iterations / 2 {
+                        println!(
+                            "    → Excellent performance: {} iterations vs {} expected",
+                            iters, decision.expected_iterations
+                        );
+                    }
+                }
+                Err(e) => {
+                    if is_root_rank {
+                        println!(
+                            "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
+                            matrix_name, "-", "-", "N/A", "FAILED", "failed", "failed", "N/A", e
+                        );
+                    }
+                    total_rows += 1;
+                    failed_rows += 1;
+                }
+            }
         }
-        let prep_trace = if repaired > 0 {
-            format!(
-                "{} -> reorder[kind={}, symmetric={}]{} -> diag_repair[count={}, tol=1e-14, tau=1e-8]",
-                prep_cfg.as_trace(),
-                reordering_trace,
-                reordering.symmetric,
-                fallback_note
-                    .as_ref()
-                    .map(|note| format!(" -> note[{note}]"))
-                    .unwrap_or_default(),
-                repaired
-            )
-        } else {
-            format!(
-                "{} -> reorder[kind={}, symmetric={}]{} -> diag_repair[count=0]",
-                prep_cfg.as_trace(),
-                reordering_trace,
-                reordering.symmetric,
-                fallback_note
-                    .as_ref()
-                    .map(|note| format!(" -> note[{note}]"))
-                    .unwrap_or_default()
-            )
-        };
+
         if is_root_rank {
-            println!("    → Preconditioner prep: {prep_trace}.");
-        }
-        let rhs = rhs_data.to_vector()?;
-        let rhs_norm = rhs.iter().map(|v| v * v).sum::<f64>().sqrt();
-        let acceptance_threshold = f64::max(1e-6 * rhs_norm, 1e-12);
-
-        let screen = screen_matrix(&a_op);
-        let structural_symmetry_hint = Some(matches!(
-            matrix_data.symmetry,
-            MatrixMarketSymmetry::Symmetric | MatrixMarketSymmetry::Hermitian
-        ));
-        let decision = select_solver_policy(matrix_name, &screen, &a_op, structural_symmetry_hint);
-
-        // Skip very large matrices for this demo
-        if a_op.nrows() > 6000 {
-            if is_root_rank {
-                println!(
-                    "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
-                    matrix_name, "-", "-", "N/A", "TOO_LARGE", "failed", "failed", "SKIP", "-"
-                );
-            }
-            total_rows += 1;
-            failed_rows += 1;
-            continue;
-        }
-
-        // Test with optimal configuration
-        match test_optimal_solver(
-            &a_op,
-            p_mat.as_ref(),
-            &rhs,
-            &decision,
-            &screen,
-            matrix_name,
-            &prep_trace,
-            is_root_rank,
-        ) {
-            Ok((
-                primary,
-                fallback,
-                solver_reason,
-                outcome_code,
-                diagnostics,
-                true_abs_res,
-                true_rel_res,
-                prec_residual,
-                iters,
-                status,
-                converged,
-                direct_comparison,
-            )) => {
-                let row_category = classify_row_category(&outcome_code, &fallback, converged);
-                // Compare with benchmark expectations
-                let iter_performance = if row_category == "verified_by_direct_reference" {
-                    "N/A (verification row)"
-                } else if converged && iters <= decision.expected_iterations {
-                    "Better than expected"
-                } else if converged && iters <= decision.expected_iterations * 2 {
-                    "Within expected range"
-                } else if converged {
-                    "Slower than expected"
-                } else {
-                    "-"
-                };
-
-                let verified = format_direct_verification_status(
-                    direct_comparison.as_ref(),
-                    direct_verification_capability,
-                );
-
-                if is_root_rank {
-                    println!(
-                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
-                        matrix_name,
-                        primary,
-                        fallback,
-                        solver_reason,
-                        outcome_code,
-                        row_category,
-                        status,
-                        iters,
-                        iter_performance
-                    );
-                    if row_category == "verified_by_direct_reference" {
-                        println!(
-                            "    ⇢ VERIFICATION ROW: direct reference metrics are authoritative for this result."
-                        );
-                    }
-                    println!(
-                        "    ↳ diagnostics: ||b||={:.2e}, acceptance_threshold=max(rtol*||b||, atol)={:.2e}, true_abs_res={:.2e}, true_rel_res={:.2e}, stats_res={:.2e}, verified={}",
-                        rhs_norm,
-                        acceptance_threshold,
-                        true_abs_res,
-                        true_rel_res,
-                        prec_residual,
-                        verified
-                    );
-                    if let Some(cmp) = direct_comparison.as_ref() {
-                        let reference_phase = if cmp.reference_solve_executed {
-                            "executed"
-                        } else {
-                            "skipped"
-                        };
-                        println!(
-                            "    → Direct reference check: status={}, abs_err_norm={:.3e}, rel_diff={:.3e}, matches_verified_answer={}, policy={}",
-                            reference_phase,
-                            cmp.abs_error_norm,
-                            cmp.rel_error_norm,
-                            cmp.matches_verified_answer,
-                            cmp.note
-                        );
-                    }
-                    println!("    ↳ detail: {diagnostics}");
-                    println!(
-                        "    → Screen: symmetry_hint={}, spd_like_hint={}, diagonal_healthy={}, density={:.3e}, size_class={}, cond_heuristic={:.2e}, symmetry_verdict={}",
-                        screen.symmetry_hint,
-                        screen.spd_like_hint,
-                        screen.diagonal_healthy,
-                        screen.density,
-                        screen.size_class,
-                        screen.condition_heuristic,
-                        screen.symmetry.verdict
-                    );
-                    println!("    → {}", decision.amg_status_label);
-                    println!(
-                        "    → Decision rationale: {}",
-                        decision.rationale.join(" | ")
-                    );
-                    println!(
-                        "    → Contract checks: {}",
-                        decision.contract_checks.join(" | ")
-                    );
-                }
-
-                total_rows += 1;
-                match row_category {
-                    "iterative_accepted" => iterative_success_rows += 1,
-                    "verified_by_direct_reference" => verification_only_rows += 1,
-                    _ => failed_rows += 1,
-                }
-
-                // Additional diagnostics for interesting cases
-                if is_root_rank && screen.condition_heuristic >= 100.0 {
-                    println!(
-                        "    → Ill-conditioned matrix (est. cond. ≈ {:.1e})",
-                        screen.condition_heuristic
-                    );
-                }
-                if is_root_rank && screen.density > 0.1 {
-                    println!(
-                        "    → Dense matrix ({:.1}% fill) - direct methods may be preferred",
-                        screen.density * 100.0
-                    );
-                }
-                if is_root_rank && converged && iters < decision.expected_iterations / 2 {
-                    println!(
-                        "    → Excellent performance: {} iterations vs {} expected",
-                        iters, decision.expected_iterations
-                    );
-                }
-            }
-            Err(e) => {
-                if is_root_rank {
-                    println!(
-                        "{:<12} {:<18} {:<18} {:<16} {:<24} {:<28} {:<12} {:<8} {}",
-                        matrix_name, "-", "-", "N/A", "FAILED", "failed", "failed", "N/A", e
-                    );
-                }
-                total_rows += 1;
-                failed_rows += 1;
-            }
+            println!();
+            println!("Acceptance Summary [{}]:", policy.mode_label);
+            println!("===================");
+            println!("• Total rows: {total_rows}");
+            println!("• Iterative accepted rows: {iterative_success_rows}");
+            println!("• Verification-only rows (direct truth path): {verification_only_rows}");
+            println!("• Failed rows: {failed_rows}");
+            println!();
         }
     }
 
     if is_root_rank {
-        println!();
-        println!("Acceptance Summary:");
-        println!("===================");
-        println!("• Total rows: {total_rows}");
-        println!("• Iterative accepted rows: {iterative_success_rows}");
-        println!("• Verification-only rows (direct truth path): {verification_only_rows}");
-        println!("• Failed rows: {failed_rows}");
-        println!();
         println!("Benchmark Insights Summary:");
         println!("==========================");
         println!("• Sherman matrices: ILU preconditioning essential for fast convergence");
