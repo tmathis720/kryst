@@ -6,10 +6,13 @@ use kryst::context::ksp_context::KspContext;
 use kryst::error::KError;
 use kryst::matrix::op::{LinOp, LinOpF64};
 use kryst::parallel::{NoComm, UniverseComm};
-use kryst::preconditioner::PcSide;
-use kryst::solver::{BiCgStabBreakdownPolicy, BiCgStabSolver, BiCgStabVariant};
-use kryst::utils::convergence::ConvergedReason;
+use kryst::preconditioner::{PcSide, Preconditioner};
+use kryst::solver::{
+    BiCgStabBreakdownPolicy, BiCgStabSolver, BiCgStabVariant, MonitorAction, MonitorCallback,
+};
+use kryst::utils::convergence::{AcceptanceStatus, ConvergedReason};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn nonsym_tridiag(n: usize) -> Mat<f64> {
@@ -80,6 +83,28 @@ impl LinOpF64 for ScriptedMatvecOp {
 
     fn matvec(&self, x: &[f64], y: &mut [f64]) {
         self.matvec_impl(x, y);
+    }
+}
+
+struct CountingIdentityPc {
+    side_hits: Arc<AtomicUsize>,
+}
+
+impl CountingIdentityPc {
+    fn new(side_hits: Arc<AtomicUsize>) -> Self {
+        Self { side_hits }
+    }
+}
+
+impl Preconditioner for CountingIdentityPc {
+    fn setup(&mut self, _a: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        Ok(())
+    }
+
+    fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        self.side_hits.fetch_add(1, Ordering::Relaxed);
+        y.copy_from_slice(x);
+        Ok(())
     }
 }
 
@@ -327,9 +352,9 @@ fn bicgstab_handles_t_zero_and_s_zero_as_converged_for_left_and_right() {
         let op = ScriptedMatvecOp::new(
             2,
             vec![
-                vec![0.0, 0.0], // initial A*x0
+                vec![0.0, 0.0],  // initial A*x0
                 vec![1.0, -2.0], // v = A*p
-                vec![0.0, 0.0], // t = A*s
+                vec![0.0, 0.0],  // t = A*s
             ],
         );
         let mut solver = BiCgStabSolver::new(1e-12, 10);
@@ -340,8 +365,14 @@ fn bicgstab_handles_t_zero_and_s_zero_as_converged_for_left_and_right() {
             .solve_f64(&op, None, &b, &mut x, side, &comm, None, Some(&mut ws))
             .expect("solve should return stats");
 
-        assert!(stats.reason.is_converged(), "side={side:?}, stats={stats:?}");
-        assert!(stats.final_residual <= 1e-10, "side={side:?}, stats={stats:?}");
+        assert!(
+            stats.reason.is_converged(),
+            "side={side:?}, stats={stats:?}"
+        );
+        assert!(
+            stats.final_residual <= 1e-10,
+            "side={side:?}, stats={stats:?}"
+        );
     }
 }
 
@@ -374,4 +405,152 @@ fn bicgstab_handles_t_zero_and_s_nonzero_as_breakdown_for_left_and_right() {
             "side={side:?}, stats={stats:?}"
         );
     }
+}
+
+#[test]
+fn bicgstab_preconditioned_left_and_right_support_nonzero_initial_guess() {
+    let n = 24;
+    let a = nonsym_tridiag(n);
+    let b = vec![1.0; n];
+    let comm = UniverseComm::NoComm(NoComm);
+
+    for side in [PcSide::Left, PcSide::Right] {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let mut pc = CountingIdentityPc::new(Arc::clone(&hits));
+        pc.setup(&a).expect("pc setup");
+        let mut solver = BiCgStabSolver::new(1e-10, 300);
+        let mut ws = kryst::context::ksp_context::Workspace::default();
+        let mut x = vec![0.35; n];
+        let x0 = x.clone();
+
+        let stats = solver
+            .solve_f64(&a, Some(&pc), &b, &mut x, side, &comm, None, Some(&mut ws))
+            .expect("preconditioned solve should return stats");
+
+        assert!(matches!(
+            stats.reason,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        ));
+        assert!(
+            hits.load(Ordering::Relaxed) > 0,
+            "preconditioner was not used on side {side:?}"
+        );
+        assert_ne!(x, x0, "nonzero initial guess path should update x");
+    }
+}
+
+#[test]
+fn bicgstab_alpha_den_breakdown_salvage_branch_is_reachable() {
+    let comm = UniverseComm::NoComm(NoComm);
+    let b = vec![1.0, 0.0];
+    let op = ScriptedMatvecOp::new(
+        2,
+        vec![
+            vec![0.0, 0.0], // A*x0
+            vec![0.0, 1.0], // v orthogonal to r_hat => alpha_den = 0
+        ],
+    );
+    let mut solver = BiCgStabSolver::new(0.0, 6);
+    solver.atol = 0.0;
+    solver.rtol = 0.0;
+    let mut ws = kryst::context::ksp_context::Workspace::default();
+    let mut x = vec![0.0, 0.0];
+
+    let stats = solver
+        .solve_f64(
+            &op,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
+        .expect("solve should return stats");
+
+    assert_eq!(stats.reason, ConvergedReason::DivergedBreakdownBiCG);
+    assert_eq!(stats.acceptance_status, AcceptanceStatus::Failed);
+    assert!(stats.final_residual > 0.0);
+}
+
+#[test]
+fn bicgstab_omega_den_breakdown_salvage_branch_is_reachable() {
+    let comm = UniverseComm::NoComm(NoComm);
+    let b = vec![1.0, 0.0];
+    let op = ScriptedMatvecOp::new(
+        2,
+        vec![
+            vec![0.0, 0.0],      // A*x0
+            vec![1.0, 1.0],      // v => alpha_den != 0, s != 0
+            vec![f64::NAN, 0.0], // t => omega_den non-finite
+        ],
+    );
+    let mut solver = BiCgStabSolver::new(0.0, 6);
+    solver.atol = 0.0;
+    solver.rtol = 0.0;
+    solver.set_variant(BiCgStabVariant::LowSync);
+    let mut ws = kryst::context::ksp_context::Workspace::default();
+    let mut x = vec![0.0, 0.0];
+
+    let stats = solver
+        .solve_f64(
+            &op,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
+        .expect("solve should return stats");
+
+    assert_eq!(stats.reason, ConvergedReason::DivergedBreakdownBiCG);
+    assert_eq!(stats.acceptance_status, AcceptanceStatus::Failed);
+}
+
+#[test]
+fn bicgstab_reliable_residual_replacements_interact_with_monitors() {
+    let n = 32;
+    let a = nonsym_tridiag(n);
+    let b = vec![1.0; n];
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut x = vec![0.2; n];
+    let mut solver = BiCgStabSolver::new(1e-9, 300);
+    solver.set_variant(BiCgStabVariant::Reliable {
+        residual_replace_every: 1,
+    });
+    let mut ws = kryst::context::ksp_context::Workspace::default();
+
+    let observed_residuals = Arc::new(Mutex::new(Vec::new()));
+    let observed_residuals_cl = Arc::clone(&observed_residuals);
+    let monitor: Box<MonitorCallback<f64>> = Box::new(move |_iter, residual, _| {
+        observed_residuals_cl
+            .lock()
+            .expect("hist lock")
+            .push(residual);
+        MonitorAction::Continue
+    });
+    let monitors = vec![monitor];
+
+    let stats = solver
+        .solve_f64(
+            &a,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            Some(&monitors),
+            Some(&mut ws),
+        )
+        .expect("reliable solve should return stats");
+
+    let observed = observed_residuals.lock().expect("hist lock").len();
+    assert!(observed > 0, "monitor should observe residual history");
+    assert!(
+        stats.counters.residual_replacements >= stats.iterations,
+        "replacement counter should include reliable residual replacements"
+    );
 }
