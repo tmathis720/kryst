@@ -975,6 +975,36 @@ impl BiCgStabSolver {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn solve_csr(
+        &mut self,
+        a: &crate::matrix::sparse::CsrMatrix<f64>,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError> {
+        self.solve(a, pc, b, x, pc_side, comm, monitors, work)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_dist_csr(
+        &mut self,
+        a: &crate::matrix::DistCsrOp,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError> {
+        self.solve(a, pc, b, x, pc_side, comm, monitors, work)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn solve_f64<A>(
         &mut self,
         a: &A,
@@ -999,6 +1029,17 @@ impl BiCgStabSolver {
         {
             let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
             let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
+            let any_op = a.as_any();
+            if let Some(dist) = any_op.downcast_ref::<crate::matrix::DistCsrOp>() {
+                return self
+                    .solve_dist_csr(dist, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+                    .map(|stats| stats.with_reduction_model(self.reduction_model()));
+            }
+            if let Some(csr) = any_op.downcast_ref::<crate::matrix::sparse::CsrMatrix<f64>>() {
+                return self
+                    .solve_csr(csr, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+                    .map(|stats| stats.with_reduction_model(self.reduction_model()));
+            }
             self.solve(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
                 .map(|stats| stats.with_reduction_model(self.reduction_model()))
         }
