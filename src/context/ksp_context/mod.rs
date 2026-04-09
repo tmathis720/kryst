@@ -1373,7 +1373,8 @@ impl KspContext {
         if let Some(ref variant) = opts.bicgstab_variant {
             let parsed = match variant.as_str() {
                 "classic" => BiCgStabVariant::Classic,
-                "lowsync" | "low_sync" | "low-sync" => BiCgStabVariant::LowSync,
+                "fewerchecks" | "fewer_checks" | "fewer-checks" | "lowsync" | "low_sync"
+                | "low-sync" => BiCgStabVariant::FewerChecks,
                 "reliable" => BiCgStabVariant::Reliable {
                     residual_replace_every: self
                         .pending_bicgstab
@@ -1383,7 +1384,7 @@ impl KspContext {
                 },
                 other => {
                     return Err(KError::SolveError(format!(
-                        "Unrecognized ksp_bicgstab_variant: {other} (expected 'classic'|'lowsync'|'reliable')"
+                        "Unrecognized ksp_bicgstab_variant: {other} (expected 'classic'|'fewerchecks'|'reliable'; legacy aliases: 'lowsync'|'low_sync'|'low-sync')"
                     )));
                 }
             };
@@ -4928,7 +4929,7 @@ mod tests {
         for (solver, key, value) in [
             ("gmres", "gmres_variant", "pipelined"),
             ("fgmres", "fgmres_variant", "pipelined"),
-            ("bicgstab", "bicgstab_variant", "lowsync"),
+            ("bicgstab", "bicgstab_variant", "fewerchecks"),
         ] {
             let (x1, overlap1) = run_once(solver, key, value);
             let (x2, overlap2) = run_once(solver, key, value);
@@ -5151,7 +5152,7 @@ mod tests {
         ksp.atol = 1e-12;
         ksp.maxits = 500;
         let opts = KspOptions {
-            bicgstab_variant: Some("lowsync".into()),
+            bicgstab_variant: Some("fewerchecks".into()),
             ..Default::default()
         };
         ksp.set_from_options(&opts).expect("set opts");

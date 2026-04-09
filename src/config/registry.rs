@@ -74,7 +74,7 @@ pub static SPECS: &[Spec] = &[
         key: "ksp_bicgstab_variant",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "BiCGStab variant: classic|lowsync|reliable",
+        doc: "BiCGStab variant: classic|fewerchecks|reliable",
     },
     Spec {
         flag: "-ksp_bicgstab_replace_every",

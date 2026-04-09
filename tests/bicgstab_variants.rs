@@ -160,7 +160,7 @@ impl LinOpF64 for NanOnceOp {
 }
 
 #[test]
-fn bicgstab_lowsync_keeps_convergence_and_reduces_syncs() {
+fn bicgstab_fewerchecks_keeps_convergence_and_reduces_syncs() {
     let n = 36;
     let a = nonsym_tridiag(n);
     let b = vec![1.0; n];
@@ -185,7 +185,7 @@ fn bicgstab_lowsync_keeps_convergence_and_reduces_syncs() {
 
     let mut x_low = vec![0.0; n];
     let mut low = BiCgStabSolver::new(1e-9, 300);
-    low.set_variant(BiCgStabVariant::LowSync);
+    low.set_variant(BiCgStabVariant::FewerChecks);
     let mut ws_low = kryst::context::ksp_context::Workspace::default();
     let stats_low = low
         .solve_f64(
@@ -208,9 +208,13 @@ fn bicgstab_lowsync_keeps_convergence_and_reduces_syncs() {
 
 #[test]
 fn bicgstab_variant_selectable_from_ksp_options() {
-    let opts =
-        KspOptions::from_args(&["-ksp_type", "bicgstab", "-ksp_bicgstab_variant", "lowsync"])
-            .unwrap();
+    let opts = KspOptions::from_args(&[
+        "-ksp_type",
+        "bicgstab",
+        "-ksp_bicgstab_variant",
+        "fewerchecks",
+    ])
+    .unwrap();
     let mut ksp = KspContext::new();
     ksp.set_from_options(&opts).unwrap();
 
@@ -223,7 +227,7 @@ fn bicgstab_variant_selectable_from_ksp_options() {
 
     assert_eq!(
         stats.reduction_model.as_ref().map(|m| m.variant),
-        Some("bicgstab-lowsync")
+        Some("bicgstab-fewer-checks")
     );
 }
 
@@ -358,7 +362,7 @@ fn bicgstab_handles_t_zero_and_s_zero_as_converged_for_left_and_right() {
             ],
         );
         let mut solver = BiCgStabSolver::new(1e-12, 10);
-        solver.set_variant(BiCgStabVariant::LowSync);
+        solver.set_variant(BiCgStabVariant::FewerChecks);
         let mut ws = kryst::context::ksp_context::Workspace::default();
         let mut x = vec![0.0, 0.0];
         let stats = solver
@@ -390,7 +394,7 @@ fn bicgstab_handles_t_zero_and_s_nonzero_as_breakdown_for_left_and_right() {
             ],
         );
         let mut solver = BiCgStabSolver::new(1e-12, 10);
-        solver.set_variant(BiCgStabVariant::LowSync);
+        solver.set_variant(BiCgStabVariant::FewerChecks);
         solver.atol = 0.0;
         solver.rtol = 0.0;
         let mut ws = kryst::context::ksp_context::Workspace::default();
@@ -489,7 +493,7 @@ fn bicgstab_omega_den_breakdown_salvage_branch_is_reachable() {
     let mut solver = BiCgStabSolver::new(0.0, 6);
     solver.atol = 0.0;
     solver.rtol = 0.0;
-    solver.set_variant(BiCgStabVariant::LowSync);
+    solver.set_variant(BiCgStabVariant::FewerChecks);
     let mut ws = kryst::context::ksp_context::Workspace::default();
     let mut x = vec![0.0, 0.0];
 

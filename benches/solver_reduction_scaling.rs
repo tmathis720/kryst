@@ -209,12 +209,12 @@ fn main() {
         let bicg_classic_ms = bicg_classic_start.elapsed().as_secs_f64() * 1e3;
 
         xb.fill(0.0);
-        let mut bicg_lowsync = BiCgStabSolver::new(1e-8, 600);
-        bicg_lowsync.set_variant(BiCgStabVariant::LowSync);
+        let mut bicg_fewerchecks = BiCgStabSolver::new(1e-8, 600);
+        bicg_fewerchecks.set_variant(BiCgStabVariant::FewerChecks);
         let mut ws = Workspace::default();
         let t0 = Instant::now();
-        let bicg_lowsync_start = Instant::now();
-        let s_bicg_lowsync = bicg_lowsync
+        let bicg_fewerchecks_start = Instant::now();
+        let s_bicg_fewerchecks = bicg_fewerchecks
             .solve_f64(
                 &a3,
                 None,
@@ -225,15 +225,18 @@ fn main() {
                 None,
                 Some(&mut ws),
             )
-            .expect("bicgstab lowsync");
+            .expect("bicgstab fewerchecks");
         report(
-            "bicgstab-lowsync",
-            s_bicg_lowsync.iterations,
-            s_bicg_lowsync.counters.num_global_reductions,
+            "bicgstab-fewer-checks",
+            s_bicg_fewerchecks.iterations,
+            s_bicg_fewerchecks.counters.num_global_reductions,
             t0.elapsed().as_secs_f64() * 1e3,
-            s_bicg_lowsync.reduction_model.as_ref().map(|m| m.variant),
+            s_bicg_fewerchecks
+                .reduction_model
+                .as_ref()
+                .map(|m| m.variant),
         );
-        let bicg_lowsync_ms = bicg_lowsync_start.elapsed().as_secs_f64() * 1e3;
+        let bicg_fewerchecks_ms = bicg_fewerchecks_start.elapsed().as_secs_f64() * 1e3;
 
         let mut xq = vec![0.0; a3.nrows()];
         let mut qmr = QmrSolver::new(1e-8, 600);
@@ -283,20 +286,20 @@ fn main() {
         );
 
         println!(
-            "      deltas: bicg-lowsync vs classic => reductions={} runtime_ms={:.3}",
+            "      deltas: bicg-fewerchecks vs classic => reductions={} runtime_ms={:.3}",
             s_bicg_classic.counters.num_global_reductions as isize
-                - s_bicg_lowsync.counters.num_global_reductions as isize,
-            bicg_classic_ms - bicg_lowsync_ms
+                - s_bicg_fewerchecks.counters.num_global_reductions as isize,
+            bicg_classic_ms - bicg_fewerchecks_ms
         );
 
         assert!(
-            s_bicg_lowsync.counters.overlap_global_reductions > 0,
-            "benchmark gate failed: bicgstab lowsync should record overlap reductions"
+            s_bicg_fewerchecks.counters.overlap_global_reductions > 0,
+            "benchmark gate failed: bicgstab fewerchecks should record overlap reductions"
         );
         assert!(
-            s_bicg_lowsync.counters.num_global_reductions
+            s_bicg_fewerchecks.counters.num_global_reductions
                 <= s_bicg_classic.counters.num_global_reductions,
-            "benchmark gate failed: lowsync did not reduce synchronization"
+            "benchmark gate failed: fewerchecks did not reduce synchronization"
         );
     }
 }
