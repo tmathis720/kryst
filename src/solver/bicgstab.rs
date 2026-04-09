@@ -1100,4 +1100,63 @@ mod tests {
             ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
         ));
     }
+
+    #[test]
+    fn bicgstab_right_side_nonzero_initial_guess_sanity() {
+        let (a, b) = nonsym_3x3();
+        let mut x = vec![0.4, -0.2, 0.1];
+        let x0 = x.clone();
+        let mut solver = BiCgStabSolver::new(1e-10, 100);
+        let comm = UniverseComm::NoComm(crate::parallel::NoComm);
+        let mut ws = Workspace::new(3);
+        solver.setup_workspace(&mut ws);
+
+        let stats = solver
+            .solve_f64(
+                &a,
+                None,
+                &b,
+                &mut x,
+                PcSide::Right,
+                &comm,
+                None,
+                Some(&mut ws),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            stats.reason,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        ));
+        assert_ne!(x, x0);
+    }
+
+    #[test]
+    fn bicgstab_reliable_variant_records_replacements_sanity() {
+        let (a, b) = nonsym_3x3();
+        let mut x = vec![0.0; 3];
+        let mut solver = BiCgStabSolver::new(1e-10, 100);
+        solver.set_variant(BiCgStabVariant::Reliable {
+            residual_replace_every: 1,
+        });
+        let comm = UniverseComm::NoComm(crate::parallel::NoComm);
+        let mut ws = Workspace::new(3);
+        solver.setup_workspace(&mut ws);
+
+        let stats = solver
+            .solve_f64(
+                &a,
+                None,
+                &b,
+                &mut x,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut ws),
+            )
+            .unwrap();
+
+        assert_ne!(stats.reason, ConvergedReason::Continued);
+        assert!(stats.counters.residual_replacements >= stats.iterations);
+    }
 }

@@ -102,3 +102,37 @@ fn bicgstab_with_sor_preconditioner_complex() {
         ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
     ));
 }
+
+#[test]
+fn bicgstab_complex_supports_right_side_and_nonzero_initial_guess() {
+    let n = 6;
+    let (op, x_true, b) = diagonally_dominant_system(n, SEED ^ 0x55AA, ROW_SCALE, DIAG_SHIFT);
+    let comm = UniverseComm::NoComm(NoComm);
+
+    for side in [PcSide::Left, PcSide::Right] {
+        let mut solver = BiCgStabSolver::new(1e-10, 400);
+        let mut work = Workspace::new(n);
+        let mut x = vec![S::from_real(0.15); n];
+        let x0 = x.clone();
+
+        let stats = solver
+            .solve(&op, None, &b, &mut x, side, &comm, None, Some(&mut work))
+            .expect("BiCGStab complex solve");
+
+        assert!(
+            matches!(
+                stats.reason,
+                ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+            ),
+            "side={side:?}, stats={stats:?}"
+        );
+        assert_ne!(x, x0, "side={side:?} should update nonzero initial guess");
+
+        let err = op.residual_norm(&x, &b);
+        assert!(err < 1e-8, "side={side:?}, residual too large: {err:e}");
+        for (approx, exact) in x.iter().zip(x_true.iter()) {
+            assert_abs_diff_eq!(approx.real(), exact.real(), epsilon = 2e-6);
+            assert_abs_diff_eq!(approx.imag(), exact.imag(), epsilon = 2e-6);
+        }
+    }
+}
