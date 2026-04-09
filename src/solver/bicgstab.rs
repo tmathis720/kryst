@@ -30,6 +30,8 @@ use crate::utils::convergence::{
     AcceptanceStatus, ConvergedReason, ReasonEmitter, ReductionModel, SolveStats, SolverCounters,
 };
 use crate::utils::reduction::{AllreduceHandle, AllreduceOps, ReductOptions};
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
 
 #[cfg(feature = "logging")]
 use crate::utils::profiling::StageGuard;
@@ -103,6 +105,98 @@ impl<'a> BiCgWorkspace<'a> {
             v_raw,
             scratch: &mut work.bridge,
         }
+    }
+}
+
+#[inline]
+fn bicgstab_update_p_from_r_or_s(p: &mut [S], r_or_s: &[S], v: &[S], beta: S, omega: S) {
+    debug_assert_eq!(p.len(), r_or_s.len());
+    debug_assert_eq!(p.len(), v.len());
+    #[cfg(feature = "rayon")]
+    {
+        let n = p.len();
+        let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            p.par_iter_mut()
+                .zip(r_or_s.par_iter().copied())
+                .zip(v.par_iter().copied())
+                .for_each(|((pi, ri), vi)| {
+                    *pi = ri + beta * (*pi - omega * vi);
+                });
+            return;
+        }
+    }
+    for i in 0..p.len() {
+        p[i] = r_or_s[i] + beta * (p[i] - omega * v[i]);
+    }
+}
+
+#[inline]
+fn bicgstab_update_s_from_r_alpha_v(s: &mut [S], r: &[S], v: &[S], alpha: S) {
+    debug_assert_eq!(s.len(), r.len());
+    debug_assert_eq!(s.len(), v.len());
+    #[cfg(feature = "rayon")]
+    {
+        let n = s.len();
+        let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            s.par_iter_mut()
+                .zip(r.par_iter().copied())
+                .zip(v.par_iter().copied())
+                .for_each(|((si, ri), vi)| {
+                    *si = ri - alpha * vi;
+                });
+            return;
+        }
+    }
+    for i in 0..s.len() {
+        s[i] = r[i] - alpha * v[i];
+    }
+}
+
+#[inline]
+fn bicgstab_update_x_alpha_y_omega_z(x: &mut [S], y: &[S], z: &[S], alpha: S, omega: S) {
+    debug_assert_eq!(x.len(), y.len());
+    debug_assert_eq!(x.len(), z.len());
+    #[cfg(feature = "rayon")]
+    {
+        let n = x.len();
+        let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            x.par_iter_mut()
+                .zip(y.par_iter().copied())
+                .zip(z.par_iter().copied())
+                .for_each(|((xi, yi), zi)| {
+                    *xi = *xi + alpha * yi + omega * zi;
+                });
+            return;
+        }
+    }
+    for i in 0..x.len() {
+        x[i] += alpha * y[i] + omega * z[i];
+    }
+}
+
+#[inline]
+fn bicgstab_update_r_from_s_omega_t(r: &mut [S], s: &[S], t: &[S], omega: S) {
+    debug_assert_eq!(r.len(), s.len());
+    debug_assert_eq!(r.len(), t.len());
+    #[cfg(feature = "rayon")]
+    {
+        let n = r.len();
+        let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            r.par_iter_mut()
+                .zip(s.par_iter().copied())
+                .zip(t.par_iter().copied())
+                .for_each(|((ri, si), ti)| {
+                    *ri = si - omega * ti;
+                });
+            return;
+        }
+    }
+    for i in 0..r.len() {
+        r[i] = s[i] - omega * t[i];
     }
 }
 
@@ -450,13 +544,9 @@ impl BiCgStabSolver {
                 (rho / rho_prev) * (alpha / omega_prev)
             };
             if need_left {
-                for i in 0..n {
-                    p[i] = s[i] + beta * (p[i] - omega_prev * v[i]);
-                }
+                bicgstab_update_p_from_r_or_s(p, s, v, beta, omega_prev);
             } else {
-                for i in 0..n {
-                    p[i] = r[i] + beta * (p[i] - omega_prev * v[i]);
-                }
+                bicgstab_update_p_from_r_or_s(p, r, v, beta, omega_prev);
             }
 
             if need_left {
@@ -519,9 +609,7 @@ impl BiCgStabSolver {
                     s[i] -= alpha * v[i];
                 }
             } else {
-                for i in 0..n {
-                    s[i] = r[i] - alpha * v[i];
-                }
+                bicgstab_update_s_from_r_alpha_v(s, r, v, alpha);
             }
 
             if check_s_norm {
@@ -785,37 +873,25 @@ impl BiCgStabSolver {
             if need_left {
                 match (z_p.as_deref(), z_s.as_deref()) {
                     (Some(y), Some(tpre)) => {
-                        for i in 0..n {
-                            x[i] += alpha * y[i] + omega * tpre[i];
-                        }
+                        bicgstab_update_x_alpha_y_omega_z(x, y, tpre, alpha, omega);
                     }
                     (Some(y), None) => {
-                        for i in 0..n {
-                            x[i] += alpha * y[i] + omega * s[i];
-                        }
+                        bicgstab_update_x_alpha_y_omega_z(x, y, s, alpha, omega);
                     }
                     (None, Some(tpre)) => {
-                        for i in 0..n {
-                            x[i] += alpha * p[i] + omega * tpre[i];
-                        }
+                        bicgstab_update_x_alpha_y_omega_z(x, p, tpre, alpha, omega);
                     }
                     (None, None) => {
-                        for i in 0..n {
-                            x[i] += alpha * p[i] + omega * s[i];
-                        }
+                        bicgstab_update_x_alpha_y_omega_z(x, p, s, alpha, omega);
                     }
                 }
             } else {
                 match (side, pc, z_p.as_deref(), z_s.as_deref()) {
                     (PcSide::Right, Some(_), Some(zp), Some(zs)) => {
-                        for i in 0..n {
-                            x[i] += alpha * zp[i] + omega * zs[i];
-                        }
+                        bicgstab_update_x_alpha_y_omega_z(x, zp, zs, alpha, omega);
                     }
                     _ => {
-                        for i in 0..n {
-                            x[i] += alpha * p[i] + omega * s[i];
-                        }
+                        bicgstab_update_x_alpha_y_omega_z(x, p, s, alpha, omega);
                     }
                 }
             }
@@ -836,9 +912,7 @@ impl BiCgStabSolver {
                     s.copy_from_slice(r);
                 }
             } else {
-                for i in 0..n {
-                    r[i] = s[i] - omega * t[i];
-                }
+                bicgstab_update_r_from_s_omega_t(r, s, t, omega);
             }
 
             if let Some(every) = replace_every {
@@ -1085,6 +1159,95 @@ impl LinearSolver for BiCgStabSolver {
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.solve_f64(a, pc.as_deref(), b, x, pc_side, comm, monitors, work)
+    }
+}
+
+#[cfg(test)]
+mod kernel_tests {
+    use super::*;
+
+    fn approx_vec_eq(a: &[S], b: &[S], tol: R) {
+        assert_eq!(a.len(), b.len());
+        for i in 0..a.len() {
+            assert!(
+                (a[i] - b[i]).abs() <= tol,
+                "mismatch at {i}: lhs={:?}, rhs={:?}",
+                a[i],
+                b[i]
+            );
+        }
+    }
+
+    fn sample_vec(n: usize, offset: R) -> Vec<S> {
+        (0..n)
+            .map(|i| S::from_real(((i as R) * 0.37 + offset).sin()))
+            .collect()
+    }
+
+    #[test]
+    fn update_p_matches_inlined_formula() {
+        let n = 127;
+        let r_or_s = sample_vec(n, 0.1);
+        let v = sample_vec(n, -0.4);
+        let beta = S::from_real(0.33);
+        let omega = S::from_real(-0.21);
+        let mut p_expected = sample_vec(n, 0.7);
+        let mut p_actual = p_expected.clone();
+
+        for i in 0..n {
+            p_expected[i] = r_or_s[i] + beta * (p_expected[i] - omega * v[i]);
+        }
+        bicgstab_update_p_from_r_or_s(&mut p_actual, &r_or_s, &v, beta, omega);
+        approx_vec_eq(&p_actual, &p_expected, 1e-12);
+    }
+
+    #[test]
+    fn update_s_matches_inlined_formula() {
+        let n = 193;
+        let r = sample_vec(n, 0.25);
+        let v = sample_vec(n, -0.75);
+        let alpha = S::from_real(0.42);
+        let mut s_expected = sample_vec(n, 0.9);
+        let mut s_actual = s_expected.clone();
+
+        for i in 0..n {
+            s_expected[i] = r[i] - alpha * v[i];
+        }
+        bicgstab_update_s_from_r_alpha_v(&mut s_actual, &r, &v, alpha);
+        approx_vec_eq(&s_actual, &s_expected, 1e-12);
+    }
+
+    #[test]
+    fn update_x_matches_inlined_formula() {
+        let n = 211;
+        let y = sample_vec(n, 0.5);
+        let z = sample_vec(n, -0.1);
+        let alpha = S::from_real(0.19);
+        let omega = S::from_real(-0.63);
+        let mut x_expected = sample_vec(n, 0.33);
+        let mut x_actual = x_expected.clone();
+
+        for i in 0..n {
+            x_expected[i] += alpha * y[i] + omega * z[i];
+        }
+        bicgstab_update_x_alpha_y_omega_z(&mut x_actual, &y, &z, alpha, omega);
+        approx_vec_eq(&x_actual, &x_expected, 1e-12);
+    }
+
+    #[test]
+    fn update_r_matches_inlined_formula() {
+        let n = 257;
+        let s = sample_vec(n, 1.3);
+        let t = sample_vec(n, -0.3);
+        let omega = S::from_real(0.71);
+        let mut r_expected = sample_vec(n, -0.8);
+        let mut r_actual = r_expected.clone();
+
+        for i in 0..n {
+            r_expected[i] = s[i] - omega * t[i];
+        }
+        bicgstab_update_r_from_s_omega_t(&mut r_actual, &s, &t, omega);
+        approx_vec_eq(&r_actual, &r_expected, 1e-12);
     }
 }
 
