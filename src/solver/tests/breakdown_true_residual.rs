@@ -132,7 +132,10 @@ fn bicgstab_breakdown_reclassified_when_true_residual_meets_tol() {
 
     assert_eq!(stats.reason, ConvergedReason::ConvergedHappyBreakdown);
     assert_eq!(stats.acceptance_status, AcceptanceStatus::OkWithWarning);
-    assert_eq!(stats.breakdown_reason, Some(ConvergedReason::DivergedBreakdownBiCG));
+    assert_eq!(
+        stats.breakdown_reason,
+        Some(ConvergedReason::DivergedBreakdownBiCG)
+    );
     assert!(
         stats
             .residual_override_note
@@ -186,7 +189,7 @@ fn bicgstab_omega_breakdown_reclassified_when_true_residual_meets_tol() {
     let mut x = vec![1.0, 0.0];
     let mut solver = BiCgStabSolver::new(1e-12, 5);
     solver.atol = 1e-12;
-    solver.set_variant(crate::solver::bicgstab::BiCgStabVariant::LowSync);
+    solver.set_variant(crate::solver::bicgstab::BiCgStabVariant::FewerChecks);
     let comm = UniverseComm::NoComm(NoComm);
     let mut ws = Workspace::default();
 
@@ -205,7 +208,10 @@ fn bicgstab_omega_breakdown_reclassified_when_true_residual_meets_tol() {
 
     assert_eq!(stats.reason, ConvergedReason::ConvergedHappyBreakdown);
     assert_eq!(stats.acceptance_status, AcceptanceStatus::OkWithWarning);
-    assert_eq!(stats.breakdown_reason, Some(ConvergedReason::DivergedBreakdownBiCG));
+    assert_eq!(
+        stats.breakdown_reason,
+        Some(ConvergedReason::DivergedBreakdownBiCG)
+    );
     assert!(
         stats
             .residual_override_note
@@ -228,7 +234,7 @@ fn bicgstab_omega_breakdown_keeps_hard_breakdown_above_tol() {
     let mut x = vec![1.0, 0.0];
     let mut solver = BiCgStabSolver::new(1e-12, 5);
     solver.atol = 1e-12;
-    solver.set_variant(crate::solver::bicgstab::BiCgStabVariant::LowSync);
+    solver.set_variant(crate::solver::bicgstab::BiCgStabVariant::FewerChecks);
     let comm = UniverseComm::NoComm(NoComm);
     let mut ws = Workspace::default();
 

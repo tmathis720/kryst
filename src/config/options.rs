@@ -154,7 +154,7 @@ pub struct KspOptions {
     pub chebyshev_omega: Option<f64>,
     /// Restart length for GCR family (falls back to ksp_restart).
     pub gcr_restart: Option<usize>,
-    /// BiCGStab algorithm variant: "classic" | "lowsync" | "reliable"
+    /// BiCGStab algorithm variant: "classic" | "fewerchecks" | "reliable"
     pub bicgstab_variant: Option<String>,
     /// Residual replacement interval for reliable BiCGStab.
     pub bicgstab_replace_every: Option<usize>,

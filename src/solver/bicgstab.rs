@@ -260,7 +260,7 @@ fn finalize_breakdown_salvage_exit<A: KLinOp<Scalar = S> + ?Sized>(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BiCgStabVariant {
     Classic,
-    LowSync,
+    FewerChecks,
     Reliable { residual_replace_every: usize },
 }
 
@@ -307,8 +307,8 @@ impl BiCgStabSolver {
                 per_iteration: 5.0,
                 tail: 1,
             },
-            BiCgStabVariant::LowSync => ReductionModel {
-                variant: "bicgstab-lowsync",
+            BiCgStabVariant::FewerChecks => ReductionModel {
+                variant: "bicgstab-fewer-checks",
                 startup: 2,
                 per_iteration: 4.0,
                 tail: 1,
@@ -470,7 +470,7 @@ impl BiCgStabSolver {
 
         let (check_s_norm, replace_every) = match self.variant {
             BiCgStabVariant::Classic => (true, None),
-            BiCgStabVariant::LowSync => (false, None),
+            BiCgStabVariant::FewerChecks => (false, None),
             BiCgStabVariant::Reliable {
                 residual_replace_every,
             } => (true, Some(residual_replace_every.max(1))),

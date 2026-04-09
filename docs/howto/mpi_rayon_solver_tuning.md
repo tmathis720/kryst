@@ -38,7 +38,7 @@ Use reduced-sync variants only where the recurrences are mathematically valid fo
 - `CgVariant::Pipelined` (CG): SPD operator, left HPD preconditioner.
 - `PcgVariant::Pipelined { replace_every }` (PCG): same SPD/left-HPD assumptions.
 - `GmresVariant::Pipelined` and `FgmresVariant::Pipelined`: general nonsymmetric systems with Arnoldi-based fused reductions.
-- `BiCgStabVariant::LowSync`: nonsymmetric systems when lower synchronization is desired over strict classical recurrence behavior.
+- `BiCgStabVariant::FewerChecks`: nonsymmetric systems when lower synchronization is desired over strict classical recurrence behavior.
 
 Practical drift control for long runs:
 

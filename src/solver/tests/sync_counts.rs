@@ -117,7 +117,7 @@ fn gmres_classic_reduction_count_within_expected_bounds() -> Result<(), KError> 
 }
 
 #[test]
-fn bicgstab_lowsync_reduces_reported_syncs_vs_classic() -> Result<(), KError> {
+fn bicgstab_fewerchecks_reduces_reported_syncs_vs_classic() -> Result<(), KError> {
     let a = util::nonsym_convdiff_2d(8, 3.0);
     let b: Vec<R> = util::rhs_random(a.nrows(), 9);
     let comm = UniverseComm::NoComm(NoComm);
@@ -137,11 +137,11 @@ fn bicgstab_lowsync_reduces_reported_syncs_vs_classic() -> Result<(), KError> {
         Some(&mut ws),
     )?;
 
-    let mut lowsync = BiCgStabSolver::new(1e-8, 200);
-    lowsync.set_variant(BiCgStabVariant::LowSync);
+    let mut fewerchecks = BiCgStabSolver::new(1e-8, 200);
+    fewerchecks.set_variant(BiCgStabVariant::FewerChecks);
     let mut xl = vec![R::default(); a.nrows()];
     let mut ws = Workspace::default();
-    let stats_lowsync = lowsync.solve_f64(
+    let stats_fewerchecks = fewerchecks.solve_f64(
         &a,
         None,
         &b,
@@ -153,12 +153,12 @@ fn bicgstab_lowsync_reduces_reported_syncs_vs_classic() -> Result<(), KError> {
     )?;
 
     let b_norm2 = b.iter().map(|&v| v * v).sum::<f64>().sqrt();
-    assert!(stats_lowsync.final_residual <= 1e-6 * b_norm2 + 1e-8);
+    assert!(stats_fewerchecks.final_residual <= 1e-6 * b_norm2 + 1e-8);
     assert!(
-        stats_lowsync.counters.num_global_reductions
+        stats_fewerchecks.counters.num_global_reductions
             <= stats_classic.counters.num_global_reductions,
-        "expected lowsync reductions <= classic (lowsync={}, classic={})",
-        stats_lowsync.counters.num_global_reductions,
+        "expected fewerchecks reductions <= classic (fewerchecks={}, classic={})",
+        stats_fewerchecks.counters.num_global_reductions,
         stats_classic.counters.num_global_reductions
     );
     Ok(())
