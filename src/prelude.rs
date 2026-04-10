@@ -9,4 +9,5 @@ pub use crate::matrix::LinOp;
 pub use crate::matrix::OpFormat;
 pub use crate::parallel::{Comm, UniverseComm};
 pub use crate::preconditioner::{PcSide, Preconditioner};
+pub use crate::solver::{KLinOp, KPreconditioner};
 pub use crate::utils::convergence::{ConvergedReason, SolveStats};

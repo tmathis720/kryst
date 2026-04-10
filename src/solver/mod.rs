@@ -23,6 +23,8 @@ pub type MonitorCallback<R> = dyn Fn(usize, R, usize) -> MonitorAction + Send + 
 pub mod api;
 pub use api::Solver;
 pub mod adapters;
+pub use crate::ops::klinop::KLinOp;
+pub use crate::ops::kpc::KPreconditioner;
 pub use adapters::LegacyDirectAdapter;
 
 pub mod block;

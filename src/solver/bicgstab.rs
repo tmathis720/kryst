@@ -323,7 +323,7 @@ impl BiCgStabSolver {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn solve<A>(
+    pub fn solve_k<A>(
         &mut self,
         a: &A,
         pc: Option<&dyn KPreconditioner<Scalar = S>>,
@@ -1049,6 +1049,7 @@ impl BiCgStabSolver {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(not(feature = "complex"))]
     fn solve_csr(
         &mut self,
         a: &crate::matrix::sparse::CsrMatrix<f64>,
@@ -1060,10 +1061,11 @@ impl BiCgStabSolver {
         monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError> {
-        self.solve(a, pc, b, x, pc_side, comm, monitors, work)
+        self.solve_k(a, pc, b, x, pc_side, comm, monitors, work)
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(not(feature = "complex"))]
     fn solve_dist_csr(
         &mut self,
         a: &crate::matrix::DistCsrOp,
@@ -1075,10 +1077,15 @@ impl BiCgStabSolver {
         monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<R>, KError> {
-        self.solve(a, pc, b, x, pc_side, comm, monitors, work)
+        self.solve_k(a, pc, b, x, pc_side, comm, monitors, work)
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Solve using real (`f64`) operator/preconditioner interfaces.
+    ///
+    /// In `feature = "complex"` builds this bridge maps `f64 -> S` and projects
+    /// the final iterate back to `f64` (real part). For genuine complex solves,
+    /// prefer [`Self::solve_k`] or [`Self::solve_c64`].
     pub fn solve_f64<A>(
         &mut self,
         a: &A,
@@ -1114,7 +1121,7 @@ impl BiCgStabSolver {
                     .solve_csr(csr, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
                     .map(|stats| stats.with_reduction_model(self.reduction_model()));
             }
-            self.solve(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+            self.solve_k(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
                 .map(|stats| stats.with_reduction_model(self.reduction_model()))
         }
         #[cfg(feature = "complex")]
@@ -1122,7 +1129,7 @@ impl BiCgStabSolver {
             let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
             let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
             let result = self
-                .solve(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work)
+                .solve_k(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work)
                 .map(|stats| stats.with_reduction_model(self.reduction_model()));
             if result.is_ok() {
                 for (dst, src) in x.iter_mut().zip(x_s.iter()) {
@@ -1131,6 +1138,43 @@ impl BiCgStabSolver {
             }
             result
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
+        self.solve_k(a, pc, b, x, pc_side, comm, monitors, work)
+    }
+
+    #[cfg(feature = "complex")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_c64<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
+        self.solve_k(a, pc, b, x, pc_side, comm, monitors, work)
     }
 }
 
