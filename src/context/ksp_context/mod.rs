@@ -3085,7 +3085,7 @@ impl KspContext {
                             .as_any_mut()
                             .downcast_mut::<BiCgStabSolver>()
                             .ok_or_else(|| KError::SolveError("BiCGStab solver missing".into()))?;
-                        s.solve(
+                        s.solve_k(
                             &op,
                             pc_k.as_deref(),
                             b,

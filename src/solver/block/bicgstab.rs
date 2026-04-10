@@ -95,7 +95,7 @@ impl LinearSolver for BlockBicgstabSolver {
             let mut solver = BiCgStabSolver::new(self.options.rtol, self.options.max_iters);
             solver.atol = self.options.atol;
             solver.dtol = self.options.dtol;
-            let stats = solver.solve(
+            let stats = solver.solve_k(
                 &op,
                 pc_ref,
                 b_block.col(col),
