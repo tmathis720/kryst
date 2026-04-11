@@ -1390,7 +1390,10 @@ impl Preconditioner for IluCsr {
             } else {
                 permute_csr_symmetric(csr, &perm)
             };
-            self.perm = perm;
+            self.perm = perm.clone();
+            self.pipeline_meta = PreconditioningMetadata::identity(csr.nrows());
+            self.pipeline_meta.left_perm = perm.clone();
+            self.pipeline_meta.right_perm = perm;
 
             match self.cfg.kind {
                 IluKind::Ilu0 | IluKind::Milu0 => {
