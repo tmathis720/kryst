@@ -16,6 +16,7 @@ use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
+use crate::matrix::format::OpFormat;
 use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
@@ -37,6 +38,15 @@ use rayon::prelude::*;
 use crate::utils::profiling::StageGuard;
 #[cfg(feature = "logging")]
 use log::trace;
+
+#[cfg(not(feature = "complex"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RealDispatchRoute {
+    DistCsrBorrowed,
+    CsrBorrowed,
+    CsrMaterialized,
+    Generic,
+}
 
 struct BiCgWorkspace<'a> {
     r: &'a mut [S],
@@ -280,6 +290,35 @@ pub struct BiCgStabSolver {
 }
 
 impl BiCgStabSolver {
+    #[cfg(not(feature = "complex"))]
+    fn select_real_dispatch<A>(a: &A, pc: Option<&dyn PreconditionerF64>) -> RealDispatchRoute
+    where
+        A: LinOpF64 + LinOp<S = f64> + ?Sized,
+    {
+        let any_op = a.as_any();
+        if any_op.downcast_ref::<crate::matrix::DistCsrOp>().is_some() {
+            return RealDispatchRoute::DistCsrBorrowed;
+        }
+        if any_op
+            .downcast_ref::<crate::matrix::sparse::CsrMatrix<f64>>()
+            .is_some()
+        {
+            return RealDispatchRoute::CsrBorrowed;
+        }
+        let pc_wants_csr = pc
+            .map(|p| p.required_format() == OpFormat::Csr)
+            .unwrap_or(false);
+        if a.format() == OpFormat::Csr
+            && pc_wants_csr
+            && any_op
+                .downcast_ref::<crate::matrix::op::GenericCsrOp<f64>>()
+                .is_some()
+        {
+            return RealDispatchRoute::CsrMaterialized;
+        }
+        RealDispatchRoute::Generic
+    }
+
     pub fn new(rtol: R, maxits: usize) -> Self {
         Self {
             rtol,
@@ -1110,16 +1149,43 @@ impl BiCgStabSolver {
         {
             let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
             let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
-            let any_op = a.as_any();
-            if let Some(dist) = any_op.downcast_ref::<crate::matrix::DistCsrOp>() {
-                return self
-                    .solve_dist_csr(dist, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
-                    .map(|stats| stats.with_reduction_model(self.reduction_model()));
-            }
-            if let Some(csr) = any_op.downcast_ref::<crate::matrix::sparse::CsrMatrix<f64>>() {
-                return self
-                    .solve_csr(csr, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
-                    .map(|stats| stats.with_reduction_model(self.reduction_model()));
+            match Self::select_real_dispatch(a, pc) {
+                RealDispatchRoute::DistCsrBorrowed => {
+                    let dist = a
+                        .as_any()
+                        .downcast_ref::<crate::matrix::DistCsrOp>()
+                        .expect("dist dispatch requires DistCsrOp");
+                    return self
+                        .solve_dist_csr(dist, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+                        .map(|stats| stats.with_reduction_model(self.reduction_model()));
+                }
+                RealDispatchRoute::CsrBorrowed => {
+                    let csr = a
+                        .as_any()
+                        .downcast_ref::<crate::matrix::sparse::CsrMatrix<f64>>()
+                        .expect("csr dispatch requires CsrMatrix");
+                    return self
+                        .solve_csr(csr, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+                        .map(|stats| stats.with_reduction_model(self.reduction_model()));
+                }
+                RealDispatchRoute::CsrMaterialized => {
+                    let generic = a
+                        .as_any()
+                        .downcast_ref::<crate::matrix::op::GenericCsrOp<f64>>()
+                        .expect("materialized CSR dispatch requires GenericCsrOp<f64>");
+                    let matrix = generic.matrix();
+                    let csr = crate::matrix::sparse::CsrMatrix::from_csr(
+                        matrix.nrows(),
+                        matrix.ncols(),
+                        matrix.row_ptr().to_vec(),
+                        matrix.col_idx().to_vec(),
+                        matrix.values().to_vec(),
+                    );
+                    return self
+                        .solve_csr(&csr, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+                        .map(|stats| stats.with_reduction_model(self.reduction_model()));
+                }
+                RealDispatchRoute::Generic => {}
             }
             self.solve_k(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
                 .map(|stats| stats.with_reduction_model(self.reduction_model()))
@@ -1300,6 +1366,13 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use faer::Mat;
+    use std::sync::Arc;
+
+    use crate::matrix::csr::CsrMatrix as ScalarCsrMatrix;
+    use crate::matrix::op::GenericCsrOp;
+    use crate::matrix::sparse::CsrMatrix;
+    use crate::matrix::spmv::SpmvTuning;
+    use crate::preconditioner::Preconditioner;
 
     fn nonsym_3x3() -> (Mat<f64>, Vec<f64>) {
         let a = Mat::from_fn(3, 3, |i, j| {
@@ -1406,5 +1479,119 @@ mod tests {
 
         assert_ne!(stats.reason, ConvergedReason::Continued);
         assert!(stats.counters.residual_replacements >= stats.iterations);
+    }
+
+    struct IdentityHintPc {
+        format: OpFormat,
+    }
+
+    impl Preconditioner for IdentityHintPc {
+        fn setup(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
+            Ok(())
+        }
+
+        fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+            y.copy_from_slice(x);
+            Ok(())
+        }
+
+        fn required_format(&self) -> OpFormat {
+            self.format
+        }
+    }
+
+    fn csr_reference_system() -> (Arc<CsrMatrix<f64>>, Vec<f64>, Vec<f64>) {
+        let row_ptr = vec![0, 2, 4];
+        let col_idx = vec![0, 1, 0, 1];
+        let vals = vec![4.0, 1.0, 2.0, 3.0];
+        let csr = Arc::new(CsrMatrix::from_csr(2, 2, row_ptr, col_idx, vals));
+        let x_true = vec![1.0, -2.0];
+        let mut b = vec![0.0; 2];
+        csr.spmv(&x_true, &mut b);
+        (csr, b, x_true)
+    }
+
+    #[test]
+    fn bicgstab_dispatch_prefers_csr_materialized_when_pc_requires_csr() {
+        let (csr, _, _) = csr_reference_system();
+        let scalar = ScalarCsrMatrix::from_real_csr(csr.as_ref());
+        let op = GenericCsrOp::new(Arc::new(scalar), &SpmvTuning::default());
+        let pc_csr = IdentityHintPc {
+            format: OpFormat::Csr,
+        };
+        let pc_any = IdentityHintPc {
+            format: OpFormat::Any,
+        };
+
+        assert_eq!(
+            BiCgStabSolver::select_real_dispatch(&op, Some(&pc_csr)),
+            RealDispatchRoute::CsrMaterialized
+        );
+        assert_eq!(
+            BiCgStabSolver::select_real_dispatch(&op, Some(&pc_any)),
+            RealDispatchRoute::Generic
+        );
+    }
+
+    #[test]
+    fn bicgstab_csr_materialized_and_generic_routes_match_numerics() {
+        let (csr, b, x_true) = csr_reference_system();
+        let scalar = ScalarCsrMatrix::from_real_csr(csr.as_ref());
+        let op = GenericCsrOp::new(Arc::new(scalar), &SpmvTuning::default());
+        let comm = UniverseComm::NoComm(crate::parallel::NoComm);
+
+        let mut solver_csr = BiCgStabSolver::new(1e-12, 64);
+        let mut ws_csr = Workspace::new(2);
+        solver_csr.setup_workspace(&mut ws_csr);
+        let mut x_csr = vec![0.0; 2];
+        let pc_csr = IdentityHintPc {
+            format: OpFormat::Csr,
+        };
+        let stats_csr = solver_csr
+            .solve_f64(
+                &op,
+                Some(&pc_csr),
+                &b,
+                &mut x_csr,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut ws_csr),
+            )
+            .expect("csr-materialized route should solve");
+        assert!(matches!(
+            stats_csr.reason,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        ));
+
+        let mut solver_generic = BiCgStabSolver::new(1e-12, 64);
+        let mut ws_generic = Workspace::new(2);
+        solver_generic.setup_workspace(&mut ws_generic);
+        let mut x_generic = vec![0.0; 2];
+        let pc_any = IdentityHintPc {
+            format: OpFormat::Any,
+        };
+        let stats_generic = solver_generic
+            .solve_f64(
+                &op,
+                Some(&pc_any),
+                &b,
+                &mut x_generic,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut ws_generic),
+            )
+            .expect("generic route should solve");
+        assert!(matches!(
+            stats_generic.reason,
+            ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+        ));
+
+        for i in 0..2 {
+            assert_abs_diff_eq!(x_csr[i], x_true[i], epsilon = 1e-10);
+            assert_abs_diff_eq!(x_generic[i], x_true[i], epsilon = 1e-10);
+            assert_abs_diff_eq!(x_csr[i], x_generic[i], epsilon = 1e-12);
+        }
     }
 }
