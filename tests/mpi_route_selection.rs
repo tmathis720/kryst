@@ -2,7 +2,7 @@
 
 mod fixtures;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
@@ -10,6 +10,14 @@ use kryst::matrix::dist_csr::DistCsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
 use kryst::utils::convergence::ConvergedReason;
+
+fn mpi_test_guard() -> MutexGuard<'static, ()> {
+    static MPI_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    MPI_TEST_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("mpi test mutex poisoned")
+}
 
 fn local_rows_from_global(
     global: &CsrMatrix<f64>,
@@ -75,6 +83,7 @@ fn solve_with_pc(
 
 #[test]
 fn mpi_matrix_route_policy_solver_and_pc_combinations() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     if comm.size() <= 1 {
         return;
@@ -142,6 +151,7 @@ fn mpi_matrix_route_policy_solver_and_pc_combinations() {
 
 #[test]
 fn mpi_stress_empty_rank_nnz_imbalance_and_disconnected_partitions() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     if comm.size() <= 1 {
         return;
@@ -253,6 +263,7 @@ fn mpi_stress_empty_rank_nnz_imbalance_and_disconnected_partitions() {
 
 #[test]
 fn mpi_fault_injection_native_setup_failure_and_replay_tokens() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     if comm.size() <= 1 {
         return;
