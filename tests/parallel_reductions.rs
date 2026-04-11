@@ -74,17 +74,20 @@ fn dist_matvec_mpi_rayon_stress() {
 
     let next = if rank + 1 < size { rank + 1 } else { 0 };
     let remote_col = next * local_n;
+    let mut row0 = [(row_start, S::from_real(2.0)), (remote_col, S::from_real(-0.25))];
+    row0.sort_by_key(|(col, _)| *col);
+    let mut row1 = [
+        (row_start + 1, S::from_real(3.0)),
+        (remote_col, S::from_real(0.5)),
+    ];
+    row1.sort_by_key(|(col, _)| *col);
+
     let local = CsrMatrix::<S>::from_csr(
         local_n,
         n_global,
         vec![0, 2, 4],
-        vec![row_start, remote_col, row_start + 1, remote_col],
-        vec![
-            S::from_real(2.0),
-            S::from_real(-0.25),
-            S::from_real(3.0),
-            S::from_real(0.5),
-        ],
+        vec![row0[0].0, row0[1].0, row1[0].0, row1[1].0],
+        vec![row0[0].1, row0[1].1, row1[0].1, row1[1].1],
     );
     let part: Vec<usize> = (0..=size).map(|r| r * local_n).collect();
     let op = DistCsrOp::from_local_rows(n_global, row_start, &local, &part, comm.clone()).unwrap();
