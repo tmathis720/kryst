@@ -2097,6 +2097,18 @@ impl PcOptions {
         if self.pc_ksp_pc_type.is_some() {
             pc.pc_type = self.pc_ksp_pc_type.clone();
         }
+        if self.pc_ksp_monitor_policy.is_some() {
+            pc.pc_ksp_monitor_policy = self.pc_ksp_monitor_policy.clone();
+        }
+        if self.pc_ksp_inner_tol_policy.is_some() {
+            pc.pc_ksp_inner_tol_policy = self.pc_ksp_inner_tol_policy.clone();
+        }
+        if self.pc_ksp_propagate_converged_reason.is_some() {
+            pc.pc_ksp_propagate_converged_reason = self.pc_ksp_propagate_converged_reason;
+        }
+        if self.pc_ksp_allow_maxits.is_some() {
+            pc.pc_ksp_allow_maxits = self.pc_ksp_allow_maxits;
+        }
         pc
     }
 

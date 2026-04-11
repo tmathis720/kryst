@@ -768,10 +768,16 @@ impl PcConfig {
                 destroy: o.pc_shell_destroy.clone(),
                 context: o.pc_shell_context.clone(),
             },
-            Ksp => PcConfig::Ksp {
-                ksp_options: o.resolved_pc_ksp_ksp_options(),
-                pc_options: o.resolved_pc_ksp_pc_options(),
-            },
+            Ksp => {
+                let mut ksp_options = o.resolved_pc_ksp_ksp_options();
+                if let Some(scoped) = o.pc_ksp_ksp_options.clone() {
+                    ksp_options.overlay_from(scoped);
+                }
+                PcConfig::Ksp {
+                    ksp_options,
+                    pc_options: o.resolved_pc_ksp_pc_options(),
+                }
+            }
             Mg => PcConfig::Mg {
                 levels: o.pc_mg_levels.unwrap_or(2),
                 cycle_type: o.pc_mg_cycle_type.clone(),
