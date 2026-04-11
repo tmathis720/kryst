@@ -1481,10 +1481,12 @@ mod tests {
         assert!(stats.counters.residual_replacements >= stats.iterations);
     }
 
+    #[cfg(not(feature = "complex"))]
     struct IdentityHintPc {
         format: OpFormat,
     }
 
+    #[cfg(not(feature = "complex"))]
     impl Preconditioner for IdentityHintPc {
         fn setup(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
             Ok(())
@@ -1500,6 +1502,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "complex"))]
     fn csr_reference_system() -> (Arc<CsrMatrix<f64>>, Vec<f64>, Vec<f64>) {
         let row_ptr = vec![0, 2, 4];
         let col_idx = vec![0, 1, 0, 1];
@@ -1511,6 +1514,7 @@ mod tests {
         (csr, b, x_true)
     }
 
+    #[cfg(not(feature = "complex"))]
     #[test]
     fn bicgstab_dispatch_prefers_csr_materialized_when_pc_requires_csr() {
         let (csr, _, _) = csr_reference_system();
@@ -1533,6 +1537,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "complex"))]
     #[test]
     fn bicgstab_csr_materialized_and_generic_routes_match_numerics() {
         let (csr, b, x_true) = csr_reference_system();
