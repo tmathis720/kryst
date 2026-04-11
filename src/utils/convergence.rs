@@ -408,6 +408,44 @@ pub struct SolverCounters {
     pub residual_replacements: usize,
 }
 
+/// Estimated reduction counts grouped by algorithm phase.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReductionPhaseDiagnostics {
+    /// One-time reductions before entering the main Krylov loop.
+    pub startup: usize,
+    /// Reductions attributed to the iterative body.
+    pub iterative: usize,
+    /// Finalization/restart tail reductions after the loop body.
+    pub tail: usize,
+}
+
+impl SolverCounters {
+    /// Infer reduction phase diagnostics from observed totals and an optional model.
+    ///
+    /// When the model is unavailable, this returns `None`.
+    pub fn reduction_phase_diagnostics(
+        &self,
+        model: Option<&ReductionModel>,
+        iterations: usize,
+    ) -> Option<ReductionPhaseDiagnostics> {
+        let model = model?;
+        let startup = model.startup;
+        let iterative = (model.per_iteration * iterations as f64).ceil() as usize;
+        let modeled_total = startup + iterative + model.tail;
+        let tail = if self.num_global_reductions >= startup + iterative {
+            self.num_global_reductions - startup - iterative
+        } else {
+            model.tail
+        };
+        let _ = modeled_total;
+        Some(ReductionPhaseDiagnostics {
+            startup,
+            iterative,
+            tail,
+        })
+    }
+}
+
 /// GCR-specific accounting captured by GCR/PipeGCR variants.
 #[derive(Clone, Debug, Default)]
 pub struct GcrCounters {
@@ -581,6 +619,12 @@ impl<R: Default> SolveStats<R> {
             self.reason_counters.record_reason(inner.reason);
         }
         self
+    }
+
+    /// Per-phase reduction diagnostics inferred from solver counters/model.
+    pub fn reduction_phase_diagnostics(&self) -> Option<ReductionPhaseDiagnostics> {
+        self.counters
+            .reduction_phase_diagnostics(self.reduction_model.as_ref(), self.iterations)
     }
 }
 
