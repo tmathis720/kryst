@@ -132,10 +132,7 @@ impl KspAsPc {
     }
 
     pub fn new(mut ksp_options: KspOptions, mut pc_options: PcOptions) -> Result<Self, KError> {
-        let mut resolved_ksp = pc_options.resolved_pc_ksp_ksp_options();
-        resolved_ksp.overlay_from(ksp_options.clone());
-        Self::stage_nested_solver_for_variable_local_pc(&mut resolved_ksp, &pc_options);
-        ksp_options = resolved_ksp;
+        Self::stage_nested_solver_for_variable_local_pc(&mut ksp_options, &pc_options);
         if ksp_options.ksp_type.is_none() {
             ksp_options.ksp_type = Some("richardson".to_string());
         }
@@ -163,10 +160,9 @@ impl KspAsPc {
         let drop_tol = self.pc_options.drop_tol.unwrap_or_default();
         let amat = materialize_ref(a, want, drop_tol).ok();
 
-        let mut ksp_opts = self.pc_options.resolved_pc_ksp_ksp_options();
-        ksp_opts.overlay_from(self.ksp_options.clone());
+        let mut ksp_opts = self.ksp_options.clone();
         Self::stage_nested_solver_for_variable_local_pc(&mut ksp_opts, &self.pc_options);
-        let pc_opts = self.pc_options.resolved_pc_ksp_pc_options();
+        let pc_opts = self.pc_options.clone();
         let monitor_rank0 = ksp_opts.ksp_monitor_rank0.unwrap_or(false);
         let allow_maxits_compat = self.pc_options.pc_ksp_inner_tol_policy.is_none()
             && self.pc_options.pc_ksp_allow_maxits.unwrap_or(true);
