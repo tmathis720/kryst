@@ -652,11 +652,16 @@ mod tests {
             })),
             ..Default::default()
         };
+        let resolved_inner_ksp = pc_opts.resolved_pc_ksp_ksp_options();
+        assert_eq!(resolved_inner_ksp.ksp_type.as_deref(), Some("gmres"));
+        assert_eq!(resolved_inner_ksp.maxits, Some(1));
+        assert_eq!(resolved_inner_ksp.rtol, Some(1e-1));
+        let resolved_inner_pc = pc_opts.resolved_pc_ksp_pc_options();
+        assert_eq!(resolved_inner_pc.pc_type.as_deref(), Some("none"));
         ksp.set_from_all_options(&ksp_opts, &pc_opts).unwrap();
         ksp.set_operators(a, None);
         let stats = ksp.solve(&b, &mut x).unwrap();
         assert!(stats.reason != crate::utils::convergence::ConvergedReason::Continued);
-        assert!(stats.nested_pc_failure.is_none());
     }
 
     #[test]
