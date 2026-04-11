@@ -4,10 +4,13 @@
 mod fixtures;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::dist_csr::DistCsrOp;
+use kryst::matrix::LinOp;
+use kryst::matrix::op::CsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
 use kryst::preconditioner::PcSide;
@@ -44,6 +47,20 @@ fn make_dist_poisson(comm: &UniverseComm, n_per: usize) -> DistCsrOp {
     let part_prefix: Vec<usize> = (0..=size).map(|p| p * n_per).collect();
     DistCsrOp::from_local_rows(n_global, row_start, &local, &part_prefix, comm.clone())
         .expect("dist csr")
+}
+
+fn true_residual_norm(global: &CsrMatrix<f64>, x: &[f64], b: &[f64]) -> f64 {
+    let op = CsrOp::new(Arc::new(global.clone()));
+    let mut ax = vec![0.0; x.len()];
+    op.matvec(x, &mut ax);
+    b.iter()
+        .zip(ax.iter())
+        .map(|(&bi, &axi)| {
+            let r = bi - axi;
+            r * r
+        })
+        .sum::<f64>()
+        .sqrt()
 }
 
 fn reason_id(reason: ConvergedReason) -> f64 {
@@ -113,6 +130,130 @@ fn mpi_convergence_reason_consistent_across_ranks() {
         (iter_sum - (stats.iterations as f64) * size).abs() < 1e-12,
         "iteration count differs across ranks"
     );
+}
+
+#[test]
+fn mpi_pcg_matches_serial_residual_iterations_and_rank0_monitor_policy() {
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    comm.set_reproducible(true);
+
+    let n_per = 4usize;
+    let size = comm.size();
+    let n_global = n_per * size;
+    let rank = comm.rank();
+    let row_start = rank * n_per;
+
+    let global = fixtures::csr_poisson_1d(n_global);
+    let local = local_rows_from_global(&global, row_start, n_per);
+    let part_prefix: Vec<usize> = (0..=size).map(|p| p * n_per).collect();
+    let dist = DistCsrOp::from_local_rows(n_global, row_start, &local, &part_prefix, comm.clone())
+        .expect("dist csr");
+
+    let rhs_global: Vec<f64> = (0..n_global).map(|i| 1.0 + i as f64 * 0.25).collect();
+    let rhs_local = rhs_global[row_start..row_start + n_per].to_vec();
+
+    let monitor_hits = Arc::new(AtomicUsize::new(0));
+    let mut ksp_dist = KspContext::new();
+    let mut ksp_opts = KspOptions::default();
+    ksp_opts.ksp_monitor_rank0 = Some(true);
+    ksp_dist.set_from_options(&ksp_opts).expect("set options");
+    ksp_dist.rtol = 1e-10;
+    ksp_dist.atol = 1e-12;
+    ksp_dist.maxits = 200;
+    ksp_dist.set_type(SolverType::Pcg).expect("set pcg");
+    ksp_dist.set_operators(Arc::new(dist), None);
+    let monitor_hits_clone = Arc::clone(&monitor_hits);
+    ksp_dist.add_monitor(move |_, _, _| {
+        monitor_hits_clone.fetch_add(1, Ordering::Relaxed);
+        kryst::solver::MonitorAction::Continue
+    });
+    ksp_dist.setup().expect("dist setup");
+
+    let mut x_local = vec![0.0; n_per];
+    let stats_dist = ksp_dist
+        .solve(&rhs_local, &mut x_local)
+        .expect("dist solve");
+
+    let mut gathered_x = Vec::new();
+    comm.gather(&x_local, &mut gathered_x, 0);
+
+    let mut ksp_serial = KspContext::new();
+    ksp_serial.rtol = 1e-10;
+    ksp_serial.atol = 1e-12;
+    ksp_serial.maxits = 200;
+    ksp_serial
+        .set_type(SolverType::Pcg)
+        .expect("set serial pcg");
+    ksp_serial.set_operators(Arc::new(CsrOp::new(Arc::new(global.clone()))), None);
+    ksp_serial.setup().expect("serial setup");
+    let mut x_serial = vec![0.0; n_global];
+    let stats_serial = ksp_serial
+        .solve(&rhs_global, &mut x_serial)
+        .expect("serial solve");
+
+    let residual_pair = if rank == 0 {
+        let dist_true = true_residual_norm(&global, &gathered_x, &rhs_global);
+        let serial_true = true_residual_norm(&global, &x_serial, &rhs_global);
+        vec![dist_true, serial_true]
+    } else {
+        vec![0.0, 0.0]
+    };
+    let dist_true = comm.all_reduce_f64(residual_pair[0]);
+    let serial_true = comm.all_reduce_f64(residual_pair[1]);
+
+    assert!(
+        (dist_true - serial_true).abs() <= 1e-8,
+        "distributed true residual {dist_true:.3e} differs from serial {serial_true:.3e}"
+    );
+    assert!(
+        (stats_dist.final_residual - stats_serial.final_residual).abs() <= 1e-8,
+        "reported final residual differs: dist {:.3e}, serial {:.3e}",
+        stats_dist.final_residual,
+        stats_serial.final_residual
+    );
+    assert_eq!(
+        stats_dist.iterations, stats_serial.iterations,
+        "PCG iterations should match between distributed and serial runs"
+    );
+    assert_eq!(
+        stats_dist.reason, stats_serial.reason,
+        "convergence reason should match between distributed and serial runs"
+    );
+
+    let hits = monitor_hits.load(Ordering::Relaxed);
+    if rank == 0 {
+        assert!(hits > 0, "rank 0 should receive monitor callbacks");
+    } else {
+        assert_eq!(hits, 0, "non-root ranks must not emit monitor callbacks");
+    }
+
+    let phases = stats_dist
+        .reduction_phase_diagnostics()
+        .expect("PCG should expose a reduction model");
+    assert!(
+        phases.startup > 0 && phases.iterative > 0,
+        "expected startup/iterative phase reductions to be non-zero"
+    );
+    let model = stats_dist
+        .reduction_model
+        .as_ref()
+        .expect("PCG should carry reduction model metadata");
+    assert_eq!(
+        phases.startup, model.startup,
+        "startup phase should match reduction model"
+    );
+    assert_eq!(
+        phases.iterative,
+        (model.per_iteration * stats_dist.iterations as f64).ceil() as usize,
+        "iterative phase should match model-per-iteration estimate"
+    );
+    if stats_dist.counters.num_global_reductions > 0 {
+        assert_eq!(
+            phases.startup + phases.iterative + phases.tail,
+            stats_dist.counters.num_global_reductions,
+            "phase reductions should sum to observed total when counters are enabled"
+        );
+    }
 }
 
 #[test]
