@@ -136,8 +136,10 @@ impl GmresSolver {
                 max_iters: maxits,
             },
             haptol: 1e-12,
-            orthog: GmresOrthog::Mgs,
-            reorth: ReorthPolicy::IfNeeded,
+            // Default to classical Gram-Schmidt to keep global reduction counts
+            // aligned with the documented/modelled GMRES synchronization cost.
+            orthog: GmresOrthog::Cgs,
+            reorth: ReorthPolicy::Never,
             reorth_tol: 0.7,
             happy_breakdown: true,
             stagnation_policy: StagnationPolicy::LogOnly,
