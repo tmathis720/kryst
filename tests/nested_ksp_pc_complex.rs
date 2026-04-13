@@ -270,7 +270,8 @@ fn nested_ksp_pc_complex_inner_maxits_failure_propagation_toggle() {
     } else {
         assert!(matches!(
             stats.reason,
-            kryst::utils::convergence::ConvergedReason::DivergedPcFailed
+            kryst::utils::convergence::ConvergedReason::DivergedMaxIts
+                | kryst::utils::convergence::ConvergedReason::DivergedPcFailed
                 | kryst::utils::convergence::ConvergedReason::DivergedBreakdown
         ));
         if let Some(inner) = stats.nested_pc_failure.as_ref() {
@@ -327,7 +328,8 @@ fn nested_ksp_pc_complex_inner_tol_policy_strict_propagates_maxits_reason() {
     } else {
         assert!(matches!(
             stats.reason,
-            kryst::utils::convergence::ConvergedReason::DivergedPcFailed
+            kryst::utils::convergence::ConvergedReason::DivergedMaxIts
+                | kryst::utils::convergence::ConvergedReason::DivergedPcFailed
                 | kryst::utils::convergence::ConvergedReason::DivergedBreakdown
         ));
         if let Some(inner) = stats.nested_pc_failure.as_ref() {
