@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use faer::Mat;
-use kryst::algebra::prelude::S;
 use kryst::algebra::KrystScalar;
+use kryst::algebra::prelude::S;
 use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::op::DenseOp;

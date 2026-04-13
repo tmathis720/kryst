@@ -3,6 +3,11 @@ fn main() {
     eprintln!("test_superlu_cli.rs is unavailable when built with --features complex");
 }
 
+// To run:
+// ```sh
+// cargo run --example test_superlu_cli
+// ```
+
 use kryst::{KspOptions, PcOptions, error::KError};
 
 #[cfg(not(feature = "complex"))]

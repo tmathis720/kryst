@@ -3,6 +3,11 @@ fn main() {
     eprintln!("test_help.rs is unavailable when built with --features complex");
 }
 
+// To run:
+// ```sh
+// cargo run --example test_help
+// ```
+
 use kryst::config::options::PcOptions;
 
 #[cfg(not(feature = "complex"))]

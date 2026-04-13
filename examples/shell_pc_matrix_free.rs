@@ -1,4 +1,8 @@
 //! Matrix-free `PCSHELL` callbacks with communicator-aware, allocation-free kernels.
+//! To run:
+//! ```sh!
+//! cargo run --example shell_pc_matrix_free
+//! ```
 
 #[cfg(feature = "complex")]
 fn main() {

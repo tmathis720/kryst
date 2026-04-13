@@ -132,7 +132,7 @@ pub fn build_dist_route_decision_report(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_dist_route_decision_report, resolve_distcsr_capability, DistCsrCapabilityKey,
+        DistCsrCapabilityKey, build_dist_route_decision_report, resolve_distcsr_capability,
     };
     use crate::context::ksp_context::SolverType;
     use crate::preconditioner::dist::{

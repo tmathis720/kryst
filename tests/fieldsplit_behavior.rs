@@ -75,7 +75,15 @@ fn fieldsplit_schur_factorization_variants_apply() -> Result<(), KError> {
     let schur_preconditions: &[&str] = if cfg!(feature = "complex") {
         &["self", "selfp", "a11", "full", "full_matfree", "user"]
     } else {
-        &["self", "selfp", "diag", "a11", "full", "full_matfree", "user"]
+        &[
+            "self",
+            "selfp",
+            "diag",
+            "a11",
+            "full",
+            "full_matfree",
+            "user",
+        ]
     };
     for fact in ["diag", "lower", "upper", "full"] {
         for pre in schur_preconditions {

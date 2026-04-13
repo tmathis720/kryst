@@ -192,7 +192,7 @@ fn gmres_with_sor_preconditioner_complex() {
         .expect("GMRES+SOR solve");
     assert!(matches!(
         stats.reason,
-            ConvergedReason::ConvergedRtol
+        ConvergedReason::ConvergedRtol
             | ConvergedReason::ConvergedAtol
             | ConvergedReason::DivergedMaxIts
             | ConvergedReason::DivergedBreakdown

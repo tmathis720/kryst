@@ -1,4 +1,8 @@
 //! Complex-scalar shell PC callbacks with transpose/conjugate/symmetric hooks.
+//! To run:
+//! ```sh
+//! cargo run --example shell_pc_matrix_free_complex --features complex
+//! ```
 
 #[cfg(not(feature = "complex"))]
 fn main() {

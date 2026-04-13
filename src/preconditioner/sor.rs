@@ -32,9 +32,9 @@ use crate::matrix::DistCsrOp;
 use crate::matrix::convert::csr_from_linop;
 #[cfg(all(feature = "mpi", not(feature = "complex")))]
 use crate::matrix::dist::halo::HaloPlan;
-use crate::matrix::op::LinOp;
 #[cfg(feature = "complex")]
 use crate::matrix::op::CsrOp;
+use crate::matrix::op::LinOp;
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;

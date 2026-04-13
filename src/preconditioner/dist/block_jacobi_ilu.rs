@@ -326,8 +326,9 @@ where
         comm: UniverseComm,
         local_pc: LPC,
         row_offset: usize,
-        #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-        native_plan: Option<NativeCouplingPlan>,
+        #[cfg(all(feature = "backend-faer", not(feature = "complex")))] native_plan: Option<
+            NativeCouplingPlan,
+        >,
     ) -> Self {
         let (n_local, _) = local_pc.dims();
         Self {

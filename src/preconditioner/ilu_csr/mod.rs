@@ -12,7 +12,7 @@ use crate::preconditioner::{
 use crate::utils::conditioning::ConditioningOptions;
 use crate::utils::permutation::Permutation;
 #[cfg(feature = "complex")]
-use crate::utils::permutation::{amd_csr, rcm_csr, permute_csr_symmetric};
+use crate::utils::permutation::{amd_csr, permute_csr_symmetric, rcm_csr};
 use crate::utils::preconditioning_pipeline::{
     PreconditioningMetadata, apply_preconditioning_pipeline,
 };

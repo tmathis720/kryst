@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
-use kryst::matrix::dist_csr::DistCsrOp;
 use kryst::matrix::LinOp;
+use kryst::matrix::dist_csr::DistCsrOp;
 use kryst::matrix::op::CsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};

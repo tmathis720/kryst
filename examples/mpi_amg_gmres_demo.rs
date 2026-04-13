@@ -1391,10 +1391,8 @@ mod tests {
         assert!(lines.contains(
             &"written-output verification status: written output verified successfully".to_string()
         ));
-        assert!(
-            lines.contains(
-                &"iterative sanity-gate status: iterative phase failed sanity gate".to_string()
-            )
-        );
+        assert!(lines.contains(
+            &"iterative sanity-gate status: iterative phase failed sanity gate".to_string()
+        ));
     }
 }

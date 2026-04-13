@@ -11,7 +11,6 @@ use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::{Comm, MpiComm, UniverseComm};
 use kryst::utils::convergence::ConvergedReason;
 
-
 fn mpi_test_guard() -> MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     GUARD

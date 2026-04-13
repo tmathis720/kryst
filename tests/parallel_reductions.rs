@@ -74,7 +74,10 @@ fn dist_matvec_mpi_rayon_stress() {
 
     let next = if rank + 1 < size { rank + 1 } else { 0 };
     let remote_col = next * local_n;
-    let mut row0 = [(row_start, S::from_real(2.0)), (remote_col, S::from_real(-0.25))];
+    let mut row0 = [
+        (row_start, S::from_real(2.0)),
+        (remote_col, S::from_real(-0.25)),
+    ];
     row0.sort_by_key(|(col, _)| *col);
     let mut row1 = [
         (row_start + 1, S::from_real(3.0)),

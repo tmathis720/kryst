@@ -5,9 +5,9 @@ use kryst::config::options::PcOptions;
 use kryst::context::pc_context::PcType;
 use kryst::core::traits::MatVec;
 use kryst::matrix::sparse::CsrMatrix;
-use kryst::preconditioner::{PcSide, Preconditioner};
 use kryst::preconditioner::sor::{MatSorType, SorPc};
 use kryst::preconditioner::{ApproxInvKind, ApproxInvParams, SpaiCsr};
+use kryst::preconditioner::{PcSide, Preconditioner};
 use kryst::utils::diagnostics::PcDiagnostics;
 
 #[test]

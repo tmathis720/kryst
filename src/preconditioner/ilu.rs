@@ -3132,7 +3132,11 @@ mod tests {
         let (row_perm, col_perm) = Ilu::maximum_transversal_permutations(&matrix);
         let permuted = Ilu::permute_dense_nonsymmetric(&matrix, &row_perm, &col_perm);
         for i in 0..3 {
-            assert_ne!(permuted[(i, i)], 0.0, "diagonal entry at {i} should be nonzero");
+            assert_ne!(
+                permuted[(i, i)],
+                0.0,
+                "diagonal entry at {i} should be nonzero"
+            );
         }
     }
 

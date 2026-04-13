@@ -5226,31 +5226,31 @@ impl AMG {
         }
         #[cfg(not(feature = "complex"))]
         {
-        if sweeps == 0 {
-            return Ok(());
-        }
-        let ilu = level
-            .ilu0
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("ILU0 cache missing".into()))?;
-        let n = level.a.nrows();
-        ws.ensure(n);
-        for _ in 0..sweeps {
-            level.a.spmv_scaled(1.0, z, 0.0, &mut ws.work[..n])?;
-            for i in 0..n {
-                ws.residual[i] = r[i] - ws.work[i];
+            if sweeps == 0 {
+                return Ok(());
             }
-            ws.temp[..n].fill(R::default());
-            ilu.lock().expect("ILU0 mutex poisoned").apply(
-                PcSide::Left,
-                &ws.residual[..n],
-                &mut ws.temp[..n],
-            )?;
-            for i in 0..n {
-                z[i] += omega * ws.temp[i];
+            let ilu = level
+                .ilu0
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("ILU0 cache missing".into()))?;
+            let n = level.a.nrows();
+            ws.ensure(n);
+            for _ in 0..sweeps {
+                level.a.spmv_scaled(1.0, z, 0.0, &mut ws.work[..n])?;
+                for i in 0..n {
+                    ws.residual[i] = r[i] - ws.work[i];
+                }
+                ws.temp[..n].fill(R::default());
+                ilu.lock().expect("ILU0 mutex poisoned").apply(
+                    PcSide::Left,
+                    &ws.residual[..n],
+                    &mut ws.temp[..n],
+                )?;
+                for i in 0..n {
+                    z[i] += omega * ws.temp[i];
+                }
             }
-        }
-        Ok(())
+            Ok(())
         }
     }
 
@@ -5271,31 +5271,31 @@ impl AMG {
         }
         #[cfg(not(feature = "complex"))]
         {
-        if sweeps == 0 {
-            return Ok(());
-        }
-        let ras = level
-            .ras
-            .as_ref()
-            .ok_or_else(|| KError::InvalidInput("RAS cache missing".into()))?;
-        let n = level.a.nrows();
-        ws.ensure(n);
-        for _ in 0..sweeps {
-            level.a.spmv_scaled(1.0, z, 0.0, &mut ws.work[..n])?;
-            for i in 0..n {
-                ws.residual[i] = r[i] - ws.work[i];
+            if sweeps == 0 {
+                return Ok(());
             }
-            ws.temp[..n].fill(R::default());
-            ras.lock().expect("RAS mutex poisoned").apply(
-                PcSide::Left,
-                &ws.residual[..n],
-                &mut ws.temp[..n],
-            )?;
-            for i in 0..n {
-                z[i] += omega * ws.temp[i];
+            let ras = level
+                .ras
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("RAS cache missing".into()))?;
+            let n = level.a.nrows();
+            ws.ensure(n);
+            for _ in 0..sweeps {
+                level.a.spmv_scaled(1.0, z, 0.0, &mut ws.work[..n])?;
+                for i in 0..n {
+                    ws.residual[i] = r[i] - ws.work[i];
+                }
+                ws.temp[..n].fill(R::default());
+                ras.lock().expect("RAS mutex poisoned").apply(
+                    PcSide::Left,
+                    &ws.residual[..n],
+                    &mut ws.temp[..n],
+                )?;
+                for i in 0..n {
+                    z[i] += omega * ws.temp[i];
+                }
             }
-        }
-        Ok(())
+            Ok(())
         }
     }
 
@@ -8515,19 +8515,19 @@ fn build_ilu0_cache(level: &mut AMGLevel) -> Result<(), KError> {
     }
     #[cfg(not(feature = "complex"))]
     {
-    let mut cfg = IluCsrConfig::default();
-    cfg.kind = IluKind::Ilu0;
-    cfg.pivot = PivotStrategy::DiagonalPerturbation;
-    cfg.pivot_threshold = 1e-12;
-    cfg.diag_perturb_factor = 1e-10;
-    cfg.level_sched = false;
-    cfg.reordering = ReorderingOptions::default();
-    cfg.conditioning = ConditioningOptions::default();
-    let mut ilu = IluCsr::new_with_config(cfg);
-    let op = crate::matrix::op::CsrOp::new(Arc::new(level.a.clone()));
-    ilu.setup(&op)?;
-    level.ilu0 = Some(Mutex::new(ilu));
-    Ok(())
+        let mut cfg = IluCsrConfig::default();
+        cfg.kind = IluKind::Ilu0;
+        cfg.pivot = PivotStrategy::DiagonalPerturbation;
+        cfg.pivot_threshold = 1e-12;
+        cfg.diag_perturb_factor = 1e-10;
+        cfg.level_sched = false;
+        cfg.reordering = ReorderingOptions::default();
+        cfg.conditioning = ConditioningOptions::default();
+        let mut ilu = IluCsr::new_with_config(cfg);
+        let op = crate::matrix::op::CsrOp::new(Arc::new(level.a.clone()));
+        ilu.setup(&op)?;
+        level.ilu0 = Some(Mutex::new(ilu));
+        Ok(())
     }
 }
 
@@ -8541,20 +8541,20 @@ fn build_ras_cache(level: &mut AMGLevel) -> Result<(), KError> {
     }
     #[cfg(not(feature = "complex"))]
     {
-    let cfg = AsmConfig {
-        overlap: 1,
-        combine: AsmCombine::Restricted,
-        local_solver: AsmLocalSolver::ILU,
-        local_sweeps: 1,
-        weight_partition_of_unity: false,
-        deterministic: true,
-        nparts: None,
-    };
-    let mut ras = Asm::with_config(cfg);
-    let op = crate::matrix::op::CsrOp::new(Arc::new(level.a.clone()));
-    Preconditioner::setup(&mut ras, &op)?;
-    level.ras = Some(Mutex::new(ras));
-    Ok(())
+        let cfg = AsmConfig {
+            overlap: 1,
+            combine: AsmCombine::Restricted,
+            local_solver: AsmLocalSolver::ILU,
+            local_sweeps: 1,
+            weight_partition_of_unity: false,
+            deterministic: true,
+            nparts: None,
+        };
+        let mut ras = Asm::with_config(cfg);
+        let op = crate::matrix::op::CsrOp::new(Arc::new(level.a.clone()));
+        Preconditioner::setup(&mut ras, &op)?;
+        level.ras = Some(Mutex::new(ras));
+        Ok(())
     }
 }
 

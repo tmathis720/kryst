@@ -1,6 +1,6 @@
+use kryst::Comm;
 use kryst::algebra::prelude::S;
 use kryst::algebra::scalar::KrystScalar;
-use kryst::Comm;
 use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::utils::poisson_3d;
@@ -418,14 +418,9 @@ fn main() {
         let n_local = part_prefix[comm.rank() + 1] - row_start;
         let a_local = slice_rows(&a_global, row_start, n_local);
         let a_local_s = lift_real_csr_to_scalar(&a_local);
-        let dist = DistCsrOp::from_local_rows(
-            n_global,
-            row_start,
-            &a_local_s,
-            &part_prefix,
-            comm.clone(),
-        )
-        .expect("dist csr build");
+        let dist =
+            DistCsrOp::from_local_rows(n_global, row_start, &a_local_s, &part_prefix, comm.clone())
+                .expect("dist csr build");
 
         let opts = KspOptions::from_args(&[
             "-ksp_type",

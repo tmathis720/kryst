@@ -10,7 +10,7 @@ use crate::matrix::op::LinOp;
 use crate::parallel::Comm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use crate::utils::convergence::{
-    map_kerror_to_reason, ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure,
+    ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure, map_kerror_to_reason,
 };
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -425,10 +425,9 @@ impl Preconditioner for KspAsPc {
                     let history_summary =
                         Self::summarize_history(&inner.residual_history, R::default());
                     let mapped_reason = Self::normalize_inner_reason(
-                        map_kerror_to_reason(&err, FailureStage::Solve)
-                            .unwrap_or(ConvergedReason::from_failure_kind(
-                                FailureReasonKind::PcApply,
-                            )),
+                        map_kerror_to_reason(&err, FailureStage::Solve).unwrap_or(
+                            ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
+                        ),
                     );
                     if Self::is_acceptable_inner_reason(
                         mapped_reason,
@@ -444,7 +443,9 @@ impl Preconditioner for KspAsPc {
                         inner.ksp_options.ksp_type,
                         inner.pc_options.pc_type,
                         inner.monitor_rank0,
-                        inner.ksp_options.effective_restart_for(Self::inner_ksp_type(&inner.ksp_options)),
+                        inner
+                            .ksp_options
+                            .effective_restart_for(Self::inner_ksp_type(&inner.ksp_options)),
                         inner.ksp_options.rtol,
                         inner.ksp_options.atol,
                         inner.ksp_options.dtol,
@@ -676,16 +677,20 @@ mod tests {
             ),
             detail: "inner_ksp=Some(\"gmres\") inner_pc=Some(\"none\")".into(),
         };
-        assert!(failure
-            .final_norm
-            .as_deref()
-            .unwrap_or_default()
-            .contains("true_residual_l2"));
-        assert!(failure
-            .residual_history_summary
-            .as_deref()
-            .unwrap_or_default()
-            .contains("history_len="));
+        assert!(
+            failure
+                .final_norm
+                .as_deref()
+                .unwrap_or_default()
+                .contains("true_residual_l2")
+        );
+        assert!(
+            failure
+                .residual_history_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("history_len=")
+        );
     }
 
     #[test]
