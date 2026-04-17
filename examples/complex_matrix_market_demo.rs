@@ -21,6 +21,7 @@ mod complex_demo {
 
     use super::KError;
     use kryst::algebra::blas::nrm2;
+    use kryst::algebra::bridge::BridgeScratch;
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
     use kryst::matrix::csr::CsrMatrix as ScalarCsrMatrix;
@@ -37,6 +38,7 @@ mod complex_demo {
     use kryst::solver::fgmres::{FgmresSolver, FgmresVariant};
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
+    use kryst::utils::reduction::ReductOptions;
 
     #[cfg(feature = "mpi")]
     use kryst::parallel::MpiComm;
@@ -117,11 +119,35 @@ mod complex_demo {
                     println!("Note: replicated execution: MPI ranks are not sharing SpMV rows.");
                 }
                 println!("‖rhs‖₂ = {:.3e}", rhs_norm);
-                println!(
-                    "{:<36} {:>8} {:>12} {:>10} {:>12} {:>10}",
-                    "Method", "Iters", "Residual", "Time(s)", "Reductions", "Status"
-                );
-                println!("{}", "-".repeat(96));
+                println!("Residual semantics: rec/reported = solver recurrence/monitor residual.");
+                println!("                    true(explicit) = ||b - A x||₂ recomputed after solve.");
+                let include_dof_col =
+                    matches!(problem.backend, CsrBackend::Serial | CsrBackend::Distributed);
+                if include_dof_col {
+                    println!(
+                        "{:<36} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26} {:>12}",
+                        "Method",
+                        "Time(s)",
+                        "Iters",
+                        "Reds",
+                        "Rec/Reported",
+                        "True(explicit)",
+                        "Reason",
+                        "DOF/s"
+                    );
+                } else {
+                    println!(
+                        "{:<36} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
+                        "Method",
+                        "Time(s)",
+                        "Iters",
+                        "Reds",
+                        "Rec/Reported",
+                        "True(explicit)",
+                        "Reason"
+                    );
+                }
+                println!("{}", "-".repeat(if include_dof_col { 140 } else { 126 }));
             }
 
             let runs = [
@@ -133,31 +159,49 @@ mod complex_demo {
                 match run_once(&problem, &spec) {
                     Ok(row) => {
                         if rank == 0 {
-                            let status = if row.converged { "✓" } else { "✗" };
-                            println!(
-                                "{:<36} {:>8} {:>12.2e} {:>10.3} {:>12} {:>10}",
-                                row.method,
-                                row.iterations,
-                                row.residual,
-                                row.time_secs,
-                                row.reductions,
-                                status
+                            let include_dof_col = matches!(
+                                problem.backend,
+                                CsrBackend::Serial | CsrBackend::Distributed
                             );
-                            if row.converged {
+                            let explicit_true = row
+                                .explicit_true_residual
+                                .map(|v| format!("{v:.2e}"))
+                                .unwrap_or_else(|| "N/A".to_string());
+                            if include_dof_col {
+                                let dof = row
+                                    .dof_per_sec
+                                    .map(|v| format!("{v:.2e}"))
+                                    .unwrap_or_else(|| "N/A".to_string());
                                 println!(
-                                    "    → {:.2e} DOF/s (reason: {:?})",
-                                    row.dof_per_sec, row.reason
+                                    "{:<36} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?} {:>12}",
+                                    row.method,
+                                    row.time_secs,
+                                    row.iterations,
+                                    row.reductions,
+                                    row.reported_residual,
+                                    explicit_true,
+                                    row.reason,
+                                    dof
                                 );
                             } else {
-                                println!("    → stopped with {:?}", row.reason);
+                                println!(
+                                    "{:<36} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?}",
+                                    row.method,
+                                    row.time_secs,
+                                    row.iterations,
+                                    row.reductions,
+                                    row.reported_residual,
+                                    explicit_true,
+                                    row.reason
+                                );
                             }
                         }
                     }
                     Err(err) => {
                         if rank == 0 {
                             println!(
-                                "{:<36} {:>8} {:>12} {:>10} {:>12} {:>10}",
-                                spec.name, "FAIL", "N/A", "N/A", "N/A", "✗"
+                                "{:<36} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
+                                spec.name, "FAIL", "N/A", "N/A", "N/A", "N/A", "N/A"
                             );
                             println!("    → {err}");
                         }
@@ -234,13 +278,13 @@ mod complex_demo {
 
     struct ResultRow {
         method: String,
-        iterations: usize,
-        residual: R,
         time_secs: f64,
-        converged: bool,
+        iterations: usize,
         reductions: usize,
+        reported_residual: R,
+        explicit_true_residual: Option<R>,
         reason: ConvergedReason,
-        dof_per_sec: f64,
+        dof_per_sec: Option<f64>,
     }
 
     struct RunSpec {
@@ -313,28 +357,34 @@ mod complex_demo {
         problem.comm.barrier();
         let elapsed = start.elapsed().as_secs_f64();
 
-        let converged = matches!(
-            stats.reason,
-            ConvergedReason::ConvergedAtol
-                | ConvergedReason::ConvergedRtol
-                | ConvergedReason::ConvergedHappyBreakdown
-                | ConvergedReason::ConvergedTrustRegion
-        );
-
         let reductions = stats.counters.num_global_reductions;
-        let dof_per_sec = if elapsed > 0.0 {
-            problem.global_n as f64 / elapsed
+        let mut ax = vec![S::zero(); b.len()];
+        let mut scratch = BridgeScratch::default();
+        problem.op.matvec_s(&x, &mut ax, &mut scratch);
+        for (ri, bi) in ax.iter_mut().zip(b.iter().copied()) {
+            *ri = bi - *ri;
+        }
+        let explicit_true_residual = Some(
+            problem
+                .comm
+                .reduction_engine(&ReductOptions::default())
+                .norm2_s(&ax),
+        );
+        let dof_per_sec = if matches!(problem.backend, CsrBackend::Serial | CsrBackend::Distributed)
+            && elapsed > 0.0
+        {
+            Some(problem.global_n as f64 / elapsed)
         } else {
-            0.0
+            None
         };
 
         Ok(ResultRow {
             method: format!("{} (m = {})", spec.name, spec.restart),
-            iterations: stats.iterations,
-            residual: stats.final_residual,
             time_secs: elapsed,
-            converged,
+            iterations: stats.iterations,
             reductions,
+            reported_residual: stats.final_residual,
+            explicit_true_residual,
             reason: stats.reason,
             dof_per_sec,
         })
