@@ -102,8 +102,20 @@ mod complex_demo {
             let rhs_norm = nrm2(&problem.rhs);
             if rank == 0 {
                 println!("=== {descr} — {} ===", problem.backend_descr);
+                println!(
+                    "Run backend: {} ({})",
+                    problem.backend.run_label(),
+                    problem.backend.details()
+                );
+                println!(
+                    "Benchmark/export label: {}",
+                    problem.backend.benchmark_export_label()
+                );
                 println!("Global DOFs: {}", problem.global_n);
                 println!("Local DOFs (rank {rank}): {}", problem.local_n);
+                if problem.comm.size() > 1 && problem.local_n == problem.global_n {
+                    println!("Note: replicated execution: MPI ranks are not sharing SpMV rows.");
+                }
                 println!("‖rhs‖₂ = {:.3e}", rhs_norm);
                 println!(
                     "{:<36} {:>8} {:>12} {:>10} {:>12} {:>10}",
@@ -163,6 +175,14 @@ mod complex_demo {
 
         if rank == 0 {
             println!("Example complete.");
+            println!(
+                "Final backend summary: {}.",
+                if is_parallel {
+                    "MPI run (see per-case backend labels for replicated/distributed mode)"
+                } else {
+                    "serial CSR"
+                }
+            );
         }
 
         Ok(())
@@ -175,7 +195,41 @@ mod complex_demo {
         local_n: usize,
         global_n: usize,
         comm: UniverseComm,
+        backend: CsrBackend,
         backend_descr: String,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CsrBackend {
+        Serial,
+        Replicated,
+        Distributed,
+    }
+
+    impl CsrBackend {
+        fn run_label(self) -> &'static str {
+            match self {
+                Self::Serial => "serial CSR",
+                Self::Replicated => "replicated CSR",
+                Self::Distributed => "distributed CSR",
+            }
+        }
+
+        fn details(self) -> &'static str {
+            match self {
+                Self::Serial => "single rank operator",
+                Self::Replicated => "all ranks hold full matrix, identical solve",
+                Self::Distributed => "row-partitioned operator",
+            }
+        }
+
+        fn benchmark_export_label(self) -> &'static str {
+            match self {
+                Self::Serial => "serial",
+                Self::Replicated => "replicated",
+                Self::Distributed => "distributed",
+            }
+        }
     }
 
     struct ResultRow {
@@ -312,19 +366,33 @@ mod complex_demo {
             }
         };
 
+        let local_n = nrows;
+        let global_n = nrows;
+        let backend = classify_backend(comm.size(), local_n, global_n);
+
         Ok(Problem {
             op: op_arc,
             rhs,
             csr_for_pc,
-            local_n: nrows,
-            global_n: nrows,
+            local_n,
+            global_n,
             comm: comm.clone(),
-            backend_descr: if comm.size() > 1 {
-                "Generic CSR (complex, replicated)".into()
-            } else {
-                "Generic CSR (complex, serial)".into()
-            },
+            backend,
+            backend_descr: format!(
+                "Generic CSR (complex, {})",
+                backend.benchmark_export_label()
+            ),
         })
+    }
+
+    fn classify_backend(size: usize, local_n: usize, global_n: usize) -> CsrBackend {
+        if size <= 1 {
+            CsrBackend::Serial
+        } else if local_n == global_n {
+            CsrBackend::Replicated
+        } else {
+            CsrBackend::Distributed
+        }
     }
 
     fn try_load_rhs_s(mat_path: &Path, n: usize) -> Option<Vec<S>> {
