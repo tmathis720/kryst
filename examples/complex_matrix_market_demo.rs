@@ -15,6 +15,7 @@ use kryst::error::KError;
 
 #[cfg(feature = "complex")]
 mod complex_demo {
+    use std::env;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Instant;
@@ -56,6 +57,7 @@ mod complex_demo {
 
         let rank = comm.rank();
         let size = comm.size();
+        let config = BenchmarkConfig::from_env_args()?;
         #[cfg(feature = "mpi")]
         let is_parallel = matches!(comm, UniverseComm::Mpi(_)) && size > 1;
         #[cfg(not(feature = "mpi"))]
@@ -70,6 +72,10 @@ mod complex_demo {
                 } else {
                     "serial".into()
                 }
+            );
+            println!(
+                "Benchmark runs: warmup={}, measured={}",
+                config.warmup_runs, config.measured_runs
             );
             println!("===============================================================");
             println!();
@@ -120,14 +126,20 @@ mod complex_demo {
                 }
                 println!("‖rhs‖₂ = {:.3e}", rhs_norm);
                 println!("Residual semantics: rec/reported = solver recurrence/monitor residual.");
-                println!("                    true(explicit) = ||b - A x||₂ recomputed after solve.");
-                let include_dof_col =
-                    matches!(problem.backend, CsrBackend::Serial | CsrBackend::Distributed);
+                println!(
+                    "                    true(explicit) = ||b - A x||₂ recomputed after solve."
+                );
+                let include_dof_col = matches!(
+                    problem.backend,
+                    CsrBackend::Serial | CsrBackend::Distributed
+                );
                 if include_dof_col {
                     println!(
-                        "{:<36} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26} {:>12}",
+                        "{:<36} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26} {:>12}",
                         "Method",
-                        "Time(s)",
+                        "Setup(s)",
+                        "Med(s)",
+                        "Min(s)",
                         "Iters",
                         "Reds",
                         "Rec/Reported",
@@ -137,9 +149,11 @@ mod complex_demo {
                     );
                 } else {
                     println!(
-                        "{:<36} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
+                        "{:<36} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
                         "Method",
-                        "Time(s)",
+                        "Setup(s)",
+                        "Med(s)",
+                        "Min(s)",
                         "Iters",
                         "Reds",
                         "Rec/Reported",
@@ -147,7 +161,7 @@ mod complex_demo {
                         "Reason"
                     );
                 }
-                println!("{}", "-".repeat(if include_dof_col { 140 } else { 126 }));
+                println!("{}", "-".repeat(if include_dof_col { 160 } else { 146 }));
             }
 
             let runs = [
@@ -156,7 +170,7 @@ mod complex_demo {
             ];
 
             for spec in runs {
-                match run_once(&problem, &spec) {
+                match run_once(&problem, &spec, &config) {
                     Ok(row) => {
                         if rank == 0 {
                             let include_dof_col = matches!(
@@ -173,9 +187,11 @@ mod complex_demo {
                                     .map(|v| format!("{v:.2e}"))
                                     .unwrap_or_else(|| "N/A".to_string());
                                 println!(
-                                    "{:<36} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?} {:>12}",
+                                    "{:<36} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?} {:>12}",
                                     row.method,
-                                    row.time_secs,
+                                    row.setup_secs,
+                                    row.median_solve_secs,
+                                    row.min_solve_secs,
                                     row.iterations,
                                     row.reductions,
                                     row.reported_residual,
@@ -185,9 +201,11 @@ mod complex_demo {
                                 );
                             } else {
                                 println!(
-                                    "{:<36} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?}",
+                                    "{:<36} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?}",
                                     row.method,
-                                    row.time_secs,
+                                    row.setup_secs,
+                                    row.median_solve_secs,
+                                    row.min_solve_secs,
                                     row.iterations,
                                     row.reductions,
                                     row.reported_residual,
@@ -200,8 +218,16 @@ mod complex_demo {
                     Err(err) => {
                         if rank == 0 {
                             println!(
-                                "{:<36} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
-                                spec.name, "FAIL", "N/A", "N/A", "N/A", "N/A", "N/A"
+                                "{:<36} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
+                                spec.name,
+                                "FAIL",
+                                "FAIL",
+                                "FAIL",
+                                "N/A",
+                                "N/A",
+                                "N/A",
+                                "N/A",
+                                "N/A"
                             );
                             println!("    → {err}");
                         }
@@ -278,7 +304,9 @@ mod complex_demo {
 
     struct ResultRow {
         method: String,
-        time_secs: f64,
+        setup_secs: f64,
+        median_solve_secs: f64,
+        min_solve_secs: f64,
         iterations: usize,
         reductions: usize,
         reported_residual: R,
@@ -297,6 +325,75 @@ mod complex_demo {
     enum PcKind {
         None,
         Jacobi,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct BenchmarkConfig {
+        warmup_runs: usize,
+        measured_runs: usize,
+    }
+
+    impl Default for BenchmarkConfig {
+        fn default() -> Self {
+            Self {
+                warmup_runs: 1,
+                measured_runs: 5,
+            }
+        }
+    }
+
+    impl BenchmarkConfig {
+        fn from_env_args() -> Result<Self, KError> {
+            let mut cfg = Self::default();
+            let mut args = env::args().skip(1);
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--warmup-runs" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --warmup-runs".into(),
+                            ));
+                        };
+                        cfg.warmup_runs = parse_positive_usize("--warmup-runs", &v)?;
+                    }
+                    "--measured-runs" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --measured-runs".into(),
+                            ));
+                        };
+                        cfg.measured_runs = parse_positive_usize("--measured-runs", &v)?;
+                    }
+                    "--help" | "-h" => {
+                        if cfg!(feature = "mpi") {
+                            println!(
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--warmup-runs N] [--measured-runs N]"
+                            );
+                        } else {
+                            println!(
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--warmup-runs N] [--measured-runs N]"
+                            );
+                        }
+                        std::process::exit(0);
+                    }
+                    _ => {}
+                }
+            }
+            if cfg.measured_runs == 0 {
+                return Err(KError::InvalidInput(
+                    "--measured-runs must be at least 1".into(),
+                ));
+            }
+            Ok(cfg)
+        }
+    }
+
+    fn parse_positive_usize(flag: &str, value: &str) -> Result<usize, KError> {
+        value.parse::<usize>().map_err(|_| {
+            KError::InvalidInput(format!(
+                "invalid value '{value}' for {flag}, expected non-negative integer"
+            ))
+        })
     }
 
     impl RunSpec {
@@ -319,48 +416,76 @@ mod complex_demo {
         }
     }
 
-    fn run_once(problem: &Problem, spec: &RunSpec) -> Result<ResultRow, KError> {
-        let mut solver = FgmresSolver::new(1e-8, 500, spec.restart);
-        solver.variant = FgmresVariant::Pipelined;
-        solver.reorth = ReorthPolicy::IfNeeded;
-        solver.atol = 1e-12;
-        solver.dtol = 1e6;
-
-        let mut workspace = Workspace::new(problem.local_n);
-        solver.setup_workspace(&mut workspace);
-
-        let mut x = vec![S::zero(); problem.local_n];
+    fn run_once(
+        problem: &Problem,
+        spec: &RunSpec,
+        bench_cfg: &BenchmarkConfig,
+    ) -> Result<ResultRow, KError> {
         let b = &problem.rhs;
-
         let mut jacobi_pc: Option<Jacobi> = None;
+        let setup_start = Instant::now();
         if matches!(spec.pc, PcKind::Jacobi) {
             let mut pc = Jacobi::new();
             pc.setup(problem.csr_for_pc.as_ref())?;
             jacobi_pc = Some(pc);
         }
-        let pc_opt = jacobi_pc
-            .as_mut()
-            .map(|pc| pc as &mut dyn KPreconditioner<Scalar = S>);
+        let setup_secs = setup_start.elapsed().as_secs_f64();
+        for _ in 0..bench_cfg.warmup_runs {
+            let mut x = vec![S::zero(); problem.local_n];
+            let mut solver = configured_solver(spec.restart);
+            let mut workspace = Workspace::new(problem.local_n);
+            solver.setup_workspace(&mut workspace);
+            let _ = solver.solve_k(
+                problem.op.as_ref(),
+                jacobi_pc
+                    .as_mut()
+                    .map(|pc| pc as &mut dyn KPreconditioner<Scalar = S>),
+                b,
+                &mut x,
+                spec.pc_side,
+                &problem.comm,
+                None,
+                Some(&mut workspace),
+            )?;
+        }
 
-        problem.comm.barrier();
-        let start = Instant::now();
-        let stats = solver.solve_k(
-            problem.op.as_ref(),
-            pc_opt,
-            b,
-            &mut x,
-            spec.pc_side,
-            &problem.comm,
-            None,
-            Some(&mut workspace),
-        )?;
-        problem.comm.barrier();
-        let elapsed = start.elapsed().as_secs_f64();
+        let mut solve_times = Vec::with_capacity(bench_cfg.measured_runs);
+        let mut x_last = vec![S::zero(); problem.local_n];
+        let mut final_stats = None;
+        for _ in 0..bench_cfg.measured_runs {
+            let mut x = vec![S::zero(); problem.local_n];
+            problem.comm.barrier();
+            let start = Instant::now();
+            let mut solver = configured_solver(spec.restart);
+            let mut workspace = Workspace::new(problem.local_n);
+            solver.setup_workspace(&mut workspace);
+            let stats = solver.solve_k(
+                problem.op.as_ref(),
+                jacobi_pc
+                    .as_mut()
+                    .map(|pc| pc as &mut dyn KPreconditioner<Scalar = S>),
+                b,
+                &mut x,
+                spec.pc_side,
+                &problem.comm,
+                None,
+                Some(&mut workspace),
+            )?;
+            problem.comm.barrier();
+            let solve_secs = start.elapsed().as_secs_f64();
+            solve_times.push(solve_secs);
+            x_last = x;
+            final_stats = Some(stats);
+        }
+        let stats = final_stats
+            .ok_or_else(|| KError::InvalidInput("no measured solve run executed".into()))?;
+        let min_solve_secs = solve_times.iter().copied().fold(f64::INFINITY, f64::min);
+        let median_solve_secs = median(&mut solve_times);
 
         let reductions = stats.counters.num_global_reductions;
         let mut ax = vec![S::zero(); b.len()];
         let mut scratch = BridgeScratch::default();
-        problem.op.matvec_s(&x, &mut ax, &mut scratch);
+        problem.op.matvec_s(&x_last, &mut ax, &mut scratch);
         for (ri, bi) in ax.iter_mut().zip(b.iter().copied()) {
             *ri = bi - *ri;
         }
@@ -370,17 +495,21 @@ mod complex_demo {
                 .reduction_engine(&ReductOptions::default())
                 .norm2_s(&ax),
         );
-        let dof_per_sec = if matches!(problem.backend, CsrBackend::Serial | CsrBackend::Distributed)
-            && elapsed > 0.0
+        let dof_per_sec = if matches!(
+            problem.backend,
+            CsrBackend::Serial | CsrBackend::Distributed
+        ) && median_solve_secs > 0.0
         {
-            Some(problem.global_n as f64 / elapsed)
+            Some(problem.global_n as f64 / median_solve_secs)
         } else {
             None
         };
 
         Ok(ResultRow {
             method: format!("{} (m = {})", spec.name, spec.restart),
-            time_secs: elapsed,
+            setup_secs,
+            median_solve_secs,
+            min_solve_secs,
             iterations: stats.iterations,
             reductions,
             reported_residual: stats.final_residual,
@@ -388,6 +517,25 @@ mod complex_demo {
             reason: stats.reason,
             dof_per_sec,
         })
+    }
+
+    fn configured_solver(restart: usize) -> FgmresSolver {
+        let mut solver = FgmresSolver::new(1e-8, 500, restart);
+        solver.variant = FgmresVariant::Pipelined;
+        solver.reorth = ReorthPolicy::IfNeeded;
+        solver.atol = 1e-12;
+        solver.dtol = 1e6;
+        solver
+    }
+
+    fn median(samples: &mut [f64]) -> f64 {
+        samples.sort_by(f64::total_cmp);
+        let n = samples.len();
+        if n % 2 == 1 {
+            samples[n / 2]
+        } else {
+            (samples[n / 2 - 1] + samples[n / 2]) * 0.5
+        }
     }
 
     fn load_problem_complex(mat_path: &Path, comm: &UniverseComm) -> Result<Problem, KError> {
