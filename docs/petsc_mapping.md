@@ -90,7 +90,7 @@ features, options, and monitoring/convergence hooks.
 | `-ksp_gcr_restart` | [`KspOptions::gcr_restart`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.gcr_restart) | Supported | GCR/PipeGCR restart length. |
 | `-ksp_richardson_omega` | [`KspOptions::richardson_omega`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.richardson_omega) | Supported | Richardson step size. |
 | `-ksp_chebyshev_omega` | [`KspOptions::chebyshev_omega`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.chebyshev_omega) | Partial | Used for Chebyshev-as-KSP. |
-| `-ksp_pc_side` | [`KspOptions::pc_side`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.pc_side) | Supported | `left`/`right`/`symmetric`. |
+| `-ksp_pc_side` | [`KspOptions::pc_side`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.pc_side) | Supported | `left`/`right`/`symmetric` request values; FGMRES normalizes effective side to `right`. |
 | `-ksp_monitor_rank0` | [`KspOptions::ksp_monitor_rank0`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.ksp_monitor_rank0) | Supported | Rank-0 monitor policy. |
 | `-ksp_reduction` | [`KspOptions::reduction`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.reduction) | Supported | Reduction mode (`fast`/`deterministic`). |
 
@@ -143,7 +143,7 @@ features, options, and monitoring/convergence hooks.
 For nested KSP-as-PC, kryst applies side compatibility using the inner Krylov method:
 
 - **Inner GMRES**: `symmetric` is interpreted as `left`.
-- **Inner FGMRES**: `left` and `symmetric` both map to `right`.
+- **Inner FGMRES**: requests `left`/`symmetric`/`right`, but the effective side is always `right` (`left`/`symmetric` are normalized).
 - **Explicit inner side (`-pc_ksp_pc_side`)**: respected for non-symmetric outer requests, and reported as `compatible_override` when it differs from the outer effective side.
 - **Symmetric outer side + conflicting explicit inner side**: rejected with a nested failure (`SolveStats.reason = DivergedPcFailed`) and `nested_pc_failure.detail` includes `compatibility=mismatch`.
 
@@ -281,6 +281,7 @@ MG diagnostics expose the chosen coarse route and resolved fallback chain at the
 For PETSc-like nested workflows, these templates are the most robust defaults in kryst:
 
 - **Outer GMRES/FGMRES + inner KSP-as-PC (Jacobi)**
+  - For inner FGMRES, avoid interpreting this as distinct left-vs-right algorithm families: `left`/`symmetric` are compatibility aliases that normalize to effective `right`.
   - `-pc_type ksp -pc_ksp_ksp_type gmres -pc_ksp_pc_type jacobi`
   - Prefer explicit inner side (`-pc_ksp_pc_side left|right`) when outer side differs.
   - Inner restart precedence follows PETSc-style solver-specific keys: `pc_ksp_gmres_restart` / `pc_ksp_fgmres_restart` then `pc_ksp_restart`.

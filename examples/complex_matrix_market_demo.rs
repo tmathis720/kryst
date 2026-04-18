@@ -129,6 +129,9 @@ mod complex_demo {
                 println!(
                     "                    true(explicit) = ||b - A x||₂ recomputed after solve."
                 );
+                println!(
+                    "FGMRES side policy: requested left/symmetric are normalized to effective right preconditioning."
+                );
                 let include_dof_col = matches!(
                     problem.backend,
                     CsrBackend::Serial | CsrBackend::Distributed
@@ -387,7 +390,9 @@ mod complex_demo {
                     }
                     "--restarts" => {
                         let Some(v) = args.next() else {
-                            return Err(KError::InvalidInput("missing value for --restarts".into()));
+                            return Err(KError::InvalidInput(
+                                "missing value for --restarts".into(),
+                            ));
                         };
                         cfg.restarts = parse_usize_csv("--restarts", &v)?;
                     }
@@ -548,14 +553,25 @@ mod complex_demo {
         }
 
         fn method_label(&self) -> String {
+            let effective_side = normalized_fgmres_side(self.pc_side);
+            let side_desc = if effective_side == self.pc_side {
+                format!("{}", pc_side_label(self.pc_side))
+            } else {
+                format!(
+                    "{}→{} (normalized)",
+                    pc_side_label(self.pc_side),
+                    pc_side_label(effective_side)
+                )
+            };
             format!(
-                "FGMRES+{} [m={}, v={}, orth={}, reorth={}, pc={}]",
+                "FGMRES+{} [m={}, v={}, orth={}, reorth={}, pc=requested {}, effective {}]",
                 self.pc.label(),
                 self.restart,
                 variant_label(self.variant),
                 orthog_label(self.orthog),
                 reorth_label(self.reorth),
-                pc_side_label(self.pc_side)
+                pc_side_label(self.pc_side),
+                side_desc,
             )
         }
     }
@@ -599,12 +615,20 @@ mod complex_demo {
         }
     }
 
+    fn normalized_fgmres_side(requested_side: PcSide) -> PcSide {
+        match requested_side {
+            PcSide::Right => PcSide::Right,
+            PcSide::Left | PcSide::Symmetric => PcSide::Right,
+        }
+    }
+
     fn run_once(
         problem: &Problem,
         spec: &RunSpec,
         bench_cfg: &BenchmarkConfig,
     ) -> Result<ResultRow, KError> {
         let b = &problem.rhs;
+        let effective_pc_side = normalized_fgmres_side(spec.pc_side);
         let mut jacobi_pc: Option<Jacobi> = None;
         let setup_start = Instant::now();
         if matches!(spec.pc, PcKind::Jacobi) {
@@ -625,7 +649,7 @@ mod complex_demo {
                     .map(|pc| pc as &mut dyn KPreconditioner<Scalar = S>),
                 b,
                 &mut x,
-                spec.pc_side,
+                effective_pc_side,
                 &problem.comm,
                 None,
                 Some(&mut workspace),
@@ -649,7 +673,7 @@ mod complex_demo {
                     .map(|pc| pc as &mut dyn KPreconditioner<Scalar = S>),
                 b,
                 &mut x,
-                spec.pc_side,
+                effective_pc_side,
                 &problem.comm,
                 None,
                 Some(&mut workspace),
