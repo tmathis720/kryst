@@ -474,9 +474,9 @@ mod complex_demo {
     fn parse_orthog(token: &str) -> Result<Orthog, KError> {
         match token.trim().to_ascii_lowercase().as_str() {
             "classical" | "cgs" => Ok(Orthog::Classical),
-            "modified" | "mgs" => Ok(Orthog::Modified),
+            "cgs_refined" | "cgs-refined" | "refined" => Ok(Orthog::CgsRefined),
             other => Err(KError::InvalidInput(format!(
-                "invalid orthog '{other}', expected classical|cgs|modified|mgs"
+                "invalid orthog '{other}', expected classical|cgs|cgs_refined"
             ))),
         }
     }
@@ -594,8 +594,8 @@ mod complex_demo {
 
     fn orthog_label(orthog: Orthog) -> &'static str {
         match orthog {
-            Orthog::Classical => "classical",
-            Orthog::Modified => "modified",
+            Orthog::Classical => "classical-gs",
+            Orthog::CgsRefined => "cgs-with-refinement",
         }
     }
 

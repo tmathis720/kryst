@@ -1224,14 +1224,16 @@ impl KspContext {
                 self.restart = r;
                 self.pending_fgmres.restart = Some(r);
             }
-            // Map "mgs"/"cgs" to Modified/Classical
+            // Map FGMRES orthogonalization labels to implemented algorithms.
             if let Some(ref orth) = opts.fgmres_orthog {
                 let o = match orth.as_str() {
-                    "mgs" | "modified" => crate::solver::fgmres::Orthog::Modified,
                     "cgs" | "classical" => crate::solver::fgmres::Orthog::Classical,
+                    "cgs_refined" | "cgs-refined" | "refined" => {
+                        crate::solver::fgmres::Orthog::CgsRefined
+                    }
                     other => {
                         return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'mgs'|'modified'|'cgs'|'classical')"
+                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'cgs'|'classical'|'cgs_refined')"
                         )));
                     }
                 };
@@ -1278,11 +1280,13 @@ impl KspContext {
             }
             if let Some(ref orth) = opts.fgmres_orthog {
                 self.pending_fgmres.orthog = Some(match orth.as_str() {
-                    "mgs" | "modified" => crate::solver::fgmres::Orthog::Modified,
                     "cgs" | "classical" => crate::solver::fgmres::Orthog::Classical,
+                    "cgs_refined" | "cgs-refined" | "refined" => {
+                        crate::solver::fgmres::Orthog::CgsRefined
+                    }
                     other => {
                         return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'mgs'|'modified'|'cgs'|'classical')"
+                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'cgs'|'classical'|'cgs_refined')"
                         )));
                     }
                 });
@@ -4880,6 +4884,28 @@ mod tests {
         assert_eq!(s.variant, FgmresVariant::Pipelined);
         assert!(matches!(s.reorth, ReorthPolicy::Never));
         assert!((s.reorth_tol - 0.42).abs() < 1e-12);
+    }
+
+    #[cfg(not(feature = "complex"))]
+    #[test]
+    fn fgmres_orthog_cgs_refined_maps_cleanly() {
+        use crate::solver::fgmres::{FgmresSolver, Orthog};
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Fgmres).unwrap();
+        let opts = KspOptions {
+            fgmres_orthog: Some("cgs_refined".into()),
+            ..Default::default()
+        };
+        ksp.set_from_options(&opts).unwrap();
+        let s = ksp
+            .solver
+            .as_mut()
+            .unwrap()
+            .as_any_mut()
+            .downcast_mut::<FgmresSolver>()
+            .unwrap();
+        let (_, orth, _, _) = s.debug_config();
+        assert_eq!(orth, Orthog::CgsRefined);
     }
 
     #[cfg(feature = "complex")]

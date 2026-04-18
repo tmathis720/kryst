@@ -29,8 +29,10 @@ use std::any::Any;
 /// Orthogonalization flavor
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Orthog {
+    /// One-shot Classical Gram-Schmidt (CGS) projection.
     Classical,
-    Modified,
+    /// CGS with an immediate corrective refinement pass.
+    CgsRefined,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,7 +379,7 @@ impl FgmresSolver {
                                 }
                             }
                         }
-                        if matches!(self.orthog, Orthog::Modified) {
+                        if matches!(self.orthog, Orthog::CgsRefined) {
                             let mut corr: SmallVec<[S; 32]> = SmallVec::with_capacity(j + 1);
                             corr.resize(j + 1, S::zero());
                             {
