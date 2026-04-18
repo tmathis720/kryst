@@ -159,7 +159,7 @@ pub static SPECS: &[Spec] = &[
         key: "ksp_fgmres_orthog",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "FGMRES orthog: mgs|cgs",
+        doc: "FGMRES orthog: cgs|classical|cgs_refined",
     },
     Spec {
         flag: "-ksp_fgmres_reorth",
@@ -1246,7 +1246,7 @@ pub static SPECS: &[Spec] = &[
         key: "pc_ksp_fgmres_orthog",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "inner FGMRES orthogonalization method",
+        doc: "inner FGMRES orthog: cgs|classical|cgs_refined",
     },
     Spec {
         flag: "-pc_ksp_monitor_rank0",

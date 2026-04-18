@@ -85,8 +85,8 @@ features, options, and monitoring/convergence hooks.
 | `-ksp_dtol` | [`KspOptions::dtol`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.dtol) | Supported | Divergence tolerance. |
 | `-ksp_max_it` | [`KspOptions::maxits`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.maxits) | Supported | Max iterations. |
 | `-ksp_restart` | [`KspOptions::restart`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.restart) | Supported | GMRES/GCR restart length. |
-| `-ksp_gmres_*` | [`KspOptions::gmres_*`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html) | Supported | Orthog/reorthog/variant/s-step. |
-| `-ksp_fgmres_*` | [`KspOptions::fgmres_*`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html) | Supported | Orthog/reorthog/variant. |
+| `-ksp_gmres_*` | [`KspOptions::gmres_*`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html) | Supported | Orthog/reorthog/variant/s-step (`cgs` = Classical GS, `mgs` = Modified GS). |
+| `-ksp_fgmres_*` | [`KspOptions::fgmres_*`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html) | Supported | Orthog/reorthog/variant (`cgs`/`classical` and `cgs_refined` for CGS + refinement). |
 | `-ksp_gcr_restart` | [`KspOptions::gcr_restart`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.gcr_restart) | Supported | GCR/PipeGCR restart length. |
 | `-ksp_richardson_omega` | [`KspOptions::richardson_omega`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.richardson_omega) | Supported | Richardson step size. |
 | `-ksp_chebyshev_omega` | [`KspOptions::chebyshev_omega`](https://docs.rs/kryst/latest/kryst/config/options/struct.KspOptions.html#structfield.chebyshev_omega) | Partial | Used for Chebyshev-as-KSP. |
