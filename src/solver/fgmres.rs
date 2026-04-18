@@ -58,6 +58,8 @@ pub struct FgmresSolver {
     pub reorth: ReorthPolicy,
     /// Threshold used by the "if-needed" reorthogonalization strategy
     pub reorth_tol: f64,
+    /// If true, perform additional true-residual checks inside restart cycles for diagnostics.
+    pub strict_true_residual_cadence: bool,
 }
 
 impl FgmresSolver {
@@ -82,6 +84,7 @@ impl FgmresSolver {
             variant: FgmresVariant::Classical,
             reorth: ReorthPolicy::IfNeeded,
             reorth_tol: 0.7,
+            strict_true_residual_cadence: false,
         }
     }
 
@@ -526,41 +529,57 @@ impl FgmresSolver {
                     )
                     .with_counters(counters));
                 }
-                let true_res = recompute_true_residual_norm_s(
-                    a,
-                    b,
-                    x,
-                    comm,
-                    red.engine(),
-                    &mut ws.tmp1[..n],
-                    &mut ws.bridge,
-                );
-                let precond_res = if let Some(pc) = pc.as_deref_mut() {
-                    pc.apply_mut_s(
-                        pc_apply_side,
-                        &ws.tmp1[..n],
-                        &mut ws.tmp2[..n],
+
+                if self.strict_true_residual_cadence {
+                    let true_res = recompute_true_residual_norm_s(
+                        a,
+                        b,
+                        x,
+                        comm,
+                        red.engine(),
+                        &mut ws.tmp1[..n],
                         &mut ws.bridge,
-                    )?;
-                    red.norm2(&ws.tmp2[..n])
-                } else {
-                    red.norm2(&ws.tmp1[..n])
-                };
-                log_residuals(
-                    total_iters,
-                    "FGMRES",
-                    ResidualSnapshot {
-                        true_residual: true_res,
-                        preconditioned_residual: precond_res,
-                        recurrence_residual: Some(res),
-                    },
-                );
+                    );
+                    log_residuals(
+                        total_iters,
+                        "FGMRES",
+                        ResidualSnapshot {
+                            true_residual: true_res,
+                            preconditioned_residual: true_res,
+                            recurrence_residual: Some(res),
+                        },
+                    );
+                }
+
+                if let Some(reason) = ConvergedReason::from_non_finite(res) {
+                    let true_res = recompute_true_residual_norm_s(
+                        a,
+                        b,
+                        x,
+                        comm,
+                        red.engine(),
+                        &mut ws.tmp1[..n],
+                        &mut ws.bridge,
+                    );
+                    stats = SolveStats::new(total_iters, true_res, reason);
+                    converged = true;
+                    break;
+                }
 
                 stagnation_residuals.push(res);
                 if stagnation_residuals.len() > 6 {
                     stagnation_residuals.remove(0);
                 }
                 if stagnation_detected(&stagnation_residuals, stagnation_threshold) {
+                    let true_res = recompute_true_residual_norm_s(
+                        a,
+                        b,
+                        x,
+                        comm,
+                        red.engine(),
+                        &mut ws.tmp1[..n],
+                        &mut ws.bridge,
+                    );
                     let action = match self.variant {
                         FgmresVariant::Pipelined => {
                             self.variant = FgmresVariant::Classical;
@@ -569,6 +588,15 @@ impl FgmresSolver {
                         _ => "restarting FGMRES",
                     };
                     log_krylov_stagnation("FGMRES", total_iters, res, action);
+                    log_residuals(
+                        total_iters,
+                        "FGMRES",
+                        ResidualSnapshot {
+                            true_residual: true_res,
+                            preconditioned_residual: true_res,
+                            recurrence_residual: Some(res),
+                        },
+                    );
                     stagnation_residuals.clear();
                     break;
                 }
@@ -586,15 +614,6 @@ impl FgmresSolver {
                     reason,
                     ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
                 ) {
-                    stats.final_residual = recompute_true_residual_norm_s(
-                        a,
-                        b,
-                        x,
-                        comm,
-                        red.engine(),
-                        &mut ws.tmp1[..n],
-                        &mut ws.bridge,
-                    );
                     stats.iterations = total_iters;
                     converged = true;
                     break;
@@ -608,7 +627,31 @@ impl FgmresSolver {
                 for l in (i + 1)..k {
                     sum -= ws.h_at(i, l) * y[l];
                 }
-                y[i] = sum / ws.h_at(i, i);
+                let diag = ws.h_at(i, i);
+                if !diag.real().is_finite() || diag.abs() <= self.haptol {
+                    let true_res = recompute_true_residual_norm_s(
+                        a,
+                        b,
+                        x,
+                        comm,
+                        red.engine(),
+                        &mut ws.tmp1[..n],
+                        &mut ws.bridge,
+                    );
+                    let reason = ConvergedReason::from_non_finite(diag.real())
+                        .unwrap_or(ConvergedReason::DivergedBreakdown);
+                    stats = SolveStats::new(total_iters, true_res, reason);
+                    let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
+                    let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1
+                        + pipeline_reductions;
+                    let counters = crate::utils::convergence::SolverCounters {
+                        num_global_reductions: reductions,
+                        overlap_global_reductions: async_waits,
+                        residual_replacements: async_waits,
+                    };
+                    return Ok(stats.with_counters(counters));
+                }
+                y[i] = sum / diag;
             }
 
             for i in 0..k {
@@ -616,6 +659,30 @@ impl FgmresSolver {
                 for (xj, &zij) in x.iter_mut().zip(zi) {
                     *xj += y[i] * zij;
                 }
+            }
+
+            let true_res = recompute_true_residual_norm_s(
+                a,
+                b,
+                x,
+                comm,
+                red.engine(),
+                &mut ws.tmp1[..n],
+                &mut ws.bridge,
+            );
+            stats.final_residual = true_res;
+            if true_res <= thr {
+                stats.reason = if true_res <= self.atol {
+                    ConvergedReason::ConvergedAtol
+                } else {
+                    ConvergedReason::ConvergedRtol
+                };
+                break;
+            }
+            if !true_res.is_finite() {
+                stats.reason = ConvergedReason::from_non_finite(true_res)
+                    .unwrap_or(ConvergedReason::DivergedNan);
+                break;
             }
 
             if converged {
@@ -812,6 +879,10 @@ impl FgmresSolver {
     }
     pub fn set_variant(&mut self, variant: FgmresVariant) {
         self.variant = variant;
+    }
+
+    pub fn set_strict_true_residual_cadence(&mut self, flag: bool) {
+        self.strict_true_residual_cadence = flag;
     }
 
     #[cfg(test)]
