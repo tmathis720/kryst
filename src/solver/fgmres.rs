@@ -80,11 +80,12 @@ pub struct FgmresSolver {
 impl FgmresSolver {
     #[cfg(feature = "logging")]
     #[inline]
-    fn monitor_residual_semantics_tag(initial: bool) -> &'static str {
-        if initial {
-            "monitor_residual=initial_true_norm"
-        } else {
-            "monitor_residual=recurrence_norm"
+    fn monitor_residual_semantics_tag(event: &'static str, true_residual: bool) -> &'static str {
+        match (event, true_residual) {
+            ("initial", true) => "monitor_event=initial monitor_residual=true_norm",
+            ("inner", false) => "monitor_event=inner monitor_residual=recurrence_norm",
+            ("restart", true) => "monitor_event=restart monitor_residual=true_norm",
+            _ => "monitor_event=unknown monitor_residual=unknown",
         }
     }
 
@@ -256,7 +257,7 @@ impl FgmresSolver {
         if log::log_enabled!(log::Level::Info) {
             log::info!(
                 "FGMRES monitor semantics: {}",
-                Self::monitor_residual_semantics_tag(true)
+                Self::monitor_residual_semantics_tag("initial", true)
             );
         }
 
@@ -331,15 +332,6 @@ impl FgmresSolver {
             } else {
                 ConvergedReason::ConvergedRtol
             };
-            let true_res = recompute_true_residual_norm_s(
-                a,
-                b,
-                x,
-                comm,
-                red.engine(),
-                &mut ws.tmp1[..n],
-                &mut ws.bridge,
-            );
             stats.final_residual = true_res;
             stats.final_true_residual = Some(true_res);
             stats.final_recurrence_residual = Some(res);
@@ -579,7 +571,7 @@ impl FgmresSolver {
                 if total_iters == 1 && log::log_enabled!(log::Level::Info) {
                     log::info!(
                         "FGMRES monitor semantics: {}",
-                        Self::monitor_residual_semantics_tag(false)
+                        Self::monitor_residual_semantics_tag("inner", false)
                     );
                 }
 
@@ -654,15 +646,6 @@ impl FgmresSolver {
                     stagnation_residuals.remove(0);
                 }
                 if stagnation_detected(&stagnation_residuals, stagnation_threshold) {
-                    let true_res = recompute_true_residual_norm_s(
-                        a,
-                        b,
-                        x,
-                        comm,
-                        red.engine(),
-                        &mut ws.tmp1[..n],
-                        &mut ws.bridge,
-                    );
                     let action = match self.variant {
                         FgmresVariant::Pipelined => {
                             self.variant = FgmresVariant::Classical;
@@ -671,15 +654,6 @@ impl FgmresSolver {
                         _ => "restarting FGMRES",
                     };
                     log_krylov_stagnation("FGMRES", total_iters, res, action);
-                    log_residuals(
-                        total_iters,
-                        "FGMRES",
-                        ResidualSnapshot {
-                            true_residual: true_res,
-                            preconditioned_residual: true_res,
-                            recurrence_residual: Some(res),
-                        },
-                    );
                     stagnation_residuals.clear();
                     break;
                 }
@@ -757,6 +731,14 @@ impl FgmresSolver {
                 for (xj, &zij) in x.iter_mut().zip(zi) {
                     *xj += y[i] * zij;
                 }
+            }
+
+            #[cfg(feature = "logging")]
+            if log::log_enabled!(log::Level::Info) {
+                log::info!(
+                    "FGMRES monitor semantics: {}",
+                    Self::monitor_residual_semantics_tag("restart", true)
+                );
             }
 
             let true_res = recompute_true_residual_norm_s(
