@@ -6,9 +6,11 @@ use crate::ops::kpc::KPreconditioner;
 use crate::parallel::{NoComm, UniverseComm};
 use crate::preconditioner::PcSide;
 use crate::solver::bicgstab::BiCgStabSolver;
+use crate::solver::fgmres::{FgmresSolver, FgmresVariant};
 use crate::solver::gmres::GmresSolver;
 use crate::utils::convergence::{AcceptanceStatus, ConvergedReason};
 use std::any::Any;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct ScriptedScaleOp {
@@ -256,4 +258,84 @@ fn bicgstab_omega_breakdown_keeps_hard_breakdown_above_tol() {
     assert_eq!(stats.breakdown_reason, None);
     assert!(stats.residual_override_note.is_none());
     assert!(stats.final_residual > solver.atol);
+}
+
+#[test]
+fn fgmres_near_zero_subdiag_happy_breakdown_enabled() {
+    let op = ScriptedScaleOp::new(vec![1.0]);
+    let b = vec![1.0];
+    let mut x = vec![0.0];
+    let mut solver = FgmresSolver::new(1e-12, 6, 2);
+    solver.atol = 0.0;
+    solver.haptol = 1e-14;
+    solver.set_variant(FgmresVariant::Classical);
+    solver.set_happy_breakdown(true);
+    let restarts = Arc::new(AtomicUsize::new(0));
+    let restarts_clone = Arc::clone(&restarts);
+    solver.on_restart = Some(Box::new(move |_, _| {
+        restarts_clone.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }));
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut ws = Workspace::default();
+
+    let stats = solver
+        .solve_f64(
+            &op,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
+        .expect("fgmres should return stats");
+
+    assert_eq!(stats.reason, ConvergedReason::ConvergedHappyBreakdown);
+    assert!(stats.final_residual <= solver.rtol * 1.0);
+    assert_eq!(stats.iterations, 1);
+    assert_eq!(restarts.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn fgmres_near_zero_subdiag_happy_breakdown_disabled() {
+    let op = ScriptedScaleOp::new(vec![1.0]);
+    let b = vec![1.0];
+    let mut x = vec![0.0];
+    let mut solver = FgmresSolver::new(1e-12, 6, 2);
+    solver.atol = 0.0;
+    solver.haptol = 1e-14;
+    solver.set_variant(FgmresVariant::Classical);
+    solver.set_happy_breakdown(false);
+    let restarts = Arc::new(AtomicUsize::new(0));
+    let restarts_clone = Arc::clone(&restarts);
+    solver.on_restart = Some(Box::new(move |_, _| {
+        restarts_clone.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }));
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut ws = Workspace::default();
+
+    let stats = solver
+        .solve_f64(
+            &op,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut ws),
+        )
+        .expect("fgmres should return stats");
+
+    assert_ne!(stats.reason, ConvergedReason::ConvergedHappyBreakdown);
+    assert!(matches!(
+        stats.reason,
+        ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
+    ));
+    assert!(stats.final_residual <= solver.rtol * 1.0);
+    assert_eq!(stats.iterations, 1);
+    assert_eq!(restarts.load(Ordering::Relaxed), 0);
 }
