@@ -516,8 +516,17 @@ impl ReductionModel {
 pub struct SolveStats<R> {
     /// Number of iterations performed
     pub iterations: usize,
-    /// Final residual norm
+    /// Canonical final residual norm for reporting.
+    ///
+    /// Solvers should prefer storing the explicit true residual norm when it is
+    /// computed; otherwise this may be a recurrence/estimated residual.
     pub final_residual: R,
+    /// Optional final residual from the Krylov recurrence/estimator.
+    pub final_recurrence_residual: Option<R>,
+    /// Optional final explicit true residual `||b - A x||_2`.
+    pub final_true_residual: Option<R>,
+    /// Optional latest preconditioned residual norm.
+    pub last_preconditioned_residual: Option<R>,
     /// Reason for stopping.
     ///
     /// This includes mapped preconditioner lifecycle failures (for example
@@ -562,6 +571,9 @@ impl<R: Default> SolveStats<R> {
         Self {
             iterations,
             final_residual,
+            final_recurrence_residual: None,
+            final_true_residual: None,
+            last_preconditioned_residual: None,
             reason,
             counters: SolverCounters::default(),
             gcr_counters: None,
@@ -865,6 +877,9 @@ mod tests {
         let cloned = stats.clone();
         assert_eq!(cloned.iterations, 42);
         assert_eq!(cloned.final_residual, 1e-8);
+        assert_eq!(cloned.final_recurrence_residual, None);
+        assert_eq!(cloned.final_true_residual, None);
+        assert_eq!(cloned.last_preconditioned_residual, None);
         assert_eq!(cloned.reason, ConvergedReason::ConvergedRtol);
     }
 

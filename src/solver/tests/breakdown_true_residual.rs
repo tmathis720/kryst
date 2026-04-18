@@ -294,6 +294,9 @@ fn fgmres_near_zero_subdiag_happy_breakdown_enabled() {
 
     assert_eq!(stats.reason, ConvergedReason::ConvergedHappyBreakdown);
     assert!(stats.final_residual <= solver.rtol * 1.0);
+    assert_eq!(stats.final_true_residual, Some(stats.final_residual));
+    assert_eq!(stats.final_recurrence_residual, Some(0.0));
+    assert!(stats.last_preconditioned_residual.is_some());
     assert_eq!(stats.iterations, 1);
     assert_eq!(restarts.load(Ordering::Relaxed), 0);
 }
@@ -336,6 +339,9 @@ fn fgmres_near_zero_subdiag_happy_breakdown_disabled() {
         ConvergedReason::ConvergedRtol | ConvergedReason::ConvergedAtol
     ));
     assert!(stats.final_residual <= solver.rtol * 1.0);
+    assert_eq!(stats.final_true_residual, Some(stats.final_residual));
+    assert!(stats.final_recurrence_residual.is_some());
+    assert!(stats.last_preconditioned_residual.is_some());
     assert_eq!(stats.iterations, 1);
     assert_eq!(restarts.load(Ordering::Relaxed), 0);
 }
