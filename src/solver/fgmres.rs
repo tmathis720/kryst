@@ -176,10 +176,12 @@ impl FgmresSolver {
             ));
         }
 
-        let pc_apply_side = match pc_side {
-            PcSide::Right => PcSide::Right,
-            PcSide::Left | PcSide::Symmetric => PcSide::Right,
-        };
+        if pc_side != PcSide::Right {
+            return Err(KError::InvalidInput(format!(
+                "FGMRES supports only right preconditioning; got {pc_side:?}"
+            )));
+        }
+        let pc_apply_side = PcSide::Right;
 
         let block_m = if self.preallocate {
             self.restart.min(self.maxits)

@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn nested_ksp_pc_outer_fgmres_multiple_inner_and_sides() {
-        run_nested_case(SolverType::Fgmres, "richardson", "left");
+        run_nested_case(SolverType::Fgmres, "richardson", "right");
         run_nested_case(SolverType::Fgmres, "gmres", "right");
     }
 

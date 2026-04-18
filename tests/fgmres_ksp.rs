@@ -6,6 +6,7 @@ use kryst::algebra::prelude::*;
 use kryst::assert_vec_close;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
+use kryst::error::KError;
 use kryst::preconditioner::PcSide;
 
 #[test]
@@ -85,4 +86,21 @@ fn fgmres_solves_dd_nonsym() {
     let x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
     let expected_s: Vec<S> = x_true.iter().copied().map(S::from_real).collect();
     assert_vec_close!("fgmres solves dd nonsym", &x_s, &expected_s);
+}
+
+#[test]
+fn fgmres_rejects_non_right_side_via_api() {
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Fgmres).unwrap();
+
+    let err = ksp
+        .try_set_pc_side(PcSide::Left)
+        .expect_err("FGMRES must reject non-right sides");
+    match err {
+        KError::InvalidInput(msg) => {
+            assert!(msg.contains("FGMRES"));
+            assert!(msg.to_lowercase().contains("right preconditioning"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }

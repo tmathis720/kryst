@@ -25,7 +25,7 @@
 //! | Solver            | Allowed sides   | Notes                                                   |
 //! |-------------------|-----------------|---------------------------------------------------------|
 //! | `CG`, `PCG`       | Left only       | Requires HPD `A` and HPD left preconditioner `M`.       |
-//! | `FGMRES`          | Left/Right/Symmetric (requested) | Uses right-preconditioned Arnoldi; effective side is always Right (Left/Symmetric are normalized). |
+//! | `FGMRES`          | Right only      | Uses right-preconditioned Arnoldi; Left/Symmetric are rejected. |
 //! | `PCA-GMRES`       | Left or Right   | Mapped to [`PcaPcMode`] during setup.                   |
 //! | All other solvers | Left or Right   | `Symmetric` behaves like left but is passed to PCs.     |
 //!
@@ -510,10 +510,7 @@ impl KspContext {
     #[inline]
     fn effective_side_for_solver(side: PcSide, solver_type: SolverType) -> PcSide {
         match solver_type {
-            SolverType::Fgmres => match side {
-                PcSide::Left | PcSide::Symmetric => PcSide::Right,
-                PcSide::Right => PcSide::Right,
-            },
+            SolverType::Fgmres => side,
             _ => match side {
                 PcSide::Symmetric => PcSide::Left,
                 s => s,
@@ -592,6 +589,11 @@ impl KspContext {
             side
         };
         if let Some(st) = self.solver_type {
+            if st == SolverType::Fgmres && side != PcSide::Right {
+                return Err(KError::InvalidInput(format!(
+                    "FGMRES supports only right preconditioning; got {side:?}"
+                )));
+            }
             if let Some(required) = st.required_pc_side() {
                 if normalized != required {
                     return Err(KError::InvalidInput(format!(
@@ -686,6 +688,15 @@ impl KspContext {
     }
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
+        if solver_type == SolverType::Fgmres
+            && self.pc_side_explicit
+            && self.pc_side != PcSide::Right
+        {
+            return Err(KError::InvalidInput(format!(
+                "FGMRES supports only right preconditioning; got {:?}",
+                self.pc_side
+            )));
+        }
         if let Some(required) = solver_type.required_pc_side() {
             let normalized = Self::effective_side_for_solver(self.pc_side, solver_type);
             if self.pc_side_explicit {
@@ -4076,6 +4087,11 @@ impl KspContext {
         }
 
         if let Some(st) = self.solver_type {
+            if st == SolverType::Fgmres && side != PcSide::Right {
+                return Err(KError::InvalidInput(format!(
+                    "FGMRES supports only right preconditioning; got {side:?}"
+                )));
+            }
             if let Some(required) = st.required_pc_side() {
                 if side != required {
                     return Err(KError::InvalidInput(format!(
@@ -4717,24 +4733,26 @@ mod tests {
     }
 
     #[test]
-    fn fgmres_accepts_left_via_try_set_pc_side() {
+    fn fgmres_rejects_left_via_try_set_pc_side() {
         let mut ksp = KspContext::new();
-        // Ensure current side is compatible so set_type succeeds
         ksp.set_pc_side(PcSide::Right);
         ksp.set_type(SolverType::Fgmres).unwrap();
-        ksp.try_set_pc_side(PcSide::Left).unwrap();
+        let err = ksp
+            .try_set_pc_side(PcSide::Left)
+            .expect_err("FGMRES must reject left preconditioning");
+        match err {
+            KError::InvalidInput(msg) => {
+                assert!(msg.contains("FGMRES"));
+                assert!(msg.to_lowercase().contains("right preconditioning"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
-    fn fgmres_effective_side_is_always_right() {
+    fn fgmres_effective_side_tracks_requested_side() {
         let mut ksp = KspContext::new();
         ksp.set_type(SolverType::Fgmres).unwrap();
-
-        ksp.try_set_pc_side(PcSide::Left).unwrap();
-        assert_eq!(ksp.effective_pc_side(), PcSide::Right);
-
-        ksp.try_set_pc_side(PcSide::Symmetric).unwrap();
-        assert_eq!(ksp.effective_pc_side(), PcSide::Right);
 
         ksp.try_set_pc_side(PcSide::Right).unwrap();
         assert_eq!(ksp.effective_pc_side(), PcSide::Right);
@@ -4906,6 +4924,27 @@ mod tests {
             .unwrap();
         let (_, orth, _, _) = s.debug_config();
         assert_eq!(orth, Orthog::CgsRefined);
+    }
+
+    #[cfg(not(feature = "complex"))]
+    #[test]
+    fn fgmres_options_reject_non_right_pc_side() {
+        let mut ksp = KspContext::new();
+        let opts = KspOptions {
+            ksp_type: Some("fgmres".into()),
+            pc_side: Some("left".into()),
+            ..Default::default()
+        };
+        let err = ksp
+            .set_from_options(&opts)
+            .expect_err("FGMRES must reject left side from options");
+        match err {
+            KError::InvalidInput(msg) => {
+                assert!(msg.contains("FGMRES"));
+                assert!(msg.to_lowercase().contains("right preconditioning"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[cfg(feature = "complex")]
