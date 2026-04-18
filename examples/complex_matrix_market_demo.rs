@@ -25,10 +25,8 @@ mod complex_demo {
     use kryst::algebra::bridge::BridgeScratch;
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
-    use kryst::matrix::csr::CsrMatrix as ScalarCsrMatrix;
-    use kryst::matrix::op::GenericCsrOp;
+    use kryst::matrix::DistCsrOp;
     use kryst::matrix::sparse::CsrMatrix as SparseCsrMatrix;
-    use kryst::matrix::spmv::SpmvTuning;
     use kryst::ops::klinop::KLinOp;
     use kryst::ops::kpc::KPreconditioner;
     use kryst::parallel::{Comm, UniverseComm};
@@ -40,7 +38,6 @@ mod complex_demo {
     use kryst::solver::fgmres::{FgmresSolver, FgmresVariant, Orthog};
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
-    use kryst::utils::reduction::ReductOptions;
 
     #[cfg(feature = "mpi")]
     use kryst::parallel::MpiComm;
@@ -122,9 +119,17 @@ mod complex_demo {
                 );
                 println!("Global DOFs: {}", problem.global_n);
                 println!("Local DOFs (rank {rank}): {}", problem.local_n);
+                println!(
+                    "Local row range (rank {rank}): [{}..{})",
+                    problem.global_row_start,
+                    problem.global_row_start + problem.local_n
+                );
                 if problem.comm.size() > 1 && problem.local_n == problem.global_n {
                     println!("Note: replicated execution: MPI ranks are not sharing SpMV rows.");
                 }
+                println!(
+                    "MPI scalability note: use this distributed complex CSR example for scalability claims; use replicated demos only as correctness/smoke benchmarks."
+                );
                 println!("‖rhs‖₂ = {:.3e}", rhs_norm);
                 println!("Residual semantics: rec/reported = solver recurrence/monitor residual.");
                 println!(
@@ -265,6 +270,7 @@ mod complex_demo {
         csr_for_pc: Arc<SparseCsrMatrix<S>>,
         local_n: usize,
         global_n: usize,
+        global_row_start: usize,
         comm: UniverseComm,
         backend: CsrBackend,
         backend_descr: String,
@@ -749,12 +755,8 @@ mod complex_demo {
         for (ri, bi) in ax.iter_mut().zip(b.iter().copied()) {
             *ri = bi - *ri;
         }
-        let explicit_true_residual = Some(
-            problem
-                .comm
-                .reduction_engine(&ReductOptions::default())
-                .norm2_s(&ax),
-        );
+        let r2_local = ax.iter().map(|v| v.abs2()).sum::<f64>();
+        let explicit_true_residual = Some(problem.comm.all_reduce_f64(r2_local).sqrt());
         let dof_per_sec = if matches!(
             problem.backend,
             CsrBackend::Serial | CsrBackend::Distributed
@@ -804,44 +806,58 @@ mod complex_demo {
         let csr_sparse: SparseCsrMatrix<S> = mm.to_csr_matrix_scalar()?;
         let nrows = csr_sparse.nrows();
         let ncols = csr_sparse.ncols();
-        let row_ptr = csr_sparse.row_ptr().to_vec();
-        let col_idx = csr_sparse.col_idx().to_vec();
-        let values = csr_sparse.values().to_vec();
-        let csr_for_pc = Arc::new(csr_sparse);
 
-        let csr_scalar = ScalarCsrMatrix::new(nrows, ncols, row_ptr, col_idx, values);
-        let csr_arc = Arc::new(csr_scalar);
+        let row_part = DistCsrOp::partition_rows_balanced(nrows, comm);
+        let row_start = row_part[comm.rank()];
+        let row_end = row_part[comm.rank() + 1];
+        let local_csr = slice_csr_rows(&csr_sparse, row_start, row_end);
 
-        let op = GenericCsrOp::new(csr_arc.clone(), &SpmvTuning::default()).with_comm(comm.clone());
+        let op = DistCsrOp::from_local_rows(nrows, row_start, &local_csr, &row_part, comm.clone())?;
         let op_arc: Arc<dyn KLinOp<Scalar = S>> = Arc::new(op);
 
-        let rhs = match try_load_rhs_s(mat_path, csr_arc.nrows()) {
+        let rhs_global = match try_load_rhs_s(mat_path, nrows) {
             Some(vec) => vec,
             None => {
-                let ones = vec![S::one(); csr_arc.ncols()];
-                let mut b = vec![S::zero(); csr_arc.nrows()];
-                csr_arc.spmv(&ones, &mut b);
+                let ones = vec![S::one(); ncols];
+                let mut b = vec![S::zero(); nrows];
+                csr_sparse.spmv(&ones, &mut b);
                 b
             }
         };
+        let rhs = rhs_global[row_start..row_end].to_vec();
 
-        let local_n = nrows;
+        let local_n = row_end - row_start;
         let global_n = nrows;
         let backend = classify_backend(comm.size(), local_n, global_n);
 
         Ok(Problem {
             op: op_arc,
             rhs,
-            csr_for_pc,
+            csr_for_pc: Arc::new(local_csr),
             local_n,
             global_n,
+            global_row_start: row_start,
             comm: comm.clone(),
             backend,
-            backend_descr: format!(
-                "Generic CSR (complex, {})",
-                backend.benchmark_export_label()
-            ),
+            backend_descr: "Distributed CSR (complex)".to_string(),
         })
+    }
+
+    fn slice_csr_rows(matrix: &SparseCsrMatrix<S>, start: usize, end: usize) -> SparseCsrMatrix<S> {
+        let row_ptr = matrix.row_ptr();
+        let col_idx = matrix.col_idx();
+        let values = matrix.values();
+        let start_nnz = row_ptr[start];
+        let end_nnz = row_ptr[end];
+
+        let mut local_rp = Vec::with_capacity(end - start + 1);
+        for r in start..=end {
+            local_rp.push(row_ptr[r] - start_nnz);
+        }
+        let local_ci = col_idx[start_nnz..end_nnz].to_vec();
+        let local_vals = values[start_nnz..end_nnz].to_vec();
+
+        SparseCsrMatrix::from_csr(end - start, matrix.ncols(), local_rp, local_ci, local_vals)
     }
 
     fn classify_backend(size: usize, local_n: usize, global_n: usize) -> CsrBackend {
