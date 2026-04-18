@@ -241,6 +241,7 @@ impl FgmresSolver {
         let mut total_iters = 0usize;
         let mut res = beta0;
         let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
+        stats.final_recurrence_residual = Some(res);
         let red_engine = ws
             .reduction_engine()
             .cloned()
@@ -268,15 +269,28 @@ impl FgmresSolver {
                 &mut ws.tmp1[..n],
                 &mut ws.bridge,
             );
+            let last_preconditioned_residual = if let Some(pc_ref) = pc.as_deref_mut() {
+                pc_ref.apply_mut_s(
+                    pc_apply_side,
+                    &ws.tmp1[..n],
+                    &mut ws.tmp2[..n],
+                    &mut ws.bridge,
+                )?;
+                Some(red.norm2(&ws.tmp2[..n]))
+            } else {
+                Some(red.norm2(&ws.tmp1[..n]))
+            };
             let counters = crate::utils::convergence::SolverCounters {
                 num_global_reductions: pipeline_reductions,
                 overlap_global_reductions: async_waits,
                 residual_replacements: async_waits,
             };
-            return Ok(
-                SolveStats::new(0, true_res, ConvergedReason::StoppedByMonitor)
-                    .with_counters(counters),
-            );
+            let mut stats = SolveStats::new(0, true_res, ConvergedReason::StoppedByMonitor)
+                .with_counters(counters);
+            stats.final_recurrence_residual = Some(res);
+            stats.final_true_residual = Some(true_res);
+            stats.last_preconditioned_residual = last_preconditioned_residual;
+            return Ok(stats);
         }
         let true_res = recompute_true_residual_norm_s(
             a,
@@ -298,6 +312,8 @@ impl FgmresSolver {
         } else {
             red.norm2(&ws.tmp1[..n])
         };
+        stats.final_true_residual = Some(true_res);
+        stats.last_preconditioned_residual = Some(precond_res);
         log_residuals(
             0,
             "FGMRES",
@@ -323,6 +339,9 @@ impl FgmresSolver {
                 &mut ws.bridge,
             );
             stats.final_residual = true_res;
+            stats.final_true_residual = Some(true_res);
+            stats.final_recurrence_residual = Some(res);
+            stats.last_preconditioned_residual = Some(precond_res);
             let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
             let reductions =
                 end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1 + pipeline_reductions;
@@ -569,12 +588,11 @@ impl FgmresSolver {
                         overlap_global_reductions: async_waits,
                         residual_replacements: async_waits,
                     };
-                    return Ok(SolveStats::new(
-                        total_iters,
-                        res,
-                        ConvergedReason::StoppedByMonitor,
-                    )
-                    .with_counters(counters));
+                    let mut stats =
+                        SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
+                            .with_counters(counters);
+                    stats.final_recurrence_residual = Some(res);
+                    return Ok(stats);
                 }
 
                 if self.should_check_true_residual_every_iteration() {
@@ -611,6 +629,20 @@ impl FgmresSolver {
                         &mut ws.bridge,
                     );
                     stats = SolveStats::new(total_iters, true_res, reason);
+                    stats.final_true_residual = Some(true_res);
+                    stats.final_recurrence_residual = Some(res);
+                    let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
+                        pc_ref.apply_mut_s(
+                            pc_apply_side,
+                            &ws.tmp1[..n],
+                            &mut ws.tmp2[..n],
+                            &mut ws.bridge,
+                        )?;
+                        red.norm2(&ws.tmp2[..n])
+                    } else {
+                        red.norm2(&ws.tmp1[..n])
+                    };
+                    stats.last_preconditioned_residual = Some(precond_res);
                     converged = true;
                     break;
                 }
@@ -691,6 +723,20 @@ impl FgmresSolver {
                     let reason = ConvergedReason::from_non_finite(diag.real())
                         .unwrap_or(ConvergedReason::DivergedBreakdown);
                     stats = SolveStats::new(total_iters, true_res, reason);
+                    stats.final_true_residual = Some(true_res);
+                    stats.final_recurrence_residual = Some(res);
+                    let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
+                        pc_ref.apply_mut_s(
+                            pc_apply_side,
+                            &ws.tmp1[..n],
+                            &mut ws.tmp2[..n],
+                            &mut ws.bridge,
+                        )?;
+                        red.norm2(&ws.tmp2[..n])
+                    } else {
+                        red.norm2(&ws.tmp1[..n])
+                    };
+                    stats.last_preconditioned_residual = Some(precond_res);
                     let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
                     let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1
                         + pipeline_reductions;
@@ -711,13 +757,30 @@ impl FgmresSolver {
                 }
             }
 
-            let check_true_on_restart = matches!(
-                self.residual_check_policy,
-                ResidualCheckPolicy::RestartOnly
-                    | ResidualCheckPolicy::EveryIteration
-                    | ResidualCheckPolicy::Debug
+            let true_res = recompute_true_residual_norm_s(
+                a,
+                b,
+                x,
+                comm,
+                red.engine(),
+                &mut ws.tmp1[..n],
+                &mut ws.bridge,
             );
+            let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
+                pc_ref.apply_mut_s(
+                    pc_apply_side,
+                    &ws.tmp1[..n],
+                    &mut ws.tmp2[..n],
+                    &mut ws.bridge,
+                )?;
+                red.norm2(&ws.tmp2[..n])
+            } else {
+                red.norm2(&ws.tmp1[..n])
+            };
             stats.final_residual = true_res;
+            stats.final_true_residual = Some(true_res);
+            stats.final_recurrence_residual = Some(res);
+            stats.last_preconditioned_residual = Some(precond_res);
             if let Some(reason) = converged_reason {
                 stats.reason = reason;
             }
