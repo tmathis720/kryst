@@ -34,6 +34,7 @@ mod complex_demo {
     use kryst::parallel::{Comm, UniverseComm};
     use kryst::preconditioner::PcSide;
     use kryst::preconditioner::Preconditioner;
+    use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::jacobi::Jacobi;
     use kryst::solver::LinearSolver;
     use kryst::solver::fgmres::{FgmresSolver, FgmresVariant, Orthog};
@@ -167,7 +168,7 @@ mod complex_demo {
                 println!("{}", "-".repeat(if include_dof_col { 160 } else { 146 }));
             }
 
-            let runs = RunSpec::build_default_matrix(&config);
+            let runs = RunSpec::build_default_matrix(&config, &problem);
 
             for spec in runs {
                 match run_once(&problem, &spec, &config) {
@@ -326,7 +327,9 @@ mod complex_demo {
 
     enum PcKind {
         None,
-        Jacobi,
+        JacobiWeak,
+        Ilu0Local,
+        MpiBlockJacobiIlu0Local,
     }
 
     #[derive(Clone, Debug)]
@@ -523,8 +526,9 @@ mod complex_demo {
     }
 
     impl RunSpec {
-        fn build_default_matrix(cfg: &BenchmarkConfig) -> Vec<Self> {
+        fn build_default_matrix(cfg: &BenchmarkConfig, problem: &Problem) -> Vec<Self> {
             let mut runs = Vec::new();
+            let include_mpi_block_jacobi = problem.comm.size() > 1;
             for &restart in &cfg.restarts {
                 for &variant in &cfg.variants {
                     for &orthog in &cfg.orthogs {
@@ -535,7 +539,25 @@ mod complex_demo {
                                 orthog,
                                 reorth,
                                 pc_side: PcSide::Right,
-                                pc: PcKind::Jacobi,
+                                pc: PcKind::Ilu0Local,
+                            });
+                            if include_mpi_block_jacobi {
+                                runs.push(Self {
+                                    restart,
+                                    variant,
+                                    orthog,
+                                    reorth,
+                                    pc_side: PcSide::Right,
+                                    pc: PcKind::MpiBlockJacobiIlu0Local,
+                                });
+                            }
+                            runs.push(Self {
+                                restart,
+                                variant,
+                                orthog,
+                                reorth,
+                                pc_side: PcSide::Right,
+                                pc: PcKind::JacobiWeak,
                             });
                             runs.push(Self {
                                 restart,
@@ -579,8 +601,10 @@ mod complex_demo {
     impl PcKind {
         fn label(&self) -> &'static str {
             match self {
-                Self::None => "none",
-                Self::Jacobi => "jacobi",
+                Self::None => "none (unpreconditioned reference)",
+                Self::JacobiWeak => "jacobi (weak baseline)",
+                Self::Ilu0Local => "local ILU(0) (strong baseline)",
+                Self::MpiBlockJacobiIlu0Local => "MPI block-Jacobi + local ILU(0)",
             }
         }
     }
@@ -629,12 +653,45 @@ mod complex_demo {
     ) -> Result<ResultRow, KError> {
         let b = &problem.rhs;
         let effective_pc_side = normalized_fgmres_side(spec.pc_side);
-        let mut jacobi_pc: Option<Jacobi> = None;
+        enum PcHandle {
+            Jacobi(Jacobi),
+            Ilu0(IluCsr),
+            MpiBlockJacobiIlu0(IluCsr),
+        }
+
+        impl PcHandle {
+            fn as_kpc_mut(&mut self) -> &mut dyn KPreconditioner<Scalar = S> {
+                match self {
+                    Self::Jacobi(pc) => pc,
+                    Self::Ilu0(pc) => pc,
+                    Self::MpiBlockJacobiIlu0(pc) => pc,
+                }
+            }
+        }
+
+        let mut pc: Option<PcHandle> = None;
         let setup_start = Instant::now();
-        if matches!(spec.pc, PcKind::Jacobi) {
-            let mut pc = Jacobi::new();
-            pc.setup(problem.csr_for_pc.as_ref())?;
-            jacobi_pc = Some(pc);
+        match spec.pc {
+            PcKind::None => {}
+            PcKind::JacobiWeak => {
+                let mut jacobi = Jacobi::new();
+                jacobi.setup(problem.csr_for_pc.as_ref())?;
+                pc = Some(PcHandle::Jacobi(jacobi));
+            }
+            PcKind::Ilu0Local => {
+                let mut cfg = IluCsrConfig::default();
+                cfg.kind = IluKind::Ilu0;
+                let mut ilu = IluCsr::new_with_config(cfg);
+                ilu.setup(problem.csr_for_pc.as_ref())?;
+                pc = Some(PcHandle::Ilu0(ilu));
+            }
+            PcKind::MpiBlockJacobiIlu0Local => {
+                let mut cfg = IluCsrConfig::default();
+                cfg.kind = IluKind::Ilu0;
+                let mut ilu = IluCsr::new_with_config(cfg);
+                ilu.setup(problem.csr_for_pc.as_ref())?;
+                pc = Some(PcHandle::MpiBlockJacobiIlu0(ilu));
+            }
         }
         let setup_secs = setup_start.elapsed().as_secs_f64();
         for _ in 0..bench_cfg.warmup_runs {
@@ -644,9 +701,7 @@ mod complex_demo {
             solver.setup_workspace(&mut workspace);
             let _ = solver.solve_k(
                 problem.op.as_ref(),
-                jacobi_pc
-                    .as_mut()
-                    .map(|pc| pc as &mut dyn KPreconditioner<Scalar = S>),
+                pc.as_mut().map(PcHandle::as_kpc_mut),
                 b,
                 &mut x,
                 effective_pc_side,
@@ -668,9 +723,7 @@ mod complex_demo {
             solver.setup_workspace(&mut workspace);
             let stats = solver.solve_k(
                 problem.op.as_ref(),
-                jacobi_pc
-                    .as_mut()
-                    .map(|pc| pc as &mut dyn KPreconditioner<Scalar = S>),
+                pc.as_mut().map(PcHandle::as_kpc_mut),
                 b,
                 &mut x,
                 effective_pc_side,
