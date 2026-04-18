@@ -36,7 +36,7 @@ mod complex_demo {
     use kryst::preconditioner::Preconditioner;
     use kryst::preconditioner::jacobi::Jacobi;
     use kryst::solver::LinearSolver;
-    use kryst::solver::fgmres::{FgmresSolver, FgmresVariant};
+    use kryst::solver::fgmres::{FgmresSolver, FgmresVariant, Orthog};
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
     use kryst::utils::reduction::ReductOptions;
@@ -164,10 +164,7 @@ mod complex_demo {
                 println!("{}", "-".repeat(if include_dof_col { 160 } else { 146 }));
             }
 
-            let runs = [
-                RunSpec::fgmres_jacobi_right(50),
-                RunSpec::fgmres_none_right(50),
-            ];
+            let runs = RunSpec::build_default_matrix(&config);
 
             for spec in runs {
                 match run_once(&problem, &spec, &config) {
@@ -219,7 +216,7 @@ mod complex_demo {
                         if rank == 0 {
                             println!(
                                 "{:<36} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
-                                spec.name,
+                                spec.method_label(),
                                 "FAIL",
                                 "FAIL",
                                 "FAIL",
@@ -316,8 +313,10 @@ mod complex_demo {
     }
 
     struct RunSpec {
-        name: &'static str,
         restart: usize,
+        variant: FgmresVariant,
+        orthog: Orthog,
+        reorth: ReorthPolicy,
         pc_side: PcSide,
         pc: PcKind,
     }
@@ -327,10 +326,15 @@ mod complex_demo {
         Jacobi,
     }
 
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Debug)]
     struct BenchmarkConfig {
         warmup_runs: usize,
         measured_runs: usize,
+        restarts: Vec<usize>,
+        include_restart_200: bool,
+        variants: Vec<FgmresVariant>,
+        orthogs: Vec<Orthog>,
+        reorths: Vec<ReorthPolicy>,
     }
 
     impl Default for BenchmarkConfig {
@@ -338,6 +342,11 @@ mod complex_demo {
             Self {
                 warmup_runs: 1,
                 measured_runs: 5,
+                restarts: vec![50, 100, 150],
+                include_restart_200: false,
+                variants: vec![FgmresVariant::Classical],
+                orthogs: vec![Orthog::Classical],
+                reorths: vec![ReorthPolicy::IfNeeded],
             }
         }
     }
@@ -367,14 +376,47 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--warmup-runs N] [--measured-runs N]"
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--warmup-runs N] [--measured-runs N] [--restarts csv] [--include-restart-200] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--warmup-runs N] [--measured-runs N]"
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--warmup-runs N] [--measured-runs N] [--restarts csv] [--include-restart-200] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
                             );
                         }
                         std::process::exit(0);
+                    }
+                    "--restarts" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput("missing value for --restarts".into()));
+                        };
+                        cfg.restarts = parse_usize_csv("--restarts", &v)?;
+                    }
+                    "--include-restart-200" => {
+                        cfg.include_restart_200 = true;
+                    }
+                    "--fgmres-variant" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --fgmres-variant".into(),
+                            ));
+                        };
+                        cfg.variants = parse_variant_csv("--fgmres-variant", &v)?;
+                    }
+                    "--fgmres-orthog" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --fgmres-orthog".into(),
+                            ));
+                        };
+                        cfg.orthogs = parse_orthog_csv("--fgmres-orthog", &v)?;
+                    }
+                    "--fgmres-reorth" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --fgmres-reorth".into(),
+                            ));
+                        };
+                        cfg.reorths = parse_reorth_csv("--fgmres-reorth", &v)?;
                     }
                     _ => {}
                 }
@@ -383,6 +425,9 @@ mod complex_demo {
                 return Err(KError::InvalidInput(
                     "--measured-runs must be at least 1".into(),
                 ));
+            }
+            if cfg.include_restart_200 && !cfg.restarts.contains(&200) {
+                cfg.restarts.push(200);
             }
             Ok(cfg)
         }
@@ -396,23 +441,161 @@ mod complex_demo {
         })
     }
 
+    fn parse_usize_csv(flag: &str, value: &str) -> Result<Vec<usize>, KError> {
+        let vals = value
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|v| parse_positive_usize(flag, v))
+            .collect::<Result<Vec<_>, _>>()?;
+        if vals.is_empty() {
+            return Err(KError::InvalidInput(format!(
+                "{flag} expects at least one integer value"
+            )));
+        }
+        Ok(vals)
+    }
+
+    fn parse_variant(token: &str) -> Result<FgmresVariant, KError> {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "classical" => Ok(FgmresVariant::Classical),
+            "pipelined" => Ok(FgmresVariant::Pipelined),
+            other => Err(KError::InvalidInput(format!(
+                "invalid fgmres variant '{other}', expected classical|pipelined"
+            ))),
+        }
+    }
+
+    fn parse_orthog(token: &str) -> Result<Orthog, KError> {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "classical" | "cgs" => Ok(Orthog::Classical),
+            "modified" | "mgs" => Ok(Orthog::Modified),
+            other => Err(KError::InvalidInput(format!(
+                "invalid orthog '{other}', expected classical|cgs|modified|mgs"
+            ))),
+        }
+    }
+
+    fn parse_reorth(token: &str) -> Result<ReorthPolicy, KError> {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "never" => Ok(ReorthPolicy::Never),
+            "ifneeded" | "if-needed" => Ok(ReorthPolicy::IfNeeded),
+            "always" => Ok(ReorthPolicy::Always),
+            other => Err(KError::InvalidInput(format!(
+                "invalid reorth '{other}', expected never|ifneeded|always"
+            ))),
+        }
+    }
+
+    fn parse_variant_csv(flag: &str, value: &str) -> Result<Vec<FgmresVariant>, KError> {
+        parse_csv(flag, value, parse_variant)
+    }
+
+    fn parse_orthog_csv(flag: &str, value: &str) -> Result<Vec<Orthog>, KError> {
+        parse_csv(flag, value, parse_orthog)
+    }
+
+    fn parse_reorth_csv(flag: &str, value: &str) -> Result<Vec<ReorthPolicy>, KError> {
+        parse_csv(flag, value, parse_reorth)
+    }
+
+    fn parse_csv<T, F>(flag: &str, value: &str, mut parser: F) -> Result<Vec<T>, KError>
+    where
+        F: FnMut(&str) -> Result<T, KError>,
+    {
+        let vals = value
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(&mut parser)
+            .collect::<Result<Vec<_>, _>>()?;
+        if vals.is_empty() {
+            return Err(KError::InvalidInput(format!(
+                "{flag} expects at least one value"
+            )));
+        }
+        Ok(vals)
+    }
+
     impl RunSpec {
-        fn fgmres_jacobi_right(restart: usize) -> Self {
-            Self {
-                name: "FGMRES(restart) + Jacobi (R)",
-                restart,
-                pc_side: PcSide::Right,
-                pc: PcKind::Jacobi,
+        fn build_default_matrix(cfg: &BenchmarkConfig) -> Vec<Self> {
+            let mut runs = Vec::new();
+            for &restart in &cfg.restarts {
+                for &variant in &cfg.variants {
+                    for &orthog in &cfg.orthogs {
+                        for &reorth in &cfg.reorths {
+                            runs.push(Self {
+                                restart,
+                                variant,
+                                orthog,
+                                reorth,
+                                pc_side: PcSide::Right,
+                                pc: PcKind::Jacobi,
+                            });
+                            runs.push(Self {
+                                restart,
+                                variant,
+                                orthog,
+                                reorth,
+                                pc_side: PcSide::Right,
+                                pc: PcKind::None,
+                            });
+                        }
+                    }
+                }
             }
+            runs
         }
 
-        fn fgmres_none_right(restart: usize) -> Self {
-            Self {
-                name: "FGMRES(restart) + None (R)",
-                restart,
-                pc_side: PcSide::Right,
-                pc: PcKind::None,
+        fn method_label(&self) -> String {
+            format!(
+                "FGMRES+{} [m={}, v={}, orth={}, reorth={}, pc={}]",
+                self.pc.label(),
+                self.restart,
+                variant_label(self.variant),
+                orthog_label(self.orthog),
+                reorth_label(self.reorth),
+                pc_side_label(self.pc_side)
+            )
+        }
+    }
+
+    impl PcKind {
+        fn label(&self) -> &'static str {
+            match self {
+                Self::None => "none",
+                Self::Jacobi => "jacobi",
             }
+        }
+    }
+
+    fn variant_label(variant: FgmresVariant) -> &'static str {
+        match variant {
+            FgmresVariant::Classical => "classical",
+            FgmresVariant::Pipelined => "pipelined",
+        }
+    }
+
+    fn orthog_label(orthog: Orthog) -> &'static str {
+        match orthog {
+            Orthog::Classical => "classical",
+            Orthog::Modified => "modified",
+        }
+    }
+
+    fn reorth_label(reorth: ReorthPolicy) -> &'static str {
+        match reorth {
+            ReorthPolicy::Never => "never",
+            ReorthPolicy::IfNeeded => "if-needed",
+            ReorthPolicy::Always => "always",
+        }
+    }
+
+    fn pc_side_label(pc_side: PcSide) -> &'static str {
+        match pc_side {
+            PcSide::Right => "right",
+            PcSide::Left => "left",
+            PcSide::Symmetric => "symmetric",
         }
     }
 
@@ -432,7 +615,7 @@ mod complex_demo {
         let setup_secs = setup_start.elapsed().as_secs_f64();
         for _ in 0..bench_cfg.warmup_runs {
             let mut x = vec![S::zero(); problem.local_n];
-            let mut solver = configured_solver(spec.restart);
+            let mut solver = configured_solver(spec);
             let mut workspace = Workspace::new(problem.local_n);
             solver.setup_workspace(&mut workspace);
             let _ = solver.solve_k(
@@ -456,7 +639,7 @@ mod complex_demo {
             let mut x = vec![S::zero(); problem.local_n];
             problem.comm.barrier();
             let start = Instant::now();
-            let mut solver = configured_solver(spec.restart);
+            let mut solver = configured_solver(spec);
             let mut workspace = Workspace::new(problem.local_n);
             solver.setup_workspace(&mut workspace);
             let stats = solver.solve_k(
@@ -506,7 +689,7 @@ mod complex_demo {
         };
 
         Ok(ResultRow {
-            method: format!("{} (m = {})", spec.name, spec.restart),
+            method: spec.method_label(),
             setup_secs,
             median_solve_secs,
             min_solve_secs,
@@ -519,10 +702,11 @@ mod complex_demo {
         })
     }
 
-    fn configured_solver(restart: usize) -> FgmresSolver {
-        let mut solver = FgmresSolver::new(1e-8, 500, restart);
-        solver.variant = FgmresVariant::Pipelined;
-        solver.reorth = ReorthPolicy::IfNeeded;
+    fn configured_solver(spec: &RunSpec) -> FgmresSolver {
+        let mut solver = FgmresSolver::new(1e-8, 500, spec.restart);
+        solver.variant = spec.variant;
+        solver.orthog = spec.orthog;
+        solver.reorth = spec.reorth;
         solver.atol = 1e-12;
         solver.dtol = 1e6;
         solver
