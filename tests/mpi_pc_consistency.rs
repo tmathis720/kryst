@@ -5,6 +5,7 @@ mod fixtures;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
@@ -84,8 +85,17 @@ fn reason_id(reason: ConvergedReason) -> f64 {
     }
 }
 
+fn mpi_test_guard() -> MutexGuard<'static, ()> {
+    static MPI_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    MPI_TEST_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("mpi test mutex poisoned")
+}
+
 #[test]
 fn mpi_convergence_reason_consistent_across_ranks() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     comm.set_reproducible(true);
 
@@ -134,6 +144,7 @@ fn mpi_convergence_reason_consistent_across_ranks() {
 
 #[test]
 fn mpi_pcg_matches_serial_residual_iterations_and_rank0_monitor_policy() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     comm.set_reproducible(true);
 
@@ -280,6 +291,7 @@ fn mpi_gamg_distributed_policy_options_parse() {
 
 #[test]
 fn mpi_block_jacobi_native_strict_supported_local_pcs_consistent() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     comm.set_reproducible(true);
 
@@ -318,6 +330,7 @@ fn mpi_block_jacobi_native_strict_supported_local_pcs_consistent() {
 
 #[test]
 fn mpi_block_jacobi_native_halo_vs_strict_match_for_new_local_pcs() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     comm.set_reproducible(true);
 
@@ -388,6 +401,7 @@ fn mpi_mg_distributed_coarse_route_options_parse() {
 
 #[test]
 fn mpi_pc_diagnostics_reports_negotiated_distributed_mode() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     comm.set_reproducible(true);
     if comm.size() <= 1 {
@@ -425,6 +439,7 @@ fn mpi_pc_diagnostics_reports_negotiated_distributed_mode() {
 
 #[test]
 fn mpi_strict_mode_rejects_adapter_masking() {
+    let _guard = mpi_test_guard();
     let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
     comm.set_reproducible(true);
     if comm.size() <= 1 {
