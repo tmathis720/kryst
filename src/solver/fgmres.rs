@@ -42,6 +42,18 @@ pub enum FgmresVariant {
     Pipelined,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResidualCheckPolicy {
+    /// Recompute only at startup and restart boundaries (plus safety checks).
+    RestartOnly,
+    /// Recompute when recurrence indicates a convergence candidate.
+    OnConvergence,
+    /// Recompute every inner iteration.
+    EveryIteration,
+    /// Recompute every inner iteration and emit diagnostic residual logs.
+    Debug,
+}
+
 pub struct FgmresSolver {
     pub rtol: f64,
     pub atol: f64,
@@ -61,15 +73,19 @@ pub struct FgmresSolver {
     pub reorth: ReorthPolicy,
     /// Threshold used by the "if-needed" reorthogonalization strategy
     pub reorth_tol: f64,
-    /// If true, perform additional true-residual checks inside restart cycles for diagnostics.
-    pub strict_true_residual_cadence: bool,
+    /// Controls how often explicit true residual recomputation is performed.
+    pub residual_check_policy: ResidualCheckPolicy,
 }
 
 impl FgmresSolver {
     #[cfg(feature = "logging")]
     #[inline]
-    fn monitor_residual_semantics_tag() -> &'static str {
-        "monitor_residual=true_norm"
+    fn monitor_residual_semantics_tag(initial: bool) -> &'static str {
+        if initial {
+            "monitor_residual=initial_true_norm"
+        } else {
+            "monitor_residual=recurrence_norm"
+        }
     }
 
     pub fn new(rtol: f64, maxits: usize, restart: usize) -> Self {
@@ -87,8 +103,21 @@ impl FgmresSolver {
             variant: FgmresVariant::Classical,
             reorth: ReorthPolicy::IfNeeded,
             reorth_tol: 0.7,
-            strict_true_residual_cadence: false,
+            residual_check_policy: ResidualCheckPolicy::OnConvergence,
         }
+    }
+
+    #[inline]
+    fn should_check_true_residual_every_iteration(&self) -> bool {
+        matches!(
+            self.residual_check_policy,
+            ResidualCheckPolicy::EveryIteration | ResidualCheckPolicy::Debug
+        )
+    }
+
+    #[inline]
+    fn is_debug_residual_policy(&self) -> bool {
+        matches!(self.residual_check_policy, ResidualCheckPolicy::Debug)
     }
 
     fn reduction_model(&self) -> ReductionModel {
@@ -224,10 +253,11 @@ impl FgmresSolver {
         if log::log_enabled!(log::Level::Info) {
             log::info!(
                 "FGMRES monitor semantics: {}",
-                Self::monitor_residual_semantics_tag()
+                Self::monitor_residual_semantics_tag(true)
             );
         }
 
+        // Iteration 0 monitor payload is the true residual norm ||b - A x0||_2.
         if call_monitors(mons, 0, res, pipeline_reductions) {
             let true_res = recompute_true_residual_norm_s(
                 a,
@@ -524,16 +554,16 @@ impl FgmresSolver {
                 total_iters += 1;
                 arnoldi_steps = j + 1;
 
-                if call_monitors(mons, total_iters, res, pipeline_reductions) {
-                    let true_res = recompute_true_residual_norm_s(
-                        a,
-                        b,
-                        x,
-                        comm,
-                        red.engine(),
-                        &mut ws.tmp1[..n],
-                        &mut ws.bridge,
+                #[cfg(feature = "logging")]
+                if total_iters == 1 && log::log_enabled!(log::Level::Info) {
+                    log::info!(
+                        "FGMRES monitor semantics: {}",
+                        Self::monitor_residual_semantics_tag(false)
                     );
+                }
+
+                // Inner-iteration monitor payload is the Hessenberg recurrence residual |g[j+1]|.
+                if call_monitors(mons, total_iters, res, pipeline_reductions) {
                     let counters = crate::utils::convergence::SolverCounters {
                         num_global_reductions: pipeline_reductions,
                         overlap_global_reductions: async_waits,
@@ -541,13 +571,13 @@ impl FgmresSolver {
                     };
                     return Ok(SolveStats::new(
                         total_iters,
-                        true_res,
+                        res,
                         ConvergedReason::StoppedByMonitor,
                     )
                     .with_counters(counters));
                 }
 
-                if self.strict_true_residual_cadence {
+                if self.should_check_true_residual_every_iteration() {
                     let true_res = recompute_true_residual_norm_s(
                         a,
                         b,
@@ -557,15 +587,17 @@ impl FgmresSolver {
                         &mut ws.tmp1[..n],
                         &mut ws.bridge,
                     );
-                    log_residuals(
-                        total_iters,
-                        "FGMRES",
-                        ResidualSnapshot {
-                            true_residual: true_res,
-                            preconditioned_residual: true_res,
-                            recurrence_residual: Some(res),
-                        },
-                    );
+                    if self.is_debug_residual_policy() {
+                        log_residuals(
+                            total_iters,
+                            "FGMRES",
+                            ResidualSnapshot {
+                                true_residual: true_res,
+                                preconditioned_residual: true_res,
+                                recurrence_residual: Some(res),
+                            },
+                        );
+                    }
                 }
 
                 if let Some(reason) = ConvergedReason::from_non_finite(res) {
@@ -679,14 +711,11 @@ impl FgmresSolver {
                 }
             }
 
-            let true_res = recompute_true_residual_norm_s(
-                a,
-                b,
-                x,
-                comm,
-                red.engine(),
-                &mut ws.tmp1[..n],
-                &mut ws.bridge,
+            let check_true_on_restart = matches!(
+                self.residual_check_policy,
+                ResidualCheckPolicy::RestartOnly
+                    | ResidualCheckPolicy::EveryIteration
+                    | ResidualCheckPolicy::Debug
             );
             stats.final_residual = true_res;
             if let Some(reason) = converged_reason {
@@ -761,17 +790,7 @@ impl FgmresSolver {
         }
 
         stats.iterations = total_iters;
-
-        let true_res = recompute_true_residual_norm_s(
-            a,
-            b,
-            x,
-            comm,
-            red.engine(),
-            &mut ws.tmp1[..n],
-            &mut ws.bridge,
-        );
-        stats.final_residual = true_res;
+        let true_res = stats.final_residual;
 
         if matches!(stats.reason, ConvergedReason::Continued) {
             stats.reason = if true_res <= self.atol {
@@ -904,8 +923,16 @@ impl FgmresSolver {
         self.variant = variant;
     }
 
+    pub fn set_residual_check_policy(&mut self, policy: ResidualCheckPolicy) {
+        self.residual_check_policy = policy;
+    }
+
     pub fn set_strict_true_residual_cadence(&mut self, flag: bool) {
-        self.strict_true_residual_cadence = flag;
+        self.residual_check_policy = if flag {
+            ResidualCheckPolicy::EveryIteration
+        } else {
+            ResidualCheckPolicy::OnConvergence
+        };
     }
 
     #[cfg(test)]
