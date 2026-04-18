@@ -39,7 +39,7 @@ fn fgmres_uses_apply_mut() {
     let b = [1.0f64, 2.0];
     let mut x = [0.0f64; 2];
     let mut work = Workspace::new(2);
-    solver
+    let _ = solver
         .solve_f64(
             &a,
             Some(&mut pc),
@@ -56,4 +56,35 @@ fn fgmres_uses_apply_mut() {
         hits.load(Ordering::Relaxed) > 0,
         "apply_mut was not invoked"
     );
+}
+
+#[test]
+fn fgmres_solver_rejects_non_right_pc_side() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let mut pc = MutableCountPc { hits };
+
+    let a = faer::Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+    let mut solver = FgmresSolver::new(1e-6, 10, 2);
+    let b = [1.0f64, 2.0];
+    let mut x = [0.0f64; 2];
+    let mut work = Workspace::new(2);
+    let err = solver
+        .solve_f64(
+            &a,
+            Some(&mut pc),
+            &b,
+            &mut x,
+            PcSide::Left,
+            &UniverseComm::NoComm(kryst::parallel::NoComm),
+            None,
+            Some(&mut work),
+        )
+        .expect_err("FGMRES must reject non-right PC side");
+    match err {
+        KError::InvalidInput(msg) => {
+            assert!(msg.contains("FGMRES"));
+            assert!(msg.to_lowercase().contains("right preconditioning"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
