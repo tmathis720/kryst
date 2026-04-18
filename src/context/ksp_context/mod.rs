@@ -25,7 +25,7 @@
 //! | Solver            | Allowed sides   | Notes                                                   |
 //! |-------------------|-----------------|---------------------------------------------------------|
 //! | `CG`, `PCG`       | Left only       | Requires HPD `A` and HPD left preconditioner `M`.       |
-//! | `FGMRES`          | Left or Right   | Uses right-preconditioned Arnoldi; Left/Symmetric map to Right. |
+//! | `FGMRES`          | Left/Right/Symmetric (requested) | Uses right-preconditioned Arnoldi; effective side is always Right (Left/Symmetric are normalized). |
 //! | `PCA-GMRES`       | Left or Right   | Mapped to [`PcaPcMode`] during setup.                   |
 //! | All other solvers | Left or Right   | `Symmetric` behaves like left but is passed to PCs.     |
 //!
@@ -519,6 +519,13 @@ impl KspContext {
                 s => s,
             },
         }
+    }
+
+    #[inline]
+    fn effective_pc_side(&self) -> PcSide {
+        self.solver_type
+            .map(|st| Self::effective_side_for_solver(self.pc_side, st))
+            .unwrap_or(self.pc_side)
     }
 
     fn parse_reorth_policy(label: &str) -> Result<ReorthPolicy, KError> {
@@ -1601,7 +1608,24 @@ impl KspContext {
         insert_value(&mut solver_config, "dtol", self.dtol);
         insert_value(&mut solver_config, "maxits", self.maxits);
         insert_value(&mut solver_config, "restart", self.restart);
-        insert_value(&mut solver_config, "pc_side", format!("{:?}", self.pc_side));
+        let effective_pc_side = self.effective_pc_side();
+        insert_value(
+            &mut solver_config,
+            "pc_side_requested",
+            format!("{:?}", self.pc_side),
+        );
+        insert_value(
+            &mut solver_config,
+            "pc_side_effective",
+            format!("{:?}", effective_pc_side),
+        );
+        if effective_pc_side != self.pc_side {
+            insert_value(
+                &mut solver_config,
+                "pc_side_note",
+                "normalized to solver-compatible side",
+            );
+        }
         insert_value(
             &mut solver_config,
             "pc_reuse",
@@ -2521,7 +2545,7 @@ impl KspContext {
         {
             let comm = amat.comm();
             log::debug!(
-                "setup start: comm_id={} size={} rank={} dims=({},{}) pc_dims=({},{}) pc_reuse={:?} solver={:?} pc_side={:?} A_ids=({:?},{:?}) P_ids=({:?},{:?})",
+                "setup start: comm_id={} size={} rank={} dims=({},{}) pc_dims=({},{}) pc_reuse={:?} solver={:?} pc_side_requested={:?} pc_side_effective={:?} A_ids=({:?},{:?}) P_ids=({:?},{:?})",
                 comm.id(),
                 comm.size(),
                 comm.rank(),
@@ -2532,6 +2556,7 @@ impl KspContext {
                 self.pc_reuse,
                 self.solver_type,
                 self.pc_side,
+                self.effective_pc_side(),
                 amat.structure_id(),
                 amat.values_id(),
                 pmat.structure_id(),
@@ -2853,7 +2878,7 @@ impl KspContext {
         {
             let comm = amat.comm();
             log::debug!(
-                "solve start: comm_id={} size={} rank={} dims=({},{}) rhs_len={} x_len={} solver={:?} pc_side={:?} pc_reuse={:?} A_ids=({:?},{:?}) P_ids=({:?},{:?})",
+                "solve start: comm_id={} size={} rank={} dims=({},{}) rhs_len={} x_len={} solver={:?} pc_side_requested={:?} pc_side_effective={:?} pc_reuse={:?} A_ids=({:?},{:?}) P_ids=({:?},{:?})",
                 comm.id(),
                 comm.size(),
                 comm.rank(),
@@ -2863,6 +2888,7 @@ impl KspContext {
                 x.len(),
                 self.solver_type,
                 self.pc_side,
+                self.effective_pc_side(),
                 self.pc_reuse,
                 amat.structure_id(),
                 amat.values_id(),
@@ -3074,7 +3100,7 @@ impl KspContext {
                             pc_k.as_deref_mut(),
                             b,
                             x,
-                            self.pc_side,
+                            self.effective_pc_side(),
                             &comm,
                             monitors,
                             work,
@@ -4030,10 +4056,7 @@ impl KspContext {
 
     /// Configure the underlying solver based on the requested preconditioning side.
     fn configure_pc_side(&mut self) -> Result<(), KError> {
-        let side = self
-            .solver_type
-            .map(|st| Self::effective_side_for_solver(self.pc_side, st))
-            .unwrap_or(self.pc_side);
+        let side = self.effective_pc_side();
 
         if let Some(SolverType::PcaGmres) = self.solver_type {
             if let Some(s) = self
@@ -4696,6 +4719,21 @@ mod tests {
         ksp.set_pc_side(PcSide::Right);
         ksp.set_type(SolverType::Fgmres).unwrap();
         ksp.try_set_pc_side(PcSide::Left).unwrap();
+    }
+
+    #[test]
+    fn fgmres_effective_side_is_always_right() {
+        let mut ksp = KspContext::new();
+        ksp.set_type(SolverType::Fgmres).unwrap();
+
+        ksp.try_set_pc_side(PcSide::Left).unwrap();
+        assert_eq!(ksp.effective_pc_side(), PcSide::Right);
+
+        ksp.try_set_pc_side(PcSide::Symmetric).unwrap();
+        assert_eq!(ksp.effective_pc_side(), PcSide::Right);
+
+        ksp.try_set_pc_side(PcSide::Right).unwrap();
+        assert_eq!(ksp.effective_pc_side(), PcSide::Right);
     }
 
     #[test]
