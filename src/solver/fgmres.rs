@@ -16,6 +16,7 @@ use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
+use crate::solver::common::exit_checks::true_residual_converged_reason;
 use crate::solver::common::{ReductCtx, call_monitors, recompute_true_residual_norm_s};
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
@@ -321,6 +322,7 @@ impl FgmresSolver {
 
             let mut arnoldi_steps = 0usize;
             let mut converged = false;
+            let mut converged_reason: Option<ConvergedReason> = None;
 
             for j in 0..m_this {
                 match self.variant {
@@ -502,6 +504,19 @@ impl FgmresSolver {
                     }
                 }
 
+                let h_subdiag = ws.h_at(j + 1, j).abs();
+                if self.happy_breakdown && h_subdiag <= self.haptol {
+                    *ws.h_at_mut(j + 1, j) = S::zero();
+                    ws.apply_prev_givens_to_col(j, j);
+                    ws.g[j + 1] = S::zero();
+                    res = R::zero();
+                    total_iters += 1;
+                    arnoldi_steps = j + 1;
+                    converged = true;
+                    converged_reason = Some(ConvergedReason::ConvergedHappyBreakdown);
+                    break;
+                }
+
                 ws.apply_prev_givens_to_col(j, j);
                 ws.apply_final_givens_and_update_g(j);
 
@@ -618,6 +633,7 @@ impl FgmresSolver {
                 ) {
                     stats.iterations = total_iters;
                     converged = true;
+                    converged_reason = Some(reason);
                     break;
                 }
             }
@@ -673,8 +689,13 @@ impl FgmresSolver {
                 &mut ws.bridge,
             );
             stats.final_residual = true_res;
+            if let Some(reason) = converged_reason {
+                stats.reason = reason;
+            }
             if true_res <= thr {
-                stats.reason = if true_res <= self.atol {
+                stats.reason = if matches!(stats.reason, ConvergedReason::ConvergedHappyBreakdown) {
+                    ConvergedReason::ConvergedHappyBreakdown
+                } else if true_res <= self.atol {
                     ConvergedReason::ConvergedAtol
                 } else {
                     ConvergedReason::ConvergedRtol
@@ -688,11 +709,11 @@ impl FgmresSolver {
             }
 
             if converged {
-                stats.reason = if res <= self.atol {
-                    ConvergedReason::ConvergedAtol
-                } else {
-                    ConvergedReason::ConvergedRtol
-                };
+                stats.reason = converged_reason
+                    .or_else(|| {
+                        true_residual_converged_reason(true_res, bnorm, self.atol, self.rtol)
+                    })
+                    .unwrap_or(ConvergedReason::DivergedBreakdown);
                 break;
             }
 
