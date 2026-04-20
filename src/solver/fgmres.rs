@@ -170,7 +170,13 @@ impl FgmresSolver {
         }
     }
 
-    fn orthogonalize_cgs(&self, ws: &mut Workspace, red: &ReductCtx, n: usize, j: usize) -> R {
+    fn orthogonalize_cgs(
+        &self,
+        ws: &mut Workspace,
+        red: &ReductCtx,
+        n: usize,
+        j: usize,
+    ) -> (R, bool) {
         let wnorm0 = if matches!(self.cgs_refinement_mode(), CgsRefinement::IfNeeded) {
             red.norm2(&ws.tmp2[..n])
         } else {
@@ -195,7 +201,8 @@ impl FgmresSolver {
         }
 
         let mut hnext = red.norm2(&ws.tmp2[..n]);
-        if self.should_run_cgs_refinement(wnorm0, hnext) {
+        let ran_refinement = self.should_run_cgs_refinement(wnorm0, hnext);
+        if ran_refinement {
             let mut corr: SmallVec<[S; 32]> = SmallVec::with_capacity(j + 1);
             corr.resize(j + 1, S::zero());
             {
@@ -219,10 +226,16 @@ impl FgmresSolver {
         for i in 0..=j {
             *ws.h_at_mut(i, j) = hvals[i];
         }
-        hnext
+        (hnext, ran_refinement)
     }
 
-    fn orthogonalize_mgs(&self, ws: &mut Workspace, red: &ReductCtx, n: usize, j: usize) -> R {
+    fn orthogonalize_mgs(
+        &self,
+        ws: &mut Workspace,
+        red: &ReductCtx,
+        n: usize,
+        j: usize,
+    ) -> (R, bool) {
         for i in 0..=j {
             let hij = red.dot(&ws.v_mem[i * n..(i + 1) * n], &ws.tmp2[..n]);
             *ws.h_at_mut(i, j) = hij;
@@ -231,7 +244,7 @@ impl FgmresSolver {
                 *w_i -= hij * vi_val;
             }
         }
-        red.norm2(&ws.tmp2[..n])
+        (red.norm2(&ws.tmp2[..n]), false)
     }
 
     // legacy helpers for in-place Givens rotations removed; Workspace now handles
@@ -337,6 +350,9 @@ impl FgmresSolver {
             .unwrap_or_else(|| comm.reduction_engine(ws.reduction_options()));
         let mut pipeline_reductions = 0usize;
         let mut async_waits = 0usize;
+        let mut orthogonalization_passes = 0usize;
+        let mut orthogonalization_rank_loss = false;
+        let mut max_orthogonality_loss_estimate = R::zero();
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
         #[cfg(feature = "logging")]
@@ -370,7 +386,12 @@ impl FgmresSolver {
                 residual_replacements: async_waits,
             };
             let mut stats = SolveStats::new(0, true_res, ConvergedReason::StoppedByMonitor)
-                .with_counters(counters);
+                .with_counters(counters)
+                .with_orthogonalization_diagnostics(
+                    orthogonalization_passes,
+                    orthogonalization_rank_loss,
+                    max_orthogonality_loss_estimate,
+                );
             stats.final_recurrence_residual = Some(res);
             stats.final_true_residual = Some(true_res);
             stats.last_preconditioned_residual = last_preconditioned_residual;
@@ -427,7 +448,11 @@ impl FgmresSolver {
                 metrics.reductions = reductions;
                 stats.metrics = metrics;
             }
-            return Ok(stats);
+            return Ok(stats.with_orthogonalization_diagnostics(
+                orthogonalization_passes,
+                orthogonalization_rank_loss,
+                max_orthogonality_loss_estimate,
+            ));
         }
 
         let mut stagnation_residuals: Vec<R> = Vec::with_capacity(6);
@@ -476,10 +501,12 @@ impl FgmresSolver {
                             metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
                         }
 
-                        let hij1 = match self.orthog {
+                        let wnorm_before = red.norm2(&ws.tmp2[..n]);
+                        let (hij1, used_second_pass) = match self.orthog {
                             OrthogMethod::ClassicalGS => self.orthogonalize_cgs(ws, &red, n, j),
                             OrthogMethod::ModifiedGS => self.orthogonalize_mgs(ws, &red, n, j),
                         };
+                        orthogonalization_passes += 1 + usize::from(used_second_pass);
                         #[cfg(feature = "metrics")]
                         {
                             let dot_reductions = match (self.orthog, self.cgs_refinement_mode()) {
@@ -491,6 +518,13 @@ impl FgmresSolver {
                             metrics.bytes_reduced += dot_reductions * std::mem::size_of::<R>();
                         }
                         *ws.h_at_mut(j + 1, j) = S::from_real(hij1);
+                        if wnorm_before > R::zero() {
+                            let ratio = (hij1 / wnorm_before).clamp(R::zero(), R::one());
+                            let loss_estimate = (R::one() - ratio).max(R::zero());
+                            if loss_estimate > max_orthogonality_loss_estimate {
+                                max_orthogonality_loss_estimate = loss_estimate;
+                            }
+                        }
 
                         if hij1 > R::default() {
                             let inv = S::from_real(1.0 / hij1);
@@ -565,6 +599,10 @@ impl FgmresSolver {
                             }
                         };
                         pipeline_reductions += reductions;
+                        orthogonalization_passes += match self.reorth {
+                            ReorthPolicy::Always => 2,
+                            _ => 1,
+                        };
                         #[cfg(feature = "metrics")]
                         {
                             let payload_len = ws.pipelined_payload.len();
@@ -575,6 +613,12 @@ impl FgmresSolver {
                 }
 
                 let h_subdiag = ws.h_at(j + 1, j).abs();
+                if h_subdiag <= self.haptol {
+                    let loss_estimate = R::one();
+                    if loss_estimate > max_orthogonality_loss_estimate {
+                        max_orthogonality_loss_estimate = loss_estimate;
+                    }
+                }
                 if self.happy_breakdown && h_subdiag <= self.haptol {
                     *ws.h_at_mut(j + 1, j) = S::zero();
                     ws.apply_prev_givens_to_col(j, j);
@@ -584,6 +628,45 @@ impl FgmresSolver {
                     arnoldi_steps = j + 1;
                     converged = true;
                     converged_reason = Some(ConvergedReason::ConvergedHappyBreakdown);
+                    break;
+                }
+                if h_subdiag <= self.haptol {
+                    orthogonalization_rank_loss = true;
+                    let true_res = recompute_true_residual_norm_s(
+                        a,
+                        b,
+                        x,
+                        comm,
+                        red.engine(),
+                        &mut ws.tmp1[..n],
+                        &mut ws.bridge,
+                    );
+                    stats = SolveStats::new(
+                        total_iters,
+                        true_res,
+                        ConvergedReason::DivergedArnoldiRankLoss,
+                    )
+                    .with_orthogonalization_diagnostics(
+                        orthogonalization_passes,
+                        orthogonalization_rank_loss,
+                        max_orthogonality_loss_estimate,
+                    );
+                    stats.final_true_residual = Some(true_res);
+                    stats.final_recurrence_residual = Some(res);
+                    let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
+                        pc_ref.apply_mut_s(
+                            pc_side,
+                            &ws.tmp1[..n],
+                            &mut ws.tmp2[..n],
+                            &mut ws.bridge,
+                        )?;
+                        red.norm2(&ws.tmp2[..n])
+                    } else {
+                        red.norm2(&ws.tmp1[..n])
+                    };
+                    stats.last_preconditioned_residual = Some(precond_res);
+                    converged = true;
+                    converged_reason = Some(ConvergedReason::DivergedArnoldiRankLoss);
                     break;
                 }
 
@@ -631,7 +714,12 @@ impl FgmresSolver {
                     };
                     let mut stats =
                         SolveStats::new(total_iters, true_res, ConvergedReason::StoppedByMonitor)
-                            .with_counters(counters);
+                            .with_counters(counters)
+                            .with_orthogonalization_diagnostics(
+                                orthogonalization_passes,
+                                orthogonalization_rank_loss,
+                                max_orthogonality_loss_estimate,
+                            );
                     stats.final_recurrence_residual = Some(res);
                     stats.final_true_residual = Some(true_res);
                     stats.last_preconditioned_residual = Some(precond_res);
@@ -686,6 +774,11 @@ impl FgmresSolver {
                         red.norm2(&ws.tmp1[..n])
                     };
                     stats.last_preconditioned_residual = Some(precond_res);
+                    stats = stats.with_orthogonalization_diagnostics(
+                        orthogonalization_passes,
+                        orthogonalization_rank_loss,
+                        max_orthogonality_loss_estimate,
+                    );
                     converged = true;
                     break;
                 }
@@ -746,7 +839,7 @@ impl FgmresSolver {
                         &mut ws.bridge,
                     );
                     let reason = ConvergedReason::from_non_finite(diag.real())
-                        .unwrap_or(ConvergedReason::DivergedBreakdown);
+                        .unwrap_or(ConvergedReason::DivergedReducedSystemSingular);
                     stats = SolveStats::new(total_iters, true_res, reason);
                     stats.final_true_residual = Some(true_res);
                     stats.final_recurrence_residual = Some(res);
@@ -770,7 +863,13 @@ impl FgmresSolver {
                         overlap_global_reductions: async_waits,
                         residual_replacements: async_waits,
                     };
-                    return Ok(stats.with_counters(counters));
+                    return Ok(stats
+                        .with_counters(counters)
+                        .with_orthogonalization_diagnostics(
+                            orthogonalization_passes,
+                            orthogonalization_rank_loss,
+                            max_orthogonality_loss_estimate,
+                        ));
                 }
                 y[i] = sum / diag;
             }
@@ -901,7 +1000,13 @@ impl FgmresSolver {
             overlap_global_reductions: async_waits,
             residual_replacements: async_waits,
         };
-        let stats = stats.with_counters(counters);
+        let stats = stats
+            .with_counters(counters)
+            .with_orthogonalization_diagnostics(
+                orthogonalization_passes,
+                orthogonalization_rank_loss,
+                max_orthogonality_loss_estimate,
+            );
         #[cfg(feature = "metrics")]
         {
             metrics.reductions = reductions;

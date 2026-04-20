@@ -167,7 +167,9 @@ pub fn classify_acceptance(
             }
         }
         ConvergedReason::DivergedBreakdown
+        | ConvergedReason::DivergedArnoldiRankLoss
         | ConvergedReason::DivergedBreakdownBiCG
+        | ConvergedReason::DivergedReducedSystemSingular
         | ConvergedReason::DivergedNan
         | ConvergedReason::DivergedInf
         | ConvergedReason::DivergedIndefiniteMatrix
