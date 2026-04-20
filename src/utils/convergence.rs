@@ -73,8 +73,12 @@ pub enum ConvergedReason {
     DivergedMaxIts,
     /// Diverged due to a breakdown (generic)
     DivergedBreakdown,
+    /// Diverged because the Arnoldi basis lost rank during orthogonalization.
+    DivergedArnoldiRankLoss,
     /// Diverged due to a BiCG-specific breakdown
     DivergedBreakdownBiCG,
+    /// Diverged because the reduced Hessenberg system became singular/near-singular.
+    DivergedReducedSystemSingular,
     /// Diverged because the matrix is indefinite
     DivergedIndefiniteMatrix,
     /// Diverged because the preconditioner is indefinite
@@ -142,7 +146,9 @@ pub fn classify_acceptance_status(
         | ConvergedReason::DivergedIndefiniteMatrix
         | ConvergedReason::DivergedIndefinitePC => AcceptanceStatus::ContractMismatch,
         ConvergedReason::DivergedBreakdown
+        | ConvergedReason::DivergedArnoldiRankLoss
         | ConvergedReason::DivergedBreakdownBiCG
+        | ConvergedReason::DivergedReducedSystemSingular
         | ConvergedReason::DivergedNan
         | ConvergedReason::DivergedInf => AcceptanceStatus::Breakdown,
         ConvergedReason::DivergedDtol
@@ -172,9 +178,10 @@ impl ConvergedReason {
     /// Group reason codes into stable automation categories.
     pub fn category(self) -> Option<ReasonCategory> {
         match self {
-            ConvergedReason::DivergedBreakdown | ConvergedReason::DivergedBreakdownBiCG => {
-                Some(ReasonCategory::Breakdown)
-            }
+            ConvergedReason::DivergedBreakdown
+            | ConvergedReason::DivergedArnoldiRankLoss
+            | ConvergedReason::DivergedBreakdownBiCG
+            | ConvergedReason::DivergedReducedSystemSingular => Some(ReasonCategory::Breakdown),
             ConvergedReason::DivergedNan => Some(ReasonCategory::Nan),
             ConvergedReason::DivergedInf => Some(ReasonCategory::Inf),
             ConvergedReason::DivergedPcSetupFailed => Some(ReasonCategory::PcSetup),
@@ -195,7 +202,9 @@ impl ConvergedReason {
             ConvergedReason::DivergedDtol => "KSP_DIVERGED_DTOL",
             ConvergedReason::DivergedMaxIts => "KSP_DIVERGED_ITS",
             ConvergedReason::DivergedBreakdown => "KSP_DIVERGED_BREAKDOWN",
+            ConvergedReason::DivergedArnoldiRankLoss => "KSP_DIVERGED_BREAKDOWN",
             ConvergedReason::DivergedBreakdownBiCG => "KSP_DIVERGED_BREAKDOWN_BICG",
+            ConvergedReason::DivergedReducedSystemSingular => "KSP_DIVERGED_BREAKDOWN",
             ConvergedReason::DivergedIndefiniteMatrix => "KSP_DIVERGED_INDEFINITE_MAT",
             ConvergedReason::DivergedIndefinitePC => "KSP_DIVERGED_INDEFINITE_PC",
             ConvergedReason::DivergedPcSetupFailed => "KSP_DIVERGED_PCSETUP_FAILED",
@@ -563,6 +572,12 @@ pub struct SolveStats<R> {
     pub breakdown_reason: Option<ConvergedReason>,
     /// Optional note describing residual-based acceptance override decisions.
     pub residual_override_note: Option<String>,
+    /// Count of orthogonalization passes executed (including reorthogonalization).
+    pub orthogonalization_passes: usize,
+    /// Whether an orthogonalization rank-loss failure was observed.
+    pub orthogonalization_rank_loss: bool,
+    /// Max estimate of orthogonality loss observed during the solve.
+    pub max_orthogonality_loss_estimate: R,
 }
 
 impl<R: Default> SolveStats<R> {
@@ -592,6 +607,9 @@ impl<R: Default> SolveStats<R> {
             },
             breakdown_reason: None,
             residual_override_note: None,
+            orthogonalization_passes: 0,
+            orthogonalization_rank_loss: false,
+            max_orthogonality_loss_estimate: R::default(),
         }
     }
 
@@ -637,6 +655,19 @@ impl<R: Default> SolveStats<R> {
     pub fn reduction_phase_diagnostics(&self) -> Option<ReductionPhaseDiagnostics> {
         self.counters
             .reduction_phase_diagnostics(self.reduction_model.as_ref(), self.iterations)
+    }
+
+    /// Attach orthogonalization diagnostics.
+    pub fn with_orthogonalization_diagnostics(
+        mut self,
+        passes: usize,
+        rank_loss: bool,
+        max_loss_estimate: R,
+    ) -> Self {
+        self.orthogonalization_passes = passes;
+        self.orthogonalization_rank_loss = rank_loss;
+        self.max_orthogonality_loss_estimate = max_loss_estimate;
+        self
     }
 }
 
