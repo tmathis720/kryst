@@ -4,6 +4,7 @@ use std::sync::Arc;
 use faer::Mat;
 use kryst::algebra::prelude::*;
 use kryst::assert_vec_close;
+use kryst::config::options::KspOptions;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::error::KError;
@@ -100,6 +101,24 @@ fn fgmres_rejects_non_right_side_via_api() {
         KError::InvalidInput(msg) => {
             assert!(msg.contains("FGMRES"));
             assert!(msg.to_lowercase().contains("right preconditioning"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn fgmres_set_from_options_rejects_non_right_pc_side() {
+    let opts = KspOptions::from_args(&["-ksp_type", "fgmres", "-ksp_pc_side", "left"])
+        .expect("options should parse");
+    let mut ksp = KspContext::new();
+    let err = ksp
+        .set_from_options(&opts)
+        .expect_err("FGMRES options must reject non-right sides");
+    match err {
+        KError::InvalidInput(msg) => {
+            assert!(msg.contains("FGMRES"));
+            assert!(msg.to_lowercase().contains("right preconditioning"));
+            assert!(msg.contains("-ksp_pc_side"));
         }
         other => panic!("unexpected error: {other:?}"),
     }

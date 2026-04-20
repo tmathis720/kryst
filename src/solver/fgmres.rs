@@ -182,7 +182,6 @@ impl FgmresSolver {
                 "FGMRES supports only right preconditioning; got {pc_side:?}"
             )));
         }
-        let pc_apply_side = PcSide::Right;
 
         let block_m = if self.preallocate {
             self.restart.min(self.maxits)
@@ -273,12 +272,7 @@ impl FgmresSolver {
                 &mut ws.bridge,
             );
             let last_preconditioned_residual = if let Some(pc_ref) = pc.as_deref_mut() {
-                pc_ref.apply_mut_s(
-                    pc_apply_side,
-                    &ws.tmp1[..n],
-                    &mut ws.tmp2[..n],
-                    &mut ws.bridge,
-                )?;
+                pc_ref.apply_mut_s(pc_side, &ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge)?;
                 Some(red.norm2(&ws.tmp2[..n]))
             } else {
                 Some(red.norm2(&ws.tmp1[..n]))
@@ -305,12 +299,7 @@ impl FgmresSolver {
             &mut ws.bridge,
         );
         let precond_res = if let Some(pc) = pc.as_deref_mut() {
-            pc.apply_mut_s(
-                pc_apply_side,
-                &ws.tmp1[..n],
-                &mut ws.tmp2[..n],
-                &mut ws.bridge,
-            )?;
+            pc.apply_mut_s(pc_side, &ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge)?;
             red.norm2(&ws.tmp2[..n])
         } else {
             red.norm2(&ws.tmp1[..n])
@@ -377,7 +366,7 @@ impl FgmresSolver {
                             #[cfg(feature = "metrics")]
                             let pc_start = std::time::Instant::now();
                             pc_ref.apply_mut_s(
-                                pc_apply_side,
+                                pc_side,
                                 &ws.tmp1[..n],
                                 &mut ws.tmp2[..n],
                                 &mut ws.bridge,
@@ -483,7 +472,7 @@ impl FgmresSolver {
                             #[cfg(feature = "metrics")]
                             let pc_start = std::time::Instant::now();
                             pc_ref.apply_mut_s(
-                                pc_apply_side,
+                                pc_side,
                                 &ws.tmp1[..n],
                                 &mut ws.tmp2[..n],
                                 &mut ws.bridge,
@@ -594,7 +583,7 @@ impl FgmresSolver {
                     );
                     let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
                         pc_ref.apply_mut_s(
-                            pc_apply_side,
+                            pc_side,
                             &ws.tmp1[..n],
                             &mut ws.tmp2[..n],
                             &mut ws.bridge,
@@ -650,7 +639,7 @@ impl FgmresSolver {
                     stats.final_recurrence_residual = Some(res);
                     let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
                         pc_ref.apply_mut_s(
-                            pc_apply_side,
+                            pc_side,
                             &ws.tmp1[..n],
                             &mut ws.tmp2[..n],
                             &mut ws.bridge,
@@ -726,7 +715,7 @@ impl FgmresSolver {
                     stats.final_recurrence_residual = Some(res);
                     let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
                         pc_ref.apply_mut_s(
-                            pc_apply_side,
+                            pc_side,
                             &ws.tmp1[..n],
                             &mut ws.tmp2[..n],
                             &mut ws.bridge,
@@ -774,12 +763,7 @@ impl FgmresSolver {
                 &mut ws.bridge,
             );
             let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
-                pc_ref.apply_mut_s(
-                    pc_apply_side,
-                    &ws.tmp1[..n],
-                    &mut ws.tmp2[..n],
-                    &mut ws.bridge,
-                )?;
+                pc_ref.apply_mut_s(pc_side, &ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge)?;
                 red.norm2(&ws.tmp2[..n])
             } else {
                 red.norm2(&ws.tmp1[..n])
