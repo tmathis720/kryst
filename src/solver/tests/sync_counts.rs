@@ -202,6 +202,12 @@ fn pipegcr_matches_pipelined_fgmres_convergence_on_nonsymmetric_system() -> Resu
 
     assert!(baseline_stats.reason.is_converged());
     assert_eq!(
+        baseline_stats.final_true_residual,
+        Some(baseline_stats.final_residual)
+    );
+    assert!(baseline_stats.final_recurrence_residual.is_some());
+    assert!(baseline_stats.last_preconditioned_residual.is_some());
+    assert_eq!(
         gcr_stats.reason.is_converged(),
         baseline_stats.reason.is_converged()
     );
@@ -256,6 +262,12 @@ fn pipegcr_reports_sync_count_parity_with_alias_baseline() -> Result<(), KError>
         .gcr_counters
         .as_ref()
         .expect("PipeGCR must populate GCR counters");
+    assert_eq!(
+        baseline_stats.final_true_residual,
+        Some(baseline_stats.final_residual)
+    );
+    assert!(baseline_stats.final_recurrence_residual.is_some());
+    assert!(baseline_stats.last_preconditioned_residual.is_some());
     assert_eq!(gcr.sync_count, gcr_stats.counters.num_global_reductions);
     let delta = gcr_stats
         .counters

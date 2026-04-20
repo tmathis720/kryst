@@ -315,6 +315,7 @@ impl FgmresSolver {
         } else {
             red.norm2(&ws.tmp1[..n])
         };
+        stats.final_residual = true_res;
         stats.final_true_residual = Some(true_res);
         stats.last_preconditioned_residual = Some(precond_res);
         log_residuals(
@@ -582,10 +583,32 @@ impl FgmresSolver {
                         overlap_global_reductions: async_waits,
                         residual_replacements: async_waits,
                     };
+                    let true_res = recompute_true_residual_norm_s(
+                        a,
+                        b,
+                        x,
+                        comm,
+                        red.engine(),
+                        &mut ws.tmp1[..n],
+                        &mut ws.bridge,
+                    );
+                    let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
+                        pc_ref.apply_mut_s(
+                            pc_apply_side,
+                            &ws.tmp1[..n],
+                            &mut ws.tmp2[..n],
+                            &mut ws.bridge,
+                        )?;
+                        red.norm2(&ws.tmp2[..n])
+                    } else {
+                        red.norm2(&ws.tmp1[..n])
+                    };
                     let mut stats =
-                        SolveStats::new(total_iters, res, ConvergedReason::StoppedByMonitor)
+                        SolveStats::new(total_iters, true_res, ConvergedReason::StoppedByMonitor)
                             .with_counters(counters);
                     stats.final_recurrence_residual = Some(res);
+                    stats.final_true_residual = Some(true_res);
+                    stats.last_preconditioned_residual = Some(precond_res);
                     return Ok(stats);
                 }
 
@@ -837,7 +860,8 @@ impl FgmresSolver {
         }
 
         stats.iterations = total_iters;
-        let true_res = stats.final_residual;
+        let true_res = stats.final_true_residual.unwrap_or(stats.final_residual);
+        stats.final_residual = true_res;
 
         if matches!(stats.reason, ConvergedReason::Continued) {
             stats.reason = if true_res <= self.atol {
