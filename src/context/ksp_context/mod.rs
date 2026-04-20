@@ -3056,6 +3056,8 @@ impl KspContext {
             let solver_type = self
                 .solver_type
                 .ok_or_else(|| KError::SolveError("No solver".into()))?;
+            let pc_side = self.pc_side;
+            let effective_pc_side = self.effective_pc_side();
             let solver = self
                 .solver
                 .as_mut()
@@ -3081,7 +3083,7 @@ impl KspContext {
                             pc_k.as_deref(),
                             b,
                             x,
-                            self.pc_side,
+                            pc_side,
                             &comm,
                             monitors,
                             work,
@@ -3097,7 +3099,7 @@ impl KspContext {
                             pc_k.as_deref(),
                             b,
                             x,
-                            self.pc_side,
+                            pc_side,
                             &comm,
                             monitors,
                             work,
@@ -3113,7 +3115,7 @@ impl KspContext {
                             pc_k.as_deref(),
                             b,
                             x,
-                            self.pc_side,
+                            pc_side,
                             &comm,
                             monitors,
                             work,
@@ -3129,7 +3131,7 @@ impl KspContext {
                             pc_k.as_deref_mut(),
                             b,
                             x,
-                            self.effective_pc_side(),
+                            effective_pc_side,
                             &comm,
                             monitors,
                             work,
