@@ -468,9 +468,10 @@ impl FgmresSolver {
             let mut arnoldi_steps = 0usize;
             let mut converged = false;
             let mut converged_reason: Option<ConvergedReason> = None;
+            let mut hapend = false;
 
             for j in 0..m_this {
-                match self.variant {
+                let arnoldi_norm_scale = match self.variant {
                     FgmresVariant::Classical => {
                         let base = j * n;
                         ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
@@ -502,6 +503,7 @@ impl FgmresSolver {
                         }
 
                         let wnorm_before = red.norm2(&ws.tmp2[..n]);
+                        let arnoldi_norm_scale = wnorm_before.max(R::one());
                         let (hij1, used_second_pass) = match self.orthog {
                             OrthogMethod::ClassicalGS => self.orthogonalize_cgs(ws, &red, n, j),
                             OrthogMethod::ModifiedGS => self.orthogonalize_mgs(ws, &red, n, j),
@@ -535,6 +537,7 @@ impl FgmresSolver {
                         } else {
                             ws.v_col(j + 1).fill(S::zero());
                         }
+                        arnoldi_norm_scale
                     }
                     FgmresVariant::Pipelined => {
                         let base = j * n;
@@ -567,6 +570,7 @@ impl FgmresSolver {
                         }
 
                         ws.pipelined_w[..n].copy_from_slice(&ws.tmp2[..n]);
+                        let arnoldi_norm_scale = red.norm2(&ws.pipelined_w[..n]).max(R::one());
                         let pipe = ws.pipelined_arnoldi_step(
                             j,
                             n,
@@ -609,64 +613,68 @@ impl FgmresSolver {
                             metrics.bytes_reduced +=
                                 payload_len * std::mem::size_of::<R>() * reductions;
                         }
+                        arnoldi_norm_scale
                     }
-                }
+                };
 
                 let h_subdiag = ws.h_at(j + 1, j).abs();
-                if h_subdiag <= self.haptol {
+                let haptol_scaled = self.haptol.max(0.0) * arnoldi_norm_scale;
+                let hap_event = h_subdiag <= haptol_scaled;
+                if hap_event {
                     let loss_estimate = R::one();
                     if loss_estimate > max_orthogonality_loss_estimate {
                         max_orthogonality_loss_estimate = loss_estimate;
                     }
                 }
-                if self.happy_breakdown && h_subdiag <= self.haptol {
+                if hap_event {
                     *ws.h_at_mut(j + 1, j) = S::zero();
                     ws.apply_prev_givens_to_col(j, j);
-                    ws.g[j + 1] = S::zero();
-                    res = R::zero();
+                    ws.apply_final_givens_and_update_g(j);
+                    res = ws.g[j + 1].abs();
                     total_iters += 1;
                     arnoldi_steps = j + 1;
-                    converged = true;
-                    converged_reason = Some(ConvergedReason::ConvergedHappyBreakdown);
-                    break;
-                }
-                if h_subdiag <= self.haptol {
-                    orthogonalization_rank_loss = true;
-                    let true_res = recompute_true_residual_norm_s(
-                        a,
-                        b,
-                        x,
-                        comm,
-                        red.engine(),
-                        &mut ws.tmp1[..n],
-                        &mut ws.bridge,
-                    );
-                    stats = SolveStats::new(
-                        total_iters,
-                        true_res,
-                        ConvergedReason::DivergedArnoldiRankLoss,
-                    )
-                    .with_orthogonalization_diagnostics(
-                        orthogonalization_passes,
-                        orthogonalization_rank_loss,
-                        max_orthogonality_loss_estimate,
-                    );
-                    stats.final_true_residual = Some(true_res);
                     stats.final_recurrence_residual = Some(res);
-                    let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
-                        pc_ref.apply_mut_s(
-                            pc_side,
-                            &ws.tmp1[..n],
-                            &mut ws.tmp2[..n],
-                            &mut ws.bridge,
-                        )?;
-                        red.norm2(&ws.tmp2[..n])
+                    hapend = true;
+                    if self.happy_breakdown {
+                        converged = true;
+                        converged_reason = Some(ConvergedReason::ConvergedHappyBreakdown);
                     } else {
-                        red.norm2(&ws.tmp1[..n])
-                    };
-                    stats.last_preconditioned_residual = Some(precond_res);
-                    converged = true;
-                    converged_reason = Some(ConvergedReason::DivergedArnoldiRankLoss);
+                        orthogonalization_rank_loss = true;
+                        let true_res = recompute_true_residual_norm_s(
+                            a,
+                            b,
+                            x,
+                            comm,
+                            red.engine(),
+                            &mut ws.tmp1[..n],
+                            &mut ws.bridge,
+                        );
+                        stats = SolveStats::new(
+                            total_iters,
+                            true_res,
+                            ConvergedReason::DivergedArnoldiRankLoss,
+                        )
+                        .with_orthogonalization_diagnostics(
+                            orthogonalization_passes,
+                            orthogonalization_rank_loss,
+                            max_orthogonality_loss_estimate,
+                        );
+                        stats.final_true_residual = Some(true_res);
+                        let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
+                            pc_ref.apply_mut_s(
+                                pc_side,
+                                &ws.tmp1[..n],
+                                &mut ws.tmp2[..n],
+                                &mut ws.bridge,
+                            )?;
+                            red.norm2(&ws.tmp2[..n])
+                        } else {
+                            red.norm2(&ws.tmp1[..n])
+                        };
+                        stats.last_preconditioned_residual = Some(precond_res);
+                        converged = true;
+                        converged_reason = Some(ConvergedReason::DivergedArnoldiRankLoss);
+                    }
                     break;
                 }
 
@@ -821,6 +829,56 @@ impl FgmresSolver {
             }
 
             let k = arnoldi_steps;
+            let reduced_diag_threshold = self.haptol.max(0.0);
+            let reduced_system_diagonal_ok = (0..k).all(|i| {
+                let diag = ws.h_at(i, i);
+                diag.real().is_finite() && diag.abs() > reduced_diag_threshold
+            });
+            if !reduced_system_diagonal_ok {
+                let true_res = recompute_true_residual_norm_s(
+                    a,
+                    b,
+                    x,
+                    comm,
+                    red.engine(),
+                    &mut ws.tmp1[..n],
+                    &mut ws.bridge,
+                );
+                stats = SolveStats::new(
+                    total_iters,
+                    true_res,
+                    ConvergedReason::DivergedReducedSystemSingular,
+                );
+                stats.final_true_residual = Some(true_res);
+                stats.final_recurrence_residual = Some(res);
+                let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
+                    pc_ref.apply_mut_s(
+                        pc_side,
+                        &ws.tmp1[..n],
+                        &mut ws.tmp2[..n],
+                        &mut ws.bridge,
+                    )?;
+                    red.norm2(&ws.tmp2[..n])
+                } else {
+                    red.norm2(&ws.tmp1[..n])
+                };
+                stats.last_preconditioned_residual = Some(precond_res);
+                let end_reduct = crate::utils::reduction::test_hooks::wait_counters();
+                let reductions = end_reduct.0 + end_reduct.1 - start_reduct.0 - start_reduct.1
+                    + pipeline_reductions;
+                let counters = crate::utils::convergence::SolverCounters {
+                    num_global_reductions: reductions,
+                    overlap_global_reductions: async_waits,
+                    residual_replacements: async_waits,
+                };
+                return Ok(stats
+                    .with_counters(counters)
+                    .with_orthogonalization_diagnostics(
+                        orthogonalization_passes,
+                        orthogonalization_rank_loss,
+                        max_orthogonality_loss_estimate,
+                    ));
+            }
             let mut y = vec![S::zero(); k];
             for i in (0..k).rev() {
                 let mut sum = ws.g[i];
@@ -838,9 +896,11 @@ impl FgmresSolver {
                         &mut ws.tmp1[..n],
                         &mut ws.bridge,
                     );
-                    let reason = ConvergedReason::from_non_finite(diag.real())
-                        .unwrap_or(ConvergedReason::DivergedReducedSystemSingular);
-                    stats = SolveStats::new(total_iters, true_res, reason);
+                    stats = SolveStats::new(
+                        total_iters,
+                        true_res,
+                        ConvergedReason::DivergedReducedSystemSingular,
+                    );
                     stats.final_true_residual = Some(true_res);
                     stats.final_recurrence_residual = Some(res);
                     let precond_res = if let Some(pc_ref) = pc.as_deref_mut() {
@@ -928,11 +988,14 @@ impl FgmresSolver {
             }
 
             if converged {
-                stats.reason = converged_reason
-                    .or_else(|| {
+                stats.reason = if hapend {
+                    converged_reason
+                } else {
+                    converged_reason.or_else(|| {
                         true_residual_converged_reason(true_res, bnorm, self.atol, self.rtol)
                     })
-                    .unwrap_or(ConvergedReason::DivergedBreakdown);
+                }
+                .unwrap_or(ConvergedReason::DivergedBreakdown);
                 break;
             }
 
