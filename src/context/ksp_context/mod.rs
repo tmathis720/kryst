@@ -409,7 +409,7 @@ struct PendingGmres {
 #[derive(Clone, Debug, Default)]
 struct PendingFgmres {
     restart: Option<usize>,
-    orthog: Option<crate::solver::fgmres::Orthog>,
+    orthog: Option<crate::solver::fgmres::OrthogMethod>,
     reorth: Option<ReorthPolicy>,
     reorth_tol: Option<R>,
     happy_breakdown: Option<bool>,
@@ -1248,13 +1248,15 @@ impl KspContext {
             // Map FGMRES orthogonalization labels to implemented algorithms.
             if let Some(ref orth) = opts.fgmres_orthog {
                 let o = match orth.as_str() {
-                    "cgs" | "classical" => crate::solver::fgmres::Orthog::Classical,
+                    "cgs" | "classical" => crate::solver::fgmres::OrthogMethod::ClassicalGS,
+                    "mgs" | "modified" => crate::solver::fgmres::OrthogMethod::ModifiedGS,
                     "cgs_refined" | "cgs-refined" | "refined" => {
-                        crate::solver::fgmres::Orthog::CgsRefined
+                        s.set_cgs_refinement(crate::solver::fgmres::CgsRefinement::Always);
+                        crate::solver::fgmres::OrthogMethod::ClassicalGS
                     }
                     other => {
                         return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'cgs'|'classical'|'cgs_refined')"
+                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'cgs'|'classical'|'mgs'|'modified'|'cgs_refined')"
                         )));
                     }
                 };
@@ -1301,13 +1303,15 @@ impl KspContext {
             }
             if let Some(ref orth) = opts.fgmres_orthog {
                 self.pending_fgmres.orthog = Some(match orth.as_str() {
-                    "cgs" | "classical" => crate::solver::fgmres::Orthog::Classical,
+                    "cgs" | "classical" => crate::solver::fgmres::OrthogMethod::ClassicalGS,
+                    "mgs" | "modified" => crate::solver::fgmres::OrthogMethod::ModifiedGS,
                     "cgs_refined" | "cgs-refined" | "refined" => {
-                        crate::solver::fgmres::Orthog::CgsRefined
+                        self.pending_fgmres.reorth = Some(ReorthPolicy::Always);
+                        crate::solver::fgmres::OrthogMethod::ClassicalGS
                     }
                     other => {
                         return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'cgs'|'classical'|'cgs_refined')"
+                            "Unrecognized ksp_fgmres_orthog: {other} (expected 'cgs'|'classical'|'mgs'|'modified'|'cgs_refined')"
                         )));
                     }
                 });
@@ -4882,7 +4886,7 @@ mod tests {
     #[test]
     fn fgmres_options_apply() {
         use crate::context::ksp_context::ReorthPolicy;
-        use crate::solver::fgmres::{FgmresSolver, FgmresVariant, Orthog};
+        use crate::solver::fgmres::{FgmresSolver, FgmresVariant, OrthogMethod};
         let mut ksp = KspContext::new();
         ksp.set_type(SolverType::Fgmres).unwrap();
 
@@ -4906,7 +4910,7 @@ mod tests {
             .unwrap();
         let (restart, orth, reo, hb) = s.debug_config();
         assert_eq!(restart, 25);
-        assert_eq!(orth, Orthog::Classical);
+        assert_eq!(orth, OrthogMethod::ClassicalGS);
         assert!(!reo);
         assert!(hb);
         assert_eq!(s.variant, FgmresVariant::Pipelined);
@@ -4917,7 +4921,7 @@ mod tests {
     #[cfg(not(feature = "complex"))]
     #[test]
     fn fgmres_orthog_cgs_refined_maps_cleanly() {
-        use crate::solver::fgmres::{FgmresSolver, Orthog};
+        use crate::solver::fgmres::{FgmresSolver, OrthogMethod};
         let mut ksp = KspContext::new();
         ksp.set_type(SolverType::Fgmres).unwrap();
         let opts = KspOptions {
@@ -4933,7 +4937,7 @@ mod tests {
             .downcast_mut::<FgmresSolver>()
             .unwrap();
         let (_, orth, _, _) = s.debug_config();
-        assert_eq!(orth, Orthog::CgsRefined);
+        assert_eq!(orth, OrthogMethod::ClassicalGS);
     }
 
     #[cfg(not(feature = "complex"))]
