@@ -50,6 +50,13 @@ pub enum FgmresVariant {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PipelinePolicy {
+    Strict,
+    FallbackToClassicalOnStagnation,
+    PeriodicResidualReplacement,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidualCheckPolicy {
     /// Recompute only at startup and restart boundaries (plus safety checks).
     RestartOnly,
@@ -99,6 +106,7 @@ pub struct FgmresSolver {
     pub reorth_tol: f64,
     /// Controls how often explicit true residual recomputation is performed.
     pub residual_check_policy: ResidualCheckPolicy,
+    pub pipeline_policy: PipelinePolicy,
 }
 
 impl FgmresSolver {
@@ -132,6 +140,7 @@ impl FgmresSolver {
             reorth: ReorthPolicy::IfNeeded,
             reorth_tol: 0.7,
             residual_check_policy: ResidualCheckPolicy::OnConvergence,
+            pipeline_policy: PipelinePolicy::FallbackToClassicalOnStagnation,
         }
     }
 
@@ -297,6 +306,203 @@ impl FgmresSolver {
 
     // legacy helpers for in-place Givens rotations removed; Workspace now handles
     // orthogonalization and updating of the Hessenberg system.
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_classical_cycle<A>(
+        &mut self,
+        a: &A,
+        pc: &mut Option<&mut dyn KPreconditioner<Scalar = S>>,
+        ws: &mut Workspace,
+        red: &ReductCtx,
+        pc_side: PcSide,
+        n: usize,
+        j: usize,
+        total_iters: usize,
+        recurrence_residual: R,
+        orthogonalization_passes: &mut usize,
+        max_orthogonality_loss_estimate: &mut R,
+        #[cfg(feature = "metrics")] metrics: &mut SolveMetrics,
+    ) -> Result<R, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
+        let base = j * n;
+        ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
+        if let Some(pc_ref) = pc.as_deref_mut() {
+            if self.should_modify_pc_each_iteration() {
+                self.call_modify_pc_callback(total_iters, j, recurrence_residual, None, pc_ref)?;
+            }
+            #[cfg(feature = "metrics")]
+            let pc_start = std::time::Instant::now();
+            pc_ref.apply_mut_s(pc_side, &ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge)?;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+            }
+            ws.z_mem[base..base + n].copy_from_slice(&ws.tmp2[..n]);
+        } else {
+            ws.z_mem[base..base + n].copy_from_slice(&ws.tmp1[..n]);
+        }
+
+        ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
+        #[cfg(feature = "metrics")]
+        let matvec_start = std::time::Instant::now();
+        a.matvec_s(&ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
+        #[cfg(feature = "metrics")]
+        {
+            metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
+        }
+
+        let wnorm_before = red.norm2(&ws.tmp2[..n]);
+        let arnoldi_norm_scale = wnorm_before.max(R::one());
+        let (hij1, used_second_pass) = match self.orthog {
+            OrthogMethod::ClassicalGS => self.orthogonalize_cgs(ws, red, n, j),
+            OrthogMethod::ModifiedGS => self.orthogonalize_mgs(ws, red, n, j),
+        };
+        *orthogonalization_passes += 1 + usize::from(used_second_pass);
+        #[cfg(feature = "metrics")]
+        {
+            let dot_reductions = match (self.orthog, self.cgs_refinement_mode()) {
+                (OrthogMethod::ClassicalGS, CgsRefinement::Never) => j + 2,
+                (OrthogMethod::ClassicalGS, CgsRefinement::IfNeeded) => j + 3,
+                (OrthogMethod::ClassicalGS, CgsRefinement::Always) => j + 3,
+                (OrthogMethod::ModifiedGS, _) => j + 2,
+            };
+            metrics.bytes_reduced += dot_reductions * std::mem::size_of::<R>();
+        }
+        *ws.h_at_mut(j + 1, j) = S::from_real(hij1);
+        if wnorm_before > R::zero() {
+            let ratio = (hij1 / wnorm_before).clamp(R::zero(), R::one());
+            let loss_estimate = (R::one() - ratio).max(R::zero());
+            if loss_estimate > *max_orthogonality_loss_estimate {
+                *max_orthogonality_loss_estimate = loss_estimate;
+            }
+        }
+
+        if hij1 > R::default() {
+            let inv = S::from_real(1.0 / hij1);
+            for val in &mut ws.tmp2[..n] {
+                *val *= inv;
+            }
+            ws.copy_tmp2_into_vcol(j + 1);
+        } else {
+            ws.v_col(j + 1).fill(S::zero());
+        }
+        Ok(arnoldi_norm_scale)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_pipelined_cycle<A>(
+        &mut self,
+        a: &A,
+        pc: &mut Option<&mut dyn KPreconditioner<Scalar = S>>,
+        ws: &mut Workspace,
+        red: &ReductCtx,
+        red_engine: &dyn crate::parallel::ReductionEngine,
+        pc_side: PcSide,
+        n: usize,
+        j: usize,
+        total_iters: usize,
+        recurrence_residual: R,
+        pipeline_reductions: &mut usize,
+        async_waits: &mut usize,
+        orthogonalization_passes: &mut usize,
+        #[cfg(feature = "metrics")] metrics: &mut SolveMetrics,
+    ) -> Result<R, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
+        let base = j * n;
+        ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
+        if let Some(pc_ref) = pc.as_deref_mut() {
+            if self.should_modify_pc_each_iteration() {
+                self.call_modify_pc_callback(total_iters, j, recurrence_residual, None, pc_ref)?;
+            }
+            #[cfg(feature = "metrics")]
+            let pc_start = std::time::Instant::now();
+            pc_ref.apply_mut_s(pc_side, &ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge)?;
+            #[cfg(feature = "metrics")]
+            {
+                metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
+            }
+            ws.z_mem[base..base + n].copy_from_slice(&ws.tmp2[..n]);
+        } else {
+            ws.z_mem[base..base + n].copy_from_slice(&ws.tmp1[..n]);
+        }
+
+        ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
+        #[cfg(feature = "metrics")]
+        let matvec_start = std::time::Instant::now();
+        a.matvec_s(&ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
+        #[cfg(feature = "metrics")]
+        {
+            metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
+        }
+
+        ws.pipelined_w[..n].copy_from_slice(&ws.tmp2[..n]);
+        let arnoldi_norm_scale = red.norm2(&ws.pipelined_w[..n]).max(R::one());
+        let pipe = ws.pipelined_arnoldi_step(j, n, red_engine, self.reorth, self.reorth_tol)?;
+        let reductions = match pipe {
+            crate::context::ksp_context::PipeReduct::Sync { reductions } => reductions,
+            crate::context::ksp_context::PipeReduct::Async { handle } => {
+                *async_waits += 1;
+                #[cfg(feature = "metrics")]
+                let wait_start = std::time::Instant::now();
+                let glob = handle.wait();
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.reduction_wait_nanos += wait_start.elapsed().as_nanos() as u64;
+                }
+                ws.finish_pipelined_arnoldi(j, n, red_engine, self.reorth, self.reorth_tol, glob)?
+            }
+        };
+        *pipeline_reductions += reductions;
+        *orthogonalization_passes += match self.reorth {
+            ReorthPolicy::Always => 2,
+            _ => 1,
+        };
+        #[cfg(feature = "metrics")]
+        {
+            let payload_len = ws.pipelined_payload.len();
+            metrics.bytes_reduced += payload_len * std::mem::size_of::<R>() * reductions;
+        }
+        Ok(arnoldi_norm_scale)
+    }
+
+    #[inline]
+    fn update_hessenberg_qr_and_residual(&self, ws: &mut Workspace, j: usize) -> R {
+        ws.apply_prev_givens_to_col(j, j);
+        ws.apply_final_givens_and_update_g(j);
+        ws.g[j + 1].abs()
+    }
+
+    fn backsolve_least_squares(&self, ws: &Workspace, k: usize) -> Result<Vec<S>, KError> {
+        let mut y = vec![S::zero(); k];
+        for i in (0..k).rev() {
+            let mut sum = ws.g[i];
+            for l in (i + 1)..k {
+                sum -= ws.h_at(i, l) * y[l];
+            }
+            let diag = ws.h_at(i, i);
+            if !diag.real().is_finite() || diag.abs() <= self.haptol {
+                return Err(KError::SolveError(
+                    "FGMRES reduced system singular".to_string(),
+                ));
+            }
+            y[i] = sum / diag;
+        }
+        Ok(y)
+    }
+
+    #[inline]
+    fn apply_solution_correction(&self, ws: &Workspace, n: usize, y: &[S], x: &mut [S]) {
+        for (i, yi) in y.iter().enumerate() {
+            let zi = &ws.z_mem[i * n..(i + 1) * n];
+            for (xj, &zij) in x.iter_mut().zip(zi) {
+                *xj += *yi * zij;
+            }
+        }
+    }
 
     #[allow(clippy::too_many_arguments)]
     pub fn solve_k<A>(
@@ -520,155 +726,38 @@ impl FgmresSolver {
 
             for j in 0..m_this {
                 let arnoldi_norm_scale = match self.variant {
-                    FgmresVariant::Classical => {
-                        let base = j * n;
-                        ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
-                        if let Some(pc_ref) = pc.as_deref_mut() {
-                            if self.should_modify_pc_each_iteration() {
-                                self.call_modify_pc_callback(total_iters, j, res, None, pc_ref)?;
-                            }
-                            #[cfg(feature = "metrics")]
-                            let pc_start = std::time::Instant::now();
-                            pc_ref.apply_mut_s(
-                                pc_side,
-                                &ws.tmp1[..n],
-                                &mut ws.tmp2[..n],
-                                &mut ws.bridge,
-                            )?;
-                            #[cfg(feature = "metrics")]
-                            {
-                                metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
-                            }
-                            ws.z_mem[base..base + n].copy_from_slice(&ws.tmp2[..n]);
-                        } else {
-                            ws.z_mem[base..base + n].copy_from_slice(&ws.tmp1[..n]);
-                        }
-
-                        ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
+                    FgmresVariant::Classical => self.solve_classical_cycle(
+                        a,
+                        &mut pc,
+                        ws,
+                        &red,
+                        pc_side,
+                        n,
+                        j,
+                        total_iters,
+                        res,
+                        &mut orthogonalization_passes,
+                        &mut max_orthogonality_loss_estimate,
                         #[cfg(feature = "metrics")]
-                        let matvec_start = std::time::Instant::now();
-                        a.matvec_s(&ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
+                        &mut metrics,
+                    )?,
+                    FgmresVariant::Pipelined => self.solve_pipelined_cycle(
+                        a,
+                        &mut pc,
+                        ws,
+                        &red,
+                        red_engine.as_ref(),
+                        pc_side,
+                        n,
+                        j,
+                        total_iters,
+                        res,
+                        &mut pipeline_reductions,
+                        &mut async_waits,
+                        &mut orthogonalization_passes,
                         #[cfg(feature = "metrics")]
-                        {
-                            metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
-                        }
-
-                        let wnorm_before = red.norm2(&ws.tmp2[..n]);
-                        let arnoldi_norm_scale = wnorm_before.max(R::one());
-                        let (hij1, used_second_pass) = match self.orthog {
-                            OrthogMethod::ClassicalGS => self.orthogonalize_cgs(ws, &red, n, j),
-                            OrthogMethod::ModifiedGS => self.orthogonalize_mgs(ws, &red, n, j),
-                        };
-                        orthogonalization_passes += 1 + usize::from(used_second_pass);
-                        #[cfg(feature = "metrics")]
-                        {
-                            let dot_reductions = match (self.orthog, self.cgs_refinement_mode()) {
-                                (OrthogMethod::ClassicalGS, CgsRefinement::Never) => j + 2,
-                                (OrthogMethod::ClassicalGS, CgsRefinement::IfNeeded) => j + 3,
-                                (OrthogMethod::ClassicalGS, CgsRefinement::Always) => j + 3,
-                                (OrthogMethod::ModifiedGS, _) => j + 2,
-                            };
-                            metrics.bytes_reduced += dot_reductions * std::mem::size_of::<R>();
-                        }
-                        *ws.h_at_mut(j + 1, j) = S::from_real(hij1);
-                        if wnorm_before > R::zero() {
-                            let ratio = (hij1 / wnorm_before).clamp(R::zero(), R::one());
-                            let loss_estimate = (R::one() - ratio).max(R::zero());
-                            if loss_estimate > max_orthogonality_loss_estimate {
-                                max_orthogonality_loss_estimate = loss_estimate;
-                            }
-                        }
-
-                        if hij1 > R::default() {
-                            let inv = S::from_real(1.0 / hij1);
-                            for val in &mut ws.tmp2[..n] {
-                                *val *= inv;
-                            }
-                            ws.copy_tmp2_into_vcol(j + 1);
-                        } else {
-                            ws.v_col(j + 1).fill(S::zero());
-                        }
-                        arnoldi_norm_scale
-                    }
-                    FgmresVariant::Pipelined => {
-                        let base = j * n;
-                        ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
-                        if let Some(pc_ref) = pc.as_deref_mut() {
-                            if self.should_modify_pc_each_iteration() {
-                                self.call_modify_pc_callback(total_iters, j, res, None, pc_ref)?;
-                            }
-                            #[cfg(feature = "metrics")]
-                            let pc_start = std::time::Instant::now();
-                            pc_ref.apply_mut_s(
-                                pc_side,
-                                &ws.tmp1[..n],
-                                &mut ws.tmp2[..n],
-                                &mut ws.bridge,
-                            )?;
-                            #[cfg(feature = "metrics")]
-                            {
-                                metrics.pc_apply_nanos += pc_start.elapsed().as_nanos() as u64;
-                            }
-                            ws.z_mem[base..base + n].copy_from_slice(&ws.tmp2[..n]);
-                        } else {
-                            ws.z_mem[base..base + n].copy_from_slice(&ws.tmp1[..n]);
-                        }
-
-                        ws.tmp1[..n].copy_from_slice(&ws.z_mem[base..base + n]);
-                        #[cfg(feature = "metrics")]
-                        let matvec_start = std::time::Instant::now();
-                        a.matvec_s(&ws.tmp1[..n], &mut ws.tmp2[..n], &mut ws.bridge);
-                        #[cfg(feature = "metrics")]
-                        {
-                            metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
-                        }
-
-                        ws.pipelined_w[..n].copy_from_slice(&ws.tmp2[..n]);
-                        let arnoldi_norm_scale = red.norm2(&ws.pipelined_w[..n]).max(R::one());
-                        let pipe = ws.pipelined_arnoldi_step(
-                            j,
-                            n,
-                            red_engine.as_ref(),
-                            self.reorth,
-                            self.reorth_tol,
-                        )?;
-                        let reductions = match pipe {
-                            crate::context::ksp_context::PipeReduct::Sync { reductions } => {
-                                reductions
-                            }
-                            crate::context::ksp_context::PipeReduct::Async { handle } => {
-                                async_waits += 1;
-                                #[cfg(feature = "metrics")]
-                                let wait_start = std::time::Instant::now();
-                                let glob = handle.wait();
-                                #[cfg(feature = "metrics")]
-                                {
-                                    metrics.reduction_wait_nanos +=
-                                        wait_start.elapsed().as_nanos() as u64;
-                                }
-                                ws.finish_pipelined_arnoldi(
-                                    j,
-                                    n,
-                                    red_engine.as_ref(),
-                                    self.reorth,
-                                    self.reorth_tol,
-                                    glob,
-                                )?
-                            }
-                        };
-                        pipeline_reductions += reductions;
-                        orthogonalization_passes += match self.reorth {
-                            ReorthPolicy::Always => 2,
-                            _ => 1,
-                        };
-                        #[cfg(feature = "metrics")]
-                        {
-                            let payload_len = ws.pipelined_payload.len();
-                            metrics.bytes_reduced +=
-                                payload_len * std::mem::size_of::<R>() * reductions;
-                        }
-                        arnoldi_norm_scale
-                    }
+                        &mut metrics,
+                    )?,
                 };
 
                 let h_subdiag = ws.h_at(j + 1, j).abs();
@@ -682,9 +771,7 @@ impl FgmresSolver {
                 }
                 if hap_event {
                     *ws.h_at_mut(j + 1, j) = S::zero();
-                    ws.apply_prev_givens_to_col(j, j);
-                    ws.apply_final_givens_and_update_g(j);
-                    res = ws.g[j + 1].abs();
+                    res = self.update_hessenberg_qr_and_residual(ws, j);
                     total_iters += 1;
                     arnoldi_steps = j + 1;
                     stats.final_recurrence_residual = Some(res);
@@ -732,10 +819,7 @@ impl FgmresSolver {
                     break;
                 }
 
-                ws.apply_prev_givens_to_col(j, j);
-                ws.apply_final_givens_and_update_g(j);
-
-                res = ws.g[j + 1].abs();
+                res = self.update_hessenberg_qr_and_residual(ws, j);
                 total_iters += 1;
                 arnoldi_steps = j + 1;
 
@@ -850,16 +934,33 @@ impl FgmresSolver {
                     stagnation_residuals.remove(0);
                 }
                 if stagnation_detected(&stagnation_residuals, stagnation_threshold) {
-                    let action = match self.variant {
-                        FgmresVariant::Pipelined => {
+                    let mut should_restart = false;
+                    let action = match (self.variant, self.pipeline_policy) {
+                        (
+                            FgmresVariant::Pipelined,
+                            PipelinePolicy::FallbackToClassicalOnStagnation,
+                        ) => {
                             self.variant = FgmresVariant::Classical;
+                            should_restart = true;
                             "switching to classical restart"
                         }
-                        _ => "restarting FGMRES",
+                        (FgmresVariant::Pipelined, PipelinePolicy::PeriodicResidualReplacement) => {
+                            should_restart = true;
+                            "periodic residual replacement restart"
+                        }
+                        (FgmresVariant::Pipelined, PipelinePolicy::Strict) => {
+                            "strict pipelined policy: no fallback"
+                        }
+                        _ => {
+                            should_restart = true;
+                            "restarting FGMRES"
+                        }
                     };
                     log_krylov_stagnation("FGMRES", total_iters, res, action);
                     stagnation_residuals.clear();
-                    break;
+                    if should_restart {
+                        break;
+                    }
                 }
 
                 let res0 = beta0;
@@ -933,14 +1034,9 @@ impl FgmresSolver {
                         max_orthogonality_loss_estimate,
                     ));
             }
-            let mut y = vec![S::zero(); k];
-            for i in (0..k).rev() {
-                let mut sum = ws.g[i];
-                for l in (i + 1)..k {
-                    sum -= ws.h_at(i, l) * y[l];
-                }
-                let diag = ws.h_at(i, i);
-                if !diag.real().is_finite() || diag.abs() <= self.haptol {
+            let y = match self.backsolve_least_squares(ws, k) {
+                Ok(coeffs) => coeffs,
+                Err(_) => {
                     let true_res = recompute_true_residual_norm_s(
                         a,
                         b,
@@ -985,15 +1081,9 @@ impl FgmresSolver {
                             max_orthogonality_loss_estimate,
                         ));
                 }
-                y[i] = sum / diag;
-            }
+            };
 
-            for i in 0..k {
-                let zi = &ws.z_mem[i * n..(i + 1) * n];
-                for (xj, &zij) in x.iter_mut().zip(zi) {
-                    *xj += y[i] * zij;
-                }
-            }
+            self.apply_solution_correction(ws, n, &y, x);
 
             #[cfg(feature = "logging")]
             if log::log_enabled!(log::Level::Info) {
@@ -1259,6 +1349,10 @@ impl FgmresSolver {
 
     pub fn set_modify_pc_policy(&mut self, policy: ModifyPcPolicy) {
         self.modify_pc_policy = policy;
+    }
+
+    pub fn set_pipeline_policy(&mut self, policy: PipelinePolicy) {
+        self.pipeline_policy = policy;
     }
 
     pub fn set_strict_true_residual_cadence(&mut self, flag: bool) {
