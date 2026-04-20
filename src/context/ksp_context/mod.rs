@@ -1033,6 +1033,16 @@ impl KspContext {
         if let Some(restart) = opts.restart {
             self.restart = restart;
         }
+        if let (Some(SolverType::Fgmres), Some(side_label)) =
+            (requested_solver_type, opts.pc_side.as_ref())
+        {
+            let parsed_side = PcSide::from_str(side_label)?;
+            if parsed_side != PcSide::Right {
+                return Err(KError::InvalidInput(format!(
+                    "FGMRES supports only right preconditioning; got {parsed_side:?} from -ksp_pc_side={side_label}"
+                )));
+            }
+        }
         if let Some(st) = requested_solver_type {
             self.set_type(st)?;
         } else if scalar_solver_config_changed {
