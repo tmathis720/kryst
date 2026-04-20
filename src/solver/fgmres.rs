@@ -61,6 +61,17 @@ pub enum ResidualCheckPolicy {
     Debug,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModifyPcPolicy {
+    Never,
+    OnRestart,
+    EachIteration,
+}
+
+pub type ModifyPcCallback = dyn FnMut(usize, usize, R, Option<R>, &mut dyn KPreconditioner<Scalar = S>) -> Result<(), KError>
+    + Send
+    + Sync;
+
 pub struct FgmresSolver {
     pub rtol: f64,
     pub atol: f64,
@@ -75,6 +86,10 @@ pub struct FgmresSolver {
     pub preallocate: bool,
     /// Optional hook called once per restart (after backsolve) so caller can adapt the PC.
     pub on_restart: Option<Box<dyn FnMut(usize, f64) -> Result<(), KError> + Send + Sync>>,
+    /// Policy controlling when mutable PC-adaptation callbacks are invoked.
+    pub modify_pc_policy: ModifyPcPolicy,
+    /// Optional mutable preconditioner adaptation callback.
+    pub modify_pc: Option<Box<ModifyPcCallback>>,
     /// Whether to treat near-zero residual as a happy breakdown
     pub happy_breakdown: bool,
     pub variant: FgmresVariant,
@@ -110,6 +125,8 @@ impl FgmresSolver {
             haptol: 1e-12,
             preallocate: false,
             on_restart: None,
+            modify_pc_policy: ModifyPcPolicy::OnRestart,
+            modify_pc: None,
             happy_breakdown: true,
             variant: FgmresVariant::Classical,
             reorth: ReorthPolicy::IfNeeded,
@@ -124,6 +141,37 @@ impl FgmresSolver {
             self.residual_check_policy,
             ResidualCheckPolicy::EveryIteration | ResidualCheckPolicy::Debug
         )
+    }
+
+    #[inline]
+    fn should_modify_pc_each_iteration(&self) -> bool {
+        matches!(self.modify_pc_policy, ModifyPcPolicy::EachIteration)
+    }
+
+    #[inline]
+    fn should_modify_pc_on_restart(&self) -> bool {
+        matches!(self.modify_pc_policy, ModifyPcPolicy::OnRestart)
+    }
+
+    #[inline]
+    fn call_modify_pc_callback(
+        &mut self,
+        global_iter: usize,
+        cycle_local_iter: usize,
+        recurrence_residual: R,
+        true_residual: Option<R>,
+        pc: &mut dyn KPreconditioner<Scalar = S>,
+    ) -> Result<(), KError> {
+        if let Some(cb) = self.modify_pc.as_mut() {
+            cb(
+                global_iter,
+                cycle_local_iter,
+                recurrence_residual,
+                true_residual,
+                pc,
+            )?;
+        }
+        Ok(())
     }
 
     #[inline]
@@ -476,6 +524,9 @@ impl FgmresSolver {
                         let base = j * n;
                         ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
                         if let Some(pc_ref) = pc.as_deref_mut() {
+                            if self.should_modify_pc_each_iteration() {
+                                self.call_modify_pc_callback(total_iters, j, res, None, pc_ref)?;
+                            }
                             #[cfg(feature = "metrics")]
                             let pc_start = std::time::Instant::now();
                             pc_ref.apply_mut_s(
@@ -543,6 +594,9 @@ impl FgmresSolver {
                         let base = j * n;
                         ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
                         if let Some(pc_ref) = pc.as_deref_mut() {
+                            if self.should_modify_pc_each_iteration() {
+                                self.call_modify_pc_callback(total_iters, j, res, None, pc_ref)?;
+                            }
                             #[cfg(feature = "metrics")]
                             let pc_start = std::time::Instant::now();
                             pc_ref.apply_mut_s(
@@ -1038,6 +1092,9 @@ impl FgmresSolver {
                 hook(total_iters, beta0)?;
             }
             if let Some(pc_ref) = pc.as_deref_mut() {
+                if self.should_modify_pc_on_restart() {
+                    self.call_modify_pc_callback(total_iters, 0, beta0, Some(true_res), pc_ref)?;
+                }
                 pc_ref.on_restart_s(total_iters, beta0)?;
             }
         }
@@ -1198,6 +1255,10 @@ impl FgmresSolver {
 
     pub fn set_residual_check_policy(&mut self, policy: ResidualCheckPolicy) {
         self.residual_check_policy = policy;
+    }
+
+    pub fn set_modify_pc_policy(&mut self, policy: ModifyPcPolicy) {
+        self.modify_pc_policy = policy;
     }
 
     pub fn set_strict_true_residual_cadence(&mut self, flag: bool) {
