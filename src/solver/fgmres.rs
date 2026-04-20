@@ -27,13 +27,20 @@ use crate::utils::monitor::{
 use smallvec::SmallVec;
 use std::any::Any;
 
-/// Orthogonalization flavor
+/// Orthogonalization method
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Orthog {
-    /// One-shot Classical Gram-Schmidt (CGS) projection.
-    Classical,
-    /// CGS with an immediate corrective refinement pass.
-    CgsRefined,
+pub enum OrthogMethod {
+    /// Classical Gram-Schmidt (CGS) projection.
+    ClassicalGS,
+    /// Modified Gram-Schmidt (MGS) projection.
+    ModifiedGS,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CgsRefinement {
+    Never,
+    IfNeeded,
+    Always,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,7 +67,9 @@ pub struct FgmresSolver {
     pub dtol: f64,
     pub maxits: usize,
     pub restart: usize,
-    pub orthog: Orthog,
+    pub orthog: OrthogMethod,
+    /// Refinement strategy for the ClassicalGS orthogonalization path.
+    pub cgs_refinement: CgsRefinement,
     pub haptol: f64,
     /// If true, size basis/H for maxits; otherwise per-restart sizing.
     pub preallocate: bool,
@@ -96,7 +105,8 @@ impl FgmresSolver {
             dtol: 1e3,
             maxits,
             restart: restart.max(1),
-            orthog: Orthog::Classical,
+            orthog: OrthogMethod::ClassicalGS,
+            cgs_refinement: CgsRefinement::IfNeeded,
             haptol: 1e-12,
             preallocate: false,
             on_restart: None,
@@ -145,6 +155,83 @@ impl FgmresSolver {
             need_z: true,
             block_s: 0,
         });
+    }
+
+    #[inline]
+    fn cgs_refinement_mode(&self) -> CgsRefinement {
+        self.cgs_refinement
+    }
+
+    fn should_run_cgs_refinement(&self, wnorm0: R, hnext: R) -> bool {
+        match self.cgs_refinement_mode() {
+            CgsRefinement::Never => false,
+            CgsRefinement::Always => true,
+            CgsRefinement::IfNeeded => wnorm0 > R::zero() && hnext < self.reorth_tol * wnorm0,
+        }
+    }
+
+    fn orthogonalize_cgs(&self, ws: &mut Workspace, red: &ReductCtx, n: usize, j: usize) -> R {
+        let wnorm0 = if matches!(self.cgs_refinement_mode(), CgsRefinement::IfNeeded) {
+            red.norm2(&ws.tmp2[..n])
+        } else {
+            R::zero()
+        };
+        let mut hvals: SmallVec<[S; 32]> = SmallVec::with_capacity(j + 1);
+        hvals.resize(j + 1, S::zero());
+        {
+            let tmp2_slice: &[S] = &ws.tmp2[..n];
+            let mut pairs: SmallVec<[(&[S], &[S]); 32]> = SmallVec::with_capacity(j + 1);
+            for i in 0..=j {
+                pairs.push((&ws.v_mem[i * n..(i + 1) * n], tmp2_slice));
+            }
+            red.dot_many_into(pairs.as_slice(), hvals.as_mut_slice());
+        }
+
+        for (i, hij) in hvals.iter().copied().enumerate() {
+            let vi = &ws.v_mem[i * n..(i + 1) * n];
+            for (w_i, &vi_val) in ws.tmp2[..n].iter_mut().zip(vi) {
+                *w_i -= hij * vi_val;
+            }
+        }
+
+        let mut hnext = red.norm2(&ws.tmp2[..n]);
+        if self.should_run_cgs_refinement(wnorm0, hnext) {
+            let mut corr: SmallVec<[S; 32]> = SmallVec::with_capacity(j + 1);
+            corr.resize(j + 1, S::zero());
+            {
+                let tmp2_slice: &[S] = &ws.tmp2[..n];
+                let mut pairs: SmallVec<[(&[S], &[S]); 32]> = SmallVec::with_capacity(j + 1);
+                for i in 0..=j {
+                    pairs.push((&ws.v_mem[i * n..(i + 1) * n], tmp2_slice));
+                }
+                red.dot_many_into(pairs.as_slice(), corr.as_mut_slice());
+            }
+            for (i, corr_val) in corr.into_iter().enumerate() {
+                let vi = &ws.v_mem[i * n..(i + 1) * n];
+                for (w_i, &vi_val) in ws.tmp2[..n].iter_mut().zip(vi) {
+                    *w_i -= corr_val * vi_val;
+                }
+                hvals[i] += corr_val;
+            }
+            hnext = red.norm2(&ws.tmp2[..n]);
+        }
+
+        for i in 0..=j {
+            *ws.h_at_mut(i, j) = hvals[i];
+        }
+        hnext
+    }
+
+    fn orthogonalize_mgs(&self, ws: &mut Workspace, red: &ReductCtx, n: usize, j: usize) -> R {
+        for i in 0..=j {
+            let hij = red.dot(&ws.v_mem[i * n..(i + 1) * n], &ws.tmp2[..n]);
+            *ws.h_at_mut(i, j) = hij;
+            let vi = &ws.v_mem[i * n..(i + 1) * n];
+            for (w_i, &vi_val) in ws.tmp2[..n].iter_mut().zip(vi) {
+                *w_i -= hij * vi_val;
+            }
+        }
+        red.norm2(&ws.tmp2[..n])
     }
 
     // legacy helpers for in-place Givens rotations removed; Workspace now handles
@@ -389,69 +476,19 @@ impl FgmresSolver {
                             metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
                         }
 
-                        let mut hvals: SmallVec<[S; 32]> = SmallVec::with_capacity(j + 1);
-                        hvals.resize(j + 1, S::zero());
-                        {
-                            let tmp2_slice: &[S] = &ws.tmp2[..n];
-                            let mut pairs: SmallVec<[(&[S], &[S]); 32]> =
-                                SmallVec::with_capacity(j + 1);
-                            for i in 0..=j {
-                                let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                pairs.push((vi, tmp2_slice));
-                            }
-                            red.dot_many_into(pairs.as_slice(), hvals.as_mut_slice());
-                            #[cfg(feature = "metrics")]
-                            {
-                                metrics.bytes_reduced += (j + 1) * std::mem::size_of::<R>();
-                            }
-                        }
-                        {
-                            let tmp2 = &mut ws.tmp2[..n];
-                            for (i, hij) in hvals.iter().copied().enumerate() {
-                                let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                for (w_i, &vi_val) in tmp2.iter_mut().zip(vi) {
-                                    *w_i -= hij * vi_val;
-                                }
-                            }
-                        }
-                        if matches!(self.orthog, Orthog::CgsRefined) {
-                            let mut corr: SmallVec<[S; 32]> = SmallVec::with_capacity(j + 1);
-                            corr.resize(j + 1, S::zero());
-                            {
-                                let tmp2_slice: &[S] = &ws.tmp2[..n];
-                                let mut pairs: SmallVec<[(&[S], &[S]); 32]> =
-                                    SmallVec::with_capacity(j + 1);
-                                for i in 0..=j {
-                                    let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                    pairs.push((vi, tmp2_slice));
-                                }
-                                red.dot_many_into(pairs.as_slice(), corr.as_mut_slice());
-                                #[cfg(feature = "metrics")]
-                                {
-                                    metrics.bytes_reduced += (j + 1) * std::mem::size_of::<R>();
-                                }
-                            }
-                            {
-                                let tmp2 = &mut ws.tmp2[..n];
-                                for (i, corr_val) in corr.into_iter().enumerate() {
-                                    if corr_val.abs() > 1e-12 {
-                                        let vi = &ws.v_mem[i * n..(i + 1) * n];
-                                        for (w_i, &vi_val) in tmp2.iter_mut().zip(vi) {
-                                            *w_i -= corr_val * vi_val;
-                                        }
-                                        hvals[i] += corr_val;
-                                    }
-                                }
-                            }
-                        }
-                        for i in 0..=j {
-                            *ws.h_at_mut(i, j) = hvals[i];
-                        }
-
-                        let hij1 = red.norm2(&ws.tmp2[..n]);
+                        let hij1 = match self.orthog {
+                            OrthogMethod::ClassicalGS => self.orthogonalize_cgs(ws, &red, n, j),
+                            OrthogMethod::ModifiedGS => self.orthogonalize_mgs(ws, &red, n, j),
+                        };
                         #[cfg(feature = "metrics")]
                         {
-                            metrics.bytes_reduced += std::mem::size_of::<R>();
+                            let dot_reductions = match (self.orthog, self.cgs_refinement_mode()) {
+                                (OrthogMethod::ClassicalGS, CgsRefinement::Never) => j + 2,
+                                (OrthogMethod::ClassicalGS, CgsRefinement::IfNeeded) => j + 3,
+                                (OrthogMethod::ClassicalGS, CgsRefinement::Always) => j + 3,
+                                (OrthogMethod::ModifiedGS, _) => j + 2,
+                            };
+                            metrics.bytes_reduced += dot_reductions * std::mem::size_of::<R>();
                         }
                         *ws.h_at_mut(j + 1, j) = S::from_real(hij1);
 
@@ -953,8 +990,11 @@ impl FgmresSolver {
     pub fn set_restart(&mut self, restart: usize) {
         self.restart = restart.max(1);
     }
-    pub fn set_orthog(&mut self, o: Orthog) {
+    pub fn set_orthog(&mut self, o: OrthogMethod) {
         self.orthog = o;
+    }
+    pub fn set_cgs_refinement(&mut self, refinement: CgsRefinement) {
+        self.cgs_refinement = refinement;
     }
     pub fn set_reorthog(&mut self, flag: bool) {
         self.reorth = if flag {
@@ -962,10 +1002,20 @@ impl FgmresSolver {
         } else {
             ReorthPolicy::Never
         };
+        self.cgs_refinement = if flag {
+            CgsRefinement::Always
+        } else {
+            CgsRefinement::Never
+        };
     }
 
     pub fn set_reorth_policy(&mut self, policy: ReorthPolicy) {
         self.reorth = policy;
+        self.cgs_refinement = match policy {
+            ReorthPolicy::Never => CgsRefinement::Never,
+            ReorthPolicy::IfNeeded => CgsRefinement::IfNeeded,
+            ReorthPolicy::Always => CgsRefinement::Always,
+        };
     }
 
     pub fn set_reorth_tol(&mut self, tol: f64) {
@@ -991,11 +1041,11 @@ impl FgmresSolver {
     }
 
     #[cfg(test)]
-    pub fn debug_config(&self) -> (usize, Orthog, bool, bool) {
+    pub fn debug_config(&self) -> (usize, OrthogMethod, bool, bool) {
         (
             self.restart,
             self.orthog,
-            !matches!(self.reorth, ReorthPolicy::Never),
+            !matches!(self.cgs_refinement, CgsRefinement::Never),
             self.happy_breakdown,
         )
     }

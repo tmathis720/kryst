@@ -108,7 +108,7 @@ pub struct KspOptions {
 
     /// Override restart for FGMRES; falls back to `restart` if unset
     pub fgmres_restart: Option<usize>,
-    /// Orthogonalization method for FGMRES: "cgs" | "classical" | "cgs_refined"
+    /// Orthogonalization method for FGMRES: "cgs" | "classical" | "mgs" | "modified" | "cgs_refined"
     pub fgmres_orthog: Option<String>,
     /// If true, perform a second orthogonalization pass (reorthogonalization)
     pub fgmres_reorthog: Option<bool>,
