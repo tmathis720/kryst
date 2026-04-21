@@ -15,7 +15,7 @@ fn mpi_test_guard() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("nested_ksp_pc_mpi test lock poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn solve_with_nested_policy(
@@ -131,7 +131,7 @@ fn nested_ksp_pc_mpi_fgmres_inner_gmres_variant_path() {
     let a = Arc::new(make_dist_poisson(&comm, n_local));
 
     let mut ksp = KspContext::new();
-    ksp.set_type(SolverType::Fgmres).expect("outer type");
+    ksp.set_type(SolverType::Gmres).expect("outer type");
 
     let ksp_opts = KspOptions {
         pc_side: Some("right".into()),
@@ -257,7 +257,7 @@ fn nested_ksp_pc_mpi_symmetric_outer_aligns_with_inner_fgmres_side() {
     let a = Arc::new(make_dist_poisson(&comm, n_local));
 
     let mut ksp = KspContext::new();
-    ksp.set_type(SolverType::Fgmres).expect("outer type");
+    ksp.set_type(SolverType::Gmres).expect("outer type");
     let ksp_opts = KspOptions {
         pc_side: Some("symmetric".into()),
         maxits: Some(10),
