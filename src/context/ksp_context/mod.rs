@@ -122,7 +122,9 @@ pub use execution::{
     AdaptiveExecutionDecision, ExecutionPolicy, NestedPolicyContext, OverlapStrategy,
     ThreadingPolicy,
 };
-pub use workspace::{GmresSStepWorkspace, GmresSpec, PipeReduct, ReorthPolicy, Workspace};
+pub use workspace::{
+    GmresSStepWorkspace, GmresSpec, GmresWorkspaceLayout, PipeReduct, ReorthPolicy, Workspace,
+};
 
 #[cfg(feature = "complex")]
 struct LinOpAsK<'a> {
