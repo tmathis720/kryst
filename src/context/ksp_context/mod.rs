@@ -41,6 +41,11 @@
 //! (preconditioned norm for Left CG/GMRES, true norm for Right GMRES). Final stats
 //! always include the true residual.
 //!
+//! For FGMRES specifically, inner monitor events report the Hessenberg recurrence
+//! residual, while restart-boundary updates use an explicit true residual check.
+//! Solver outputs expose this split through `final_recurrence_residual` vs
+//! `final_true_residual`, and through `fgmres_counters.explicit_residual_checks`.
+//!
 //! ## PREONLY behavior
 //! `Preonly` is a non-iterative mode: it invokes `Preconditioner::direct_solve` on the
 //! selected preconditioner using the preconditioner operator (`P`, or `A` when `P` is `None`).
@@ -3094,32 +3099,14 @@ impl KspContext {
                             .as_any_mut()
                             .downcast_mut::<CgnrSolver>()
                             .ok_or_else(|| KError::SolveError("CGNR solver missing".into()))?;
-                        s.solve_k(
-                            &op,
-                            pc_k.as_deref(),
-                            b,
-                            x,
-                            pc_side,
-                            &comm,
-                            monitors,
-                            work,
-                        )?
+                        s.solve_k(&op, pc_k.as_deref(), b, x, pc_side, &comm, monitors, work)?
                     }
                     SolverType::Gmres => {
                         let s = solver
                             .as_any_mut()
                             .downcast_mut::<GmresSolver>()
                             .ok_or_else(|| KError::SolveError("GMRES solver missing".into()))?;
-                        s.solve(
-                            &op,
-                            pc_k.as_deref(),
-                            b,
-                            x,
-                            pc_side,
-                            &comm,
-                            monitors,
-                            work,
-                        )?
+                        s.solve(&op, pc_k.as_deref(), b, x, pc_side, &comm, monitors, work)?
                     }
                     SolverType::Fgmres => {
                         let s = solver

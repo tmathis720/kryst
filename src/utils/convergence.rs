@@ -417,6 +417,25 @@ pub struct SolverCounters {
     pub residual_replacements: usize,
 }
 
+/// FGMRES-specific accounting captured by flexible GMRES variants.
+#[derive(Clone, Debug, Default)]
+pub struct FgmresCounters {
+    /// Number of restart boundaries crossed (excluding the initial cycle).
+    pub restart_count: usize,
+    /// Number of inner Arnoldi iterations completed in the last cycle.
+    pub inner_iterations_last_cycle: usize,
+    /// Number of orthogonalization passes executed (including second-pass reorthogonalization).
+    pub orthog_passes: usize,
+    /// Number of happy-breakdown events observed.
+    pub happy_breakdowns: usize,
+    /// Number of explicit true-residual recomputations (`||b - A x||_2` checks).
+    pub explicit_residual_checks: usize,
+    /// Number of pipelined-mode fallback/restart interventions triggered by stagnation policy.
+    pub pipeline_fallbacks: usize,
+    /// Number of mutable preconditioner modification callback invocations.
+    pub modify_pc_calls: usize,
+}
+
 /// Estimated reduction counts grouped by algorithm phase.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ReductionPhaseDiagnostics {
@@ -546,6 +565,8 @@ pub struct SolveStats<R> {
     pub counters: SolverCounters,
     /// Optional GCR-specific counters.
     pub gcr_counters: Option<GcrCounters>,
+    /// Optional FGMRES-specific counters.
+    pub fgmres_counters: Option<FgmresCounters>,
     /// Reduction accounting model for the selected solver variant.
     pub reduction_model: Option<ReductionModel>,
     /// Total number of complex drift events observed during reductions.
@@ -592,6 +613,7 @@ impl<R: Default> SolveStats<R> {
             reason,
             counters: SolverCounters::default(),
             gcr_counters: None,
+            fgmres_counters: None,
             reduction_model: None,
             complex_drift_events: 0,
             complex_drift_counts: [0; 6],
@@ -627,6 +649,12 @@ impl<R: Default> SolveStats<R> {
     /// Attach GCR-specific counters.
     pub fn with_gcr_counters(mut self, counters: GcrCounters) -> Self {
         self.gcr_counters = Some(counters);
+        self
+    }
+
+    /// Attach FGMRES-specific counters.
+    pub fn with_fgmres_counters(mut self, counters: FgmresCounters) -> Self {
+        self.fgmres_counters = Some(counters);
         self
     }
 

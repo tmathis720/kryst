@@ -20,7 +20,7 @@ use crate::solver::common::exit_checks::true_residual_converged_reason;
 use crate::solver::common::{ReductCtx, call_monitors, recompute_true_residual_norm_s};
 #[cfg(feature = "metrics")]
 use crate::utils::convergence::SolveMetrics;
-use crate::utils::convergence::{ConvergedReason, ReductionModel, SolveStats};
+use crate::utils::convergence::{ConvergedReason, FgmresCounters, ReductionModel, SolveStats};
 use crate::utils::monitor::{
     ResidualSnapshot, log_krylov_stagnation, log_residuals, stagnation_detected,
 };
@@ -319,6 +319,7 @@ impl FgmresSolver {
         j: usize,
         total_iters: usize,
         recurrence_residual: R,
+        modify_pc_calls: &mut usize,
         orthogonalization_passes: &mut usize,
         max_orthogonality_loss_estimate: &mut R,
         #[cfg(feature = "metrics")] metrics: &mut SolveMetrics,
@@ -330,6 +331,7 @@ impl FgmresSolver {
         ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
         if let Some(pc_ref) = pc.as_deref_mut() {
             if self.should_modify_pc_each_iteration() {
+                *modify_pc_calls += 1;
                 self.call_modify_pc_callback(total_iters, j, recurrence_residual, None, pc_ref)?;
             }
             #[cfg(feature = "metrics")]
@@ -406,6 +408,7 @@ impl FgmresSolver {
         recurrence_residual: R,
         pipeline_reductions: &mut usize,
         async_waits: &mut usize,
+        modify_pc_calls: &mut usize,
         orthogonalization_passes: &mut usize,
         #[cfg(feature = "metrics")] metrics: &mut SolveMetrics,
     ) -> Result<R, KError>
@@ -416,6 +419,7 @@ impl FgmresSolver {
         ws.tmp1[..n].copy_from_slice(&ws.v_mem[base..base + n]);
         if let Some(pc_ref) = pc.as_deref_mut() {
             if self.should_modify_pc_each_iteration() {
+                *modify_pc_calls += 1;
                 self.call_modify_pc_callback(total_iters, j, recurrence_residual, None, pc_ref)?;
             }
             #[cfg(feature = "metrics")]
@@ -607,6 +611,12 @@ impl FgmresSolver {
         let mut orthogonalization_passes = 0usize;
         let mut orthogonalization_rank_loss = false;
         let mut max_orthogonality_loss_estimate = R::zero();
+        let mut restart_count = 0usize;
+        let mut inner_iterations_last_cycle = 0usize;
+        let mut happy_breakdowns = 0usize;
+        let mut explicit_residual_checks = 0usize;
+        let mut pipeline_fallbacks = 0usize;
+        let mut modify_pc_calls = 0usize;
         let start_reduct = crate::utils::reduction::test_hooks::wait_counters();
 
         #[cfg(feature = "logging")]
@@ -619,6 +629,7 @@ impl FgmresSolver {
 
         // Iteration 0 monitor payload is the true residual norm ||b - A x0||_2.
         if call_monitors(mons, 0, res, pipeline_reductions) {
+            explicit_residual_checks += 1;
             let true_res = recompute_true_residual_norm_s(
                 a,
                 b,
@@ -641,6 +652,15 @@ impl FgmresSolver {
             };
             let mut stats = SolveStats::new(0, true_res, ConvergedReason::StoppedByMonitor)
                 .with_counters(counters)
+                .with_fgmres_counters(FgmresCounters {
+                    restart_count,
+                    inner_iterations_last_cycle,
+                    orthog_passes: orthogonalization_passes,
+                    happy_breakdowns,
+                    explicit_residual_checks,
+                    pipeline_fallbacks,
+                    modify_pc_calls,
+                })
                 .with_orthogonalization_diagnostics(
                     orthogonalization_passes,
                     orthogonalization_rank_loss,
@@ -651,6 +671,7 @@ impl FgmresSolver {
             stats.last_preconditioned_residual = last_preconditioned_residual;
             return Ok(stats);
         }
+        explicit_residual_checks += 1;
         let true_res = recompute_true_residual_norm_s(
             a,
             b,
@@ -702,11 +723,21 @@ impl FgmresSolver {
                 metrics.reductions = reductions;
                 stats.metrics = metrics;
             }
-            return Ok(stats.with_orthogonalization_diagnostics(
-                orthogonalization_passes,
-                orthogonalization_rank_loss,
-                max_orthogonality_loss_estimate,
-            ));
+            return Ok(stats
+                .with_fgmres_counters(FgmresCounters {
+                    restart_count,
+                    inner_iterations_last_cycle,
+                    orthog_passes: orthogonalization_passes,
+                    happy_breakdowns,
+                    explicit_residual_checks,
+                    pipeline_fallbacks,
+                    modify_pc_calls,
+                })
+                .with_orthogonalization_diagnostics(
+                    orthogonalization_passes,
+                    orthogonalization_rank_loss,
+                    max_orthogonality_loss_estimate,
+                ));
         }
 
         let mut stagnation_residuals: Vec<R> = Vec::with_capacity(6);
@@ -736,6 +767,7 @@ impl FgmresSolver {
                         j,
                         total_iters,
                         res,
+                        &mut modify_pc_calls,
                         &mut orthogonalization_passes,
                         &mut max_orthogonality_loss_estimate,
                         #[cfg(feature = "metrics")]
@@ -754,6 +786,7 @@ impl FgmresSolver {
                         res,
                         &mut pipeline_reductions,
                         &mut async_waits,
+                        &mut modify_pc_calls,
                         &mut orthogonalization_passes,
                         #[cfg(feature = "metrics")]
                         &mut metrics,
@@ -777,10 +810,12 @@ impl FgmresSolver {
                     stats.final_recurrence_residual = Some(res);
                     hapend = true;
                     if self.happy_breakdown {
+                        happy_breakdowns += 1;
                         converged = true;
                         converged_reason = Some(ConvergedReason::ConvergedHappyBreakdown);
                     } else {
                         orthogonalization_rank_loss = true;
+                        explicit_residual_checks += 1;
                         let true_res = recompute_true_residual_norm_s(
                             a,
                             b,
@@ -838,6 +873,7 @@ impl FgmresSolver {
                         overlap_global_reductions: async_waits,
                         residual_replacements: async_waits,
                     };
+                    explicit_residual_checks += 1;
                     let true_res = recompute_true_residual_norm_s(
                         a,
                         b,
@@ -861,6 +897,15 @@ impl FgmresSolver {
                     let mut stats =
                         SolveStats::new(total_iters, true_res, ConvergedReason::StoppedByMonitor)
                             .with_counters(counters)
+                            .with_fgmres_counters(FgmresCounters {
+                                restart_count,
+                                inner_iterations_last_cycle,
+                                orthog_passes: orthogonalization_passes,
+                                happy_breakdowns,
+                                explicit_residual_checks,
+                                pipeline_fallbacks,
+                                modify_pc_calls,
+                            })
                             .with_orthogonalization_diagnostics(
                                 orthogonalization_passes,
                                 orthogonalization_rank_loss,
@@ -873,6 +918,7 @@ impl FgmresSolver {
                 }
 
                 if self.should_check_true_residual_every_iteration() {
+                    explicit_residual_checks += 1;
                     let true_res = recompute_true_residual_norm_s(
                         a,
                         b,
@@ -896,6 +942,7 @@ impl FgmresSolver {
                 }
 
                 if let Some(reason) = ConvergedReason::from_non_finite(res) {
+                    explicit_residual_checks += 1;
                     let true_res = recompute_true_residual_norm_s(
                         a,
                         b,
@@ -959,6 +1006,7 @@ impl FgmresSolver {
                     log_krylov_stagnation("FGMRES", total_iters, res, action);
                     stagnation_residuals.clear();
                     if should_restart {
+                        pipeline_fallbacks += 1;
                         break;
                     }
                 }
@@ -984,12 +1032,14 @@ impl FgmresSolver {
             }
 
             let k = arnoldi_steps;
+            inner_iterations_last_cycle = k;
             let reduced_diag_threshold = self.haptol.max(0.0);
             let reduced_system_diagonal_ok = (0..k).all(|i| {
                 let diag = ws.h_at(i, i);
                 diag.real().is_finite() && diag.abs() > reduced_diag_threshold
             });
             if !reduced_system_diagonal_ok {
+                explicit_residual_checks += 1;
                 let true_res = recompute_true_residual_norm_s(
                     a,
                     b,
@@ -1028,6 +1078,15 @@ impl FgmresSolver {
                 };
                 return Ok(stats
                     .with_counters(counters)
+                    .with_fgmres_counters(FgmresCounters {
+                        restart_count,
+                        inner_iterations_last_cycle,
+                        orthog_passes: orthogonalization_passes,
+                        happy_breakdowns,
+                        explicit_residual_checks,
+                        pipeline_fallbacks,
+                        modify_pc_calls,
+                    })
                     .with_orthogonalization_diagnostics(
                         orthogonalization_passes,
                         orthogonalization_rank_loss,
@@ -1037,6 +1096,7 @@ impl FgmresSolver {
             let y = match self.backsolve_least_squares(ws, k) {
                 Ok(coeffs) => coeffs,
                 Err(_) => {
+                    explicit_residual_checks += 1;
                     let true_res = recompute_true_residual_norm_s(
                         a,
                         b,
@@ -1075,6 +1135,15 @@ impl FgmresSolver {
                     };
                     return Ok(stats
                         .with_counters(counters)
+                        .with_fgmres_counters(FgmresCounters {
+                            restart_count,
+                            inner_iterations_last_cycle,
+                            orthog_passes: orthogonalization_passes,
+                            happy_breakdowns,
+                            explicit_residual_checks,
+                            pipeline_fallbacks,
+                            modify_pc_calls,
+                        })
                         .with_orthogonalization_diagnostics(
                             orthogonalization_passes,
                             orthogonalization_rank_loss,
@@ -1093,6 +1162,7 @@ impl FgmresSolver {
                 );
             }
 
+            explicit_residual_checks += 1;
             let true_res = recompute_true_residual_norm_s(
                 a,
                 b,
@@ -1168,6 +1238,7 @@ impl FgmresSolver {
             ws.sn.fill(S::zero());
             ws.g.fill(S::zero());
             ws.g[0] = S::from_real(beta0);
+            restart_count += 1;
             if beta0 > R::default() {
                 let inv = S::from_real(1.0 / beta0);
                 for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
@@ -1183,6 +1254,7 @@ impl FgmresSolver {
             }
             if let Some(pc_ref) = pc.as_deref_mut() {
                 if self.should_modify_pc_on_restart() {
+                    modify_pc_calls += 1;
                     self.call_modify_pc_callback(total_iters, 0, beta0, Some(true_res), pc_ref)?;
                 }
                 pc_ref.on_restart_s(total_iters, beta0)?;
@@ -1212,6 +1284,15 @@ impl FgmresSolver {
         };
         let stats = stats
             .with_counters(counters)
+            .with_fgmres_counters(FgmresCounters {
+                restart_count,
+                inner_iterations_last_cycle,
+                orthog_passes: orthogonalization_passes,
+                happy_breakdowns,
+                explicit_residual_checks,
+                pipeline_fallbacks,
+                modify_pc_calls,
+            })
             .with_orthogonalization_diagnostics(
                 orthogonalization_passes,
                 orthogonalization_rank_loss,
