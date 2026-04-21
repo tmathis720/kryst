@@ -4757,7 +4757,7 @@ mod tests {
             .expect_err("FGMRES must reject left preconditioning");
         match err {
             KError::InvalidInput(msg) => {
-                assert!(msg.contains("FGMRES"));
+                assert!(msg.to_lowercase().contains("fgmres"));
                 assert!(msg.to_lowercase().contains("right preconditioning"));
             }
             other => panic!("unexpected error: {other:?}"),
