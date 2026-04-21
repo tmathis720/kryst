@@ -6,7 +6,7 @@ use crate::algebra::blas::{dot_conj, nrm2};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
-use crate::context::ksp_context::{GmresSpec, ReorthPolicy, Workspace};
+use crate::context::ksp_context::{GmresSpec, GmresWorkspaceLayout, ReorthPolicy, Workspace};
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::ops::klinop::KLinOp;
@@ -89,7 +89,11 @@ pub struct FgmresSolver {
     /// Refinement strategy for the ClassicalGS orthogonalization path.
     pub cgs_refinement: CgsRefinement,
     pub haptol: f64,
-    /// If true, size basis/H for maxits; otherwise per-restart sizing.
+    /// Controls workspace provisioning strategy.
+    ///
+    /// - `false` (default): allocate restart-local basis/QR storage for `restart` columns.
+    /// - `true`: preallocate once for `min(restart, maxits)` columns and reuse that capacity
+    ///   across cycles to avoid repeated growth checks.
     pub preallocate: bool,
     /// Optional hook called once per restart (after backsolve) so caller can adapt the PC.
     pub on_restart: Option<Box<dyn FnMut(usize, f64) -> Result<(), KError> + Send + Sync>>,
@@ -205,13 +209,50 @@ impl FgmresSolver {
         }
     }
 
-    fn ensure_workspace(&self, w: &mut Workspace, n: usize, m: usize) {
+    #[inline]
+    fn workspace_cols(&self) -> usize {
+        if self.preallocate {
+            self.restart.min(self.maxits)
+        } else {
+            self.restart
+        }
+    }
+
+    fn ensure_workspace(&self, w: &mut Workspace, n: usize) {
         w.acquire_gmres(GmresSpec {
+            n,
+            m: self.workspace_cols(),
+            need_z: true,
+            block_s: 0,
+        });
+    }
+
+    /// Estimate bytes required by the FGMRES workspace sections for `(n, restart)`.
+    ///
+    /// This includes the formally sized GMRES/FGMRES sections (`V`, `Z`, `H`, Givens/QR,
+    /// pipeline payload) plus solve-global temporary vectors (`tmp1/tmp2`, pipeline vectors).
+    /// It excludes allocator overhead and optional communication arenas.
+    pub fn memory_bytes(n: usize, restart: usize) -> usize {
+        let m = restart.max(1);
+        let layout = GmresWorkspaceLayout::from_spec(GmresSpec {
             n,
             m,
             need_z: true,
             block_s: 0,
         });
+        let scalar_items = layout
+            .v_len
+            .saturating_add(layout.z_len)
+            .saturating_add(layout.h_len)
+            .saturating_add(m)
+            .saturating_add(layout.g_len)
+            .saturating_add(layout.givens_len)
+            .saturating_add(layout.tmp_len.saturating_mul(2))
+            .saturating_add(layout.pipelined_vec_len.saturating_mul(2));
+        let real_items = m.saturating_add(layout.pipelined_payload_len);
+        scalar_items
+            .saturating_mul(std::mem::size_of::<S>())
+            .saturating_add(real_items.saturating_mul(std::mem::size_of::<R>()))
     }
 
     #[inline]
@@ -541,11 +582,7 @@ impl FgmresSolver {
             )));
         }
 
-        let block_m = if self.preallocate {
-            self.restart.min(self.maxits)
-        } else {
-            self.restart
-        };
+        let workspace_cols = self.workspace_cols();
 
         let mut owned_ws;
         let ws = if let Some(w) = work {
@@ -554,7 +591,7 @@ impl FgmresSolver {
             owned_ws = Workspace::new(n);
             &mut owned_ws
         };
-        self.ensure_workspace(ws, n, block_m);
+        self.ensure_workspace(ws, n);
         let red = ReductCtx::new(comm, Some(&*ws));
 
         let mons = monitors.unwrap_or(&[]);
@@ -582,10 +619,7 @@ impl FgmresSolver {
         let bnorm = norms[1].max(1e-32);
         let thr = self.atol.max(self.rtol * bnorm);
 
-        ws.h_mem.fill(S::zero());
-        ws.cs.fill(R::default());
-        ws.sn.fill(S::zero());
-        ws.g.fill(S::zero());
+        ws.clear_gmres_restart_state();
         ws.g[0] = S::from_real(beta0);
 
         if beta0 > R::default() {
@@ -745,7 +779,7 @@ impl FgmresSolver {
 
         while total_iters < self.maxits {
             let m_this = if self.preallocate {
-                block_m.min(self.maxits - total_iters)
+                workspace_cols.min(self.maxits - total_iters)
             } else {
                 self.restart.min(self.maxits - total_iters)
             };
@@ -1233,10 +1267,7 @@ impl FgmresSolver {
                 metrics.bytes_reduced += std::mem::size_of::<R>();
             }
 
-            ws.h_mem.fill(S::zero());
-            ws.cs.fill(R::default());
-            ws.sn.fill(S::zero());
-            ws.g.fill(S::zero());
+            ws.clear_gmres_restart_state();
             ws.g[0] = S::from_real(beta0);
             restart_count += 1;
             if beta0 > R::default() {
@@ -1364,7 +1395,7 @@ impl LinearSolver for FgmresSolver {
         if n == 0 {
             return;
         }
-        self.ensure_workspace(w, n, self.restart);
+        self.ensure_workspace(w, n);
     }
 
     fn solve(

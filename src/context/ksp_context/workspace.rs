@@ -10,8 +10,15 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone, Default)]
 pub struct Workspace {
+    // --- Solve-global scratch (persists for full solve) -----------------------
     pub tmp1: Vec<S>,
     pub tmp2: Vec<S>,
+    pub pipelined_w: Vec<S>,
+    pub pipelined_wtmp: Vec<S>,
+    pub pipelined_payload: Vec<R>,
+    pub bridge: BridgeScratch,
+    pub bridge_tmp: Vec<S>,
+
     // Legacy buffers for solvers not yet migrated
     pub q_s: Vec<Vec<S>>,
     pub z_s: Vec<Vec<S>>,
@@ -19,23 +26,25 @@ pub struct Workspace {
     pub q: Vec<Vec<S>>,
     pub z: Vec<Vec<S>>,
     pub h: Vec<Vec<S>>,
+
+    // --- GMRES/FGMRES restart-local state -------------------------------------
+    // Krylov basis V and flexible/preconditioned basis Z (column-major)
     pub v_mem: Vec<S>,
     pub z_mem: Vec<S>,
-    // Column-major Hessenberg storage for GMRES/FGMRES
+    // Column-major Hessenberg H (ld = m + 1)
     pub h_mem: Vec<S>,
+    // Per-column Givens/QR scratch and rotation state
     pub givens_col_scratch: Vec<S>,
     pub cs: Vec<R>,
     pub sn: Vec<S>,
     pub g: Vec<S>,
+    // Optional s-step/block-Arnoldi payloads (restart-local)
     pub blk_scratch: Vec<S>,
     pub blk_payload: Vec<R>,
-    pub bridge: BridgeScratch,
-    pub bridge_tmp: Vec<S>,
+
+    // Other solver-specific reusable workspaces
     pub block_buf: Option<BlockVec>,
     pub tsqr: Option<TsqrWorkspace>,
-    pub pipelined_w: Vec<S>,
-    pub pipelined_wtmp: Vec<S>,
-    pub pipelined_payload: Vec<R>,
     pub gmres_sstep: Option<GmresSStepWorkspace>,
     pub gmres_recycle: RecyclingSpace,
     pub reduction: crate::utils::reduction::ReductOptions,
@@ -161,6 +170,77 @@ pub struct GmresSpec {
     pub m: usize,
     pub need_z: bool,
     pub block_s: usize,
+}
+
+/// Capacity plan for the GMRES/FGMRES-specific workspace sections.
+///
+/// The sections are grouped by lifecycle:
+/// - **Restart-local state** (`v`, `z`, `h`, Givens/QR, and optional block payload) is
+///   consumed and overwritten within each restart cycle.
+/// - **Solve-global scratch** (`tmp*`, bridge/pipeline vectors) persists across the whole solve.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GmresWorkspaceLayout {
+    pub n: usize,
+    pub m: usize,
+    pub need_z: bool,
+    pub block_s: usize,
+    pub v_len: usize,
+    pub z_len: usize,
+    pub h_len: usize,
+    pub givens_len: usize,
+    pub g_len: usize,
+    pub pipelined_payload_len: usize,
+    pub pipelined_vec_len: usize,
+    pub tmp_len: usize,
+    pub blk_scratch_len: usize,
+    pub blk_payload_cap: usize,
+}
+
+impl GmresWorkspaceLayout {
+    pub fn from_spec(spec: GmresSpec) -> Self {
+        let n = spec.n;
+        let m = spec.m;
+        let v_len = (m + 1).checked_mul(n).expect("v_len overflow");
+        let z_len = if spec.need_z {
+            m.checked_mul(n).expect("z_len overflow")
+        } else {
+            0
+        };
+        let h_len = (m + 1).checked_mul(m).expect("h_len overflow");
+        let g_len = m + 1;
+        #[cfg(feature = "complex")]
+        let pipelined_payload_len = 2 * (m + 1) + 1;
+        #[cfg(not(feature = "complex"))]
+        let pipelined_payload_len = m + 2;
+
+        let blk_scratch_len = if spec.block_s > 0 {
+            n.saturating_mul(spec.block_s)
+        } else {
+            0
+        };
+        let blk_payload_cap = if spec.block_s > 0 {
+            block_payload_capacity(m.saturating_add(1), spec.block_s)
+        } else {
+            0
+        };
+
+        Self {
+            n,
+            m,
+            need_z: spec.need_z,
+            block_s: spec.block_s,
+            v_len,
+            z_len,
+            h_len,
+            givens_len: m + 1,
+            g_len,
+            pipelined_payload_len,
+            pipelined_vec_len: n,
+            tmp_len: n,
+            blk_scratch_len,
+            blk_payload_cap,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -319,49 +399,51 @@ impl Workspace {
         self.m = spec.m;
         self.need_z = spec.need_z;
 
-        let n = spec.n;
-        let m = spec.m;
+        let layout = GmresWorkspaceLayout::from_spec(spec);
 
-        let v_len = (m + 1).checked_mul(n).expect("v_len overflow");
-        let z_len = if spec.need_z {
-            m.checked_mul(n).expect("z_len overflow")
-        } else {
-            0
-        };
-        let h_len = (m + 1).checked_mul(m).expect("h_len overflow");
-        let g_len = m + 1;
-
-        ensure_len(&mut self.tmp1, n);
-        ensure_len(&mut self.tmp2, n);
-        ensure_len(&mut self.v_mem, v_len);
+        ensure_len(&mut self.tmp1, layout.tmp_len);
+        ensure_len(&mut self.tmp2, layout.tmp_len);
+        ensure_len(&mut self.v_mem, layout.v_len);
         if spec.need_z {
-            ensure_len(&mut self.z_mem, z_len);
+            ensure_len(&mut self.z_mem, layout.z_len);
         } else {
             // Keep capacity to avoid allocator churn when need_z toggles.
             self.z_mem.clear();
         }
-        ensure_len(&mut self.h_mem, h_len);
-        ensure_len(&mut self.cs, m);
-        ensure_len(&mut self.sn, m);
-        ensure_len(&mut self.g, g_len);
-        ensure_len(&mut self.pipelined_w, n);
-        ensure_len(&mut self.pipelined_wtmp, n);
-        #[cfg(feature = "complex")]
-        let payload_len = 2 * (m + 1) + 1;
-        #[cfg(not(feature = "complex"))]
-        let payload_len = m + 2;
-        ensure_len(&mut self.pipelined_payload, payload_len);
+        ensure_len(&mut self.h_mem, layout.h_len);
+        ensure_len(&mut self.cs, spec.m);
+        ensure_len(&mut self.sn, spec.m);
+        ensure_len(&mut self.g, layout.g_len);
+        ensure_len(&mut self.pipelined_w, layout.pipelined_vec_len);
+        ensure_len(&mut self.pipelined_wtmp, layout.pipelined_vec_len);
+        ensure_len(&mut self.pipelined_payload, layout.pipelined_payload_len);
 
-        if spec.block_s > 0 {
-            ensure_len(&mut self.blk_scratch, n * spec.block_s);
-            let payload_cap = block_payload_capacity(spec.m.saturating_add(1), spec.block_s);
-            ensure_capacity(&mut self.blk_payload, payload_cap);
+        if layout.block_s > 0 {
+            ensure_len(&mut self.blk_scratch, layout.blk_scratch_len);
+            ensure_capacity(&mut self.blk_payload, layout.blk_payload_cap);
         } else {
             self.blk_scratch.clear();
             self.blk_payload.clear();
         }
 
-        self.ensure_sstep(n, spec.block_s, m);
+        self.ensure_sstep(layout.n, layout.block_s, layout.m);
+    }
+
+    /// Clear per-restart GMRES/FGMRES state while preserving allocation capacity.
+    pub fn clear_gmres_restart_state(&mut self) {
+        self.h_mem.fill(S::zero());
+        self.cs.fill(R::default());
+        self.sn.fill(S::zero());
+        self.g.fill(S::zero());
+    }
+
+    /// Clear solve-global scratch vectors used by GMRES/FGMRES without releasing memory.
+    pub fn clear_gmres_global_scratch(&mut self) {
+        self.tmp1.fill(S::zero());
+        self.tmp2.fill(S::zero());
+        self.pipelined_w.fill(S::zero());
+        self.pipelined_wtmp.fill(S::zero());
+        self.pipelined_payload.fill(R::default());
     }
 
     pub fn set_reduction_options(&mut self, opt: crate::utils::reduction::ReductOptions) {
