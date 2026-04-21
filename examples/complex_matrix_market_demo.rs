@@ -35,7 +35,7 @@ mod complex_demo {
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::jacobi::Jacobi;
     use kryst::solver::LinearSolver;
-    use kryst::solver::fgmres::{FgmresSolver, FgmresVariant, Orthog};
+    use kryst::solver::fgmres::{FgmresSolver, FgmresVariant, OrthogMethod};
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
 
@@ -325,7 +325,7 @@ mod complex_demo {
     struct RunSpec {
         restart: usize,
         variant: FgmresVariant,
-        orthog: Orthog,
+        orthog: OrthogMethod,
         reorth: ReorthPolicy,
         pc_side: PcSide,
         pc: PcKind,
@@ -345,7 +345,7 @@ mod complex_demo {
         restarts: Vec<usize>,
         include_restart_200: bool,
         variants: Vec<FgmresVariant>,
-        orthogs: Vec<Orthog>,
+        orthogs: Vec<OrthogMethod>,
         reorths: Vec<ReorthPolicy>,
     }
 
@@ -357,7 +357,7 @@ mod complex_demo {
                 restarts: vec![50, 100, 150],
                 include_restart_200: false,
                 variants: vec![FgmresVariant::Classical],
-                orthogs: vec![Orthog::Classical],
+                orthogs: vec![OrthogMethod::ClassicalGS],
                 reorths: vec![ReorthPolicy::IfNeeded],
             }
         }
@@ -480,12 +480,14 @@ mod complex_demo {
         }
     }
 
-    fn parse_orthog(token: &str) -> Result<Orthog, KError> {
+    fn parse_orthog(token: &str) -> Result<OrthogMethod, KError> {
         match token.trim().to_ascii_lowercase().as_str() {
-            "classical" | "cgs" => Ok(Orthog::Classical),
-            "cgs_refined" | "cgs-refined" | "refined" => Ok(Orthog::CgsRefined),
+            "classical" | "cgs" | "cgs_refined" | "cgs-refined" | "refined" => {
+                Ok(OrthogMethod::ClassicalGS)
+            }
+            "mgs" | "modified" => Ok(OrthogMethod::ModifiedGS),
             other => Err(KError::InvalidInput(format!(
-                "invalid orthog '{other}', expected classical|cgs|cgs_refined"
+                "invalid orthog '{other}', expected classical|cgs|cgs_refined|mgs|modified"
             ))),
         }
     }
@@ -505,7 +507,7 @@ mod complex_demo {
         parse_csv(flag, value, parse_variant)
     }
 
-    fn parse_orthog_csv(flag: &str, value: &str) -> Result<Vec<Orthog>, KError> {
+    fn parse_orthog_csv(flag: &str, value: &str) -> Result<Vec<OrthogMethod>, KError> {
         parse_csv(flag, value, parse_orthog)
     }
 
@@ -622,10 +624,10 @@ mod complex_demo {
         }
     }
 
-    fn orthog_label(orthog: Orthog) -> &'static str {
+    fn orthog_label(orthog: OrthogMethod) -> &'static str {
         match orthog {
-            Orthog::Classical => "classical-gs",
-            Orthog::CgsRefined => "cgs-with-refinement",
+            OrthogMethod::ClassicalGS => "classical-gs",
+            OrthogMethod::ModifiedGS => "modified-gs",
         }
     }
 
