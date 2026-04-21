@@ -34,7 +34,7 @@ fn pipelined_cg_uses_single_reduction_per_iteration() -> Result<(), KError> {
         Some(&mut pc),
         &b,
         &mut x,
-        PcSide::Right,
+        PcSide::Left,
         &comm,
         None,
         Some(&mut ws),

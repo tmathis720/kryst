@@ -695,14 +695,16 @@ impl KspContext {
     }
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
-        if solver_type == SolverType::Fgmres
-            && self.pc_side_explicit
-            && self.pc_side != PcSide::Right
-        {
-            return Err(KError::InvalidInput(format!(
-                "FGMRES supports only right preconditioning; got {:?}",
-                self.pc_side
-            )));
+        if solver_type == SolverType::Fgmres {
+            if self.pc_side_explicit && self.pc_side != PcSide::Right {
+                return Err(KError::InvalidInput(format!(
+                    "FGMRES supports only right preconditioning; got {:?}",
+                    self.pc_side
+                )));
+            }
+            if !self.pc_side_explicit {
+                self.pc_side = PcSide::Right;
+            }
         }
         if let Some(required) = solver_type.required_pc_side() {
             let normalized = Self::effective_side_for_solver(self.pc_side, solver_type);
