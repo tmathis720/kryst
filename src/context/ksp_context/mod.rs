@@ -238,6 +238,14 @@ impl SolverType {
             _ => None,
         }
     }
+
+    #[inline]
+    pub fn right_only_pc_side(self) -> bool {
+        matches!(
+            self,
+            SolverType::Fgmres | SolverType::Gcr | SolverType::PipeGcr
+        )
+    }
 }
 
 impl FromStr for SolverType {
@@ -517,7 +525,7 @@ impl KspContext {
     #[inline]
     fn effective_side_for_solver(side: PcSide, solver_type: SolverType) -> PcSide {
         match solver_type {
-            SolverType::Fgmres => side,
+            SolverType::Fgmres | SolverType::Gcr | SolverType::PipeGcr => PcSide::Right,
             _ => match side {
                 PcSide::Symmetric => PcSide::Left,
                 s => s,
@@ -596,9 +604,9 @@ impl KspContext {
             side
         };
         if let Some(st) = self.solver_type {
-            if st == SolverType::Fgmres && side != PcSide::Right {
+            if st.right_only_pc_side() && side != PcSide::Right {
                 return Err(KError::InvalidInput(format!(
-                    "FGMRES supports only right preconditioning; got {side:?}"
+                    "{st:?} supports only right preconditioning; got {side:?}"
                 )));
             }
             if let Some(required) = st.required_pc_side() {
@@ -695,10 +703,10 @@ impl KspContext {
     }
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
-        if solver_type == SolverType::Fgmres {
+        if solver_type.right_only_pc_side() {
             if self.pc_side_explicit && self.pc_side != PcSide::Right {
                 return Err(KError::InvalidInput(format!(
-                    "FGMRES supports only right preconditioning; got {:?}",
+                    "{solver_type:?} supports only right preconditioning; got {:?}",
                     self.pc_side
                 )));
             }
@@ -4094,9 +4102,9 @@ impl KspContext {
         }
 
         if let Some(st) = self.solver_type {
-            if st == SolverType::Fgmres && side != PcSide::Right {
+            if st.right_only_pc_side() && side != PcSide::Right {
                 return Err(KError::InvalidInput(format!(
-                    "FGMRES supports only right preconditioning; got {side:?}"
+                    "{st:?} supports only right preconditioning; got {side:?}"
                 )));
             }
             if let Some(required) = st.required_pc_side() {
