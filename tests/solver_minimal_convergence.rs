@@ -72,7 +72,9 @@ fn assert_converged(reason: ConvergedReason) {
     assert!(
         matches!(
             reason,
-            ConvergedReason::ConvergedAtol | ConvergedReason::ConvergedRtol
+            ConvergedReason::ConvergedAtol
+                | ConvergedReason::ConvergedRtol
+                | ConvergedReason::ConvergedHappyBreakdown
         ),
         "unexpected convergence reason: {reason:?}"
     );
