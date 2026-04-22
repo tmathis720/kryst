@@ -1,19 +1,26 @@
 use super::util;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
+use crate::matrix::dist_csr::{DistributedPlanMetrics, choose_distributed_plan};
 use crate::matrix::op::{DistLayout, LinOp};
 use crate::matrix::{DistCsrOp, sparse::CsrMatrix};
-use crate::parallel::{NoComm, UniverseComm};
 #[cfg(feature = "rayon")]
 use crate::parallel::RayonComm;
+use crate::parallel::{NoComm, UniverseComm};
 use crate::preconditioner::PcSide;
-use crate::solver::fgmres::FgmresSolver;
 use crate::solver::LinearSolver;
+use crate::solver::fgmres::{FgmresSolver, FgmresVariant, PipelinePolicy, ResidualCheckPolicy};
 use approx::assert_abs_diff_eq;
 use std::any::Any;
 
 fn dist_fixture_2x2() -> Result<(DistCsrOp, Vec<f64>, Vec<f64>), KError> {
-    let csr = CsrMatrix::from_csr(2, 2, vec![0, 2, 4], vec![0, 1, 0, 1], vec![4.0, 1.0, 2.0, 3.0]);
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![4.0, 1.0, 2.0, 3.0],
+    );
     let x_true = vec![1.0, -2.0];
     let mut b = vec![0.0; 2];
     csr.spmv(&x_true, &mut b);
@@ -134,4 +141,60 @@ fn fgmres_distcsr_route_rejects_noncongruent_comm() {
         KError::InvalidInput(msg) => assert!(msg.contains("DistCSR route")),
         other => panic!("unexpected error: {other:?}"),
     }
+}
+
+#[test]
+fn fgmres_distcsr_policy_selector_prefers_low_sync_for_comm_heavy_setup() {
+    let solver = FgmresSolver::new(1e-10, 200, 64);
+    let heavy_diag = choose_distributed_plan(
+        &DistributedPlanMetrics {
+            n_local_rows: 20_000,
+            local_nnz: 80_000,
+            local_diag_nnz: 28_000,
+            ghost_nnz: 52_000,
+            local_only_rows: 7_500,
+            border_rows: 12_500,
+            halo_recv_volume: 14_000,
+            halo_send_volume: 13_500,
+        },
+        None,
+    );
+    let decision = solver.select_distcsr_policy(&heavy_diag, 8);
+    assert_eq!(decision.variant, FgmresVariant::Pipelined);
+    assert!(matches!(
+        decision.pipeline_policy,
+        PipelinePolicy::FallbackToClassicalOnStagnation
+            | PipelinePolicy::PeriodicResidualReplacement
+    ));
+    assert_eq!(
+        decision.residual_check_policy,
+        ResidualCheckPolicy::RestartOnly
+    );
+    assert!(decision.restart <= solver.restart);
+}
+
+#[test]
+fn fgmres_distcsr_policy_selector_prefers_classical_for_compute_heavy_setup() {
+    let solver = FgmresSolver::new(1e-10, 200, 12);
+    let compute_diag = choose_distributed_plan(
+        &DistributedPlanMetrics {
+            n_local_rows: 20_000,
+            local_nnz: 90_000,
+            local_diag_nnz: 86_000,
+            ghost_nnz: 4_000,
+            local_only_rows: 18_500,
+            border_rows: 1_500,
+            halo_recv_volume: 400,
+            halo_send_volume: 450,
+        },
+        None,
+    );
+    let decision = solver.select_distcsr_policy(&compute_diag, 8);
+    assert_eq!(decision.variant, FgmresVariant::Classical);
+    assert_eq!(decision.pipeline_policy, PipelinePolicy::Strict);
+    assert!(matches!(
+        decision.residual_check_policy,
+        ResidualCheckPolicy::OnConvergence | ResidualCheckPolicy::EveryIteration
+    ));
+    assert!(decision.restart >= solver.restart);
 }

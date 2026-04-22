@@ -8,11 +8,12 @@ use crate::algebra::prelude::*;
 use crate::algebra::scalar::{copy_real_to_scalar_in, copy_scalar_to_real_in};
 use crate::context::ksp_context::{GmresSpec, GmresWorkspaceLayout, ReorthPolicy, Workspace};
 use crate::error::KError;
+use crate::matrix::dist_csr::{DistributedPlanDiagnostics, HaloOverlapMode};
 use crate::matrix::op::LinOp;
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
 use crate::ops::wrap::{as_s_op, as_s_pc_mut};
-use crate::parallel::UniverseComm;
+use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
@@ -73,6 +74,16 @@ pub enum ModifyPcPolicy {
     Never,
     OnRestart,
     EachIteration,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DistCsrPolicyDecision {
+    pub(crate) variant: FgmresVariant,
+    pub(crate) pipeline_policy: PipelinePolicy,
+    pub(crate) residual_check_policy: ResidualCheckPolicy,
+    pub(crate) restart: usize,
+    pub(crate) tag: &'static str,
+    pub(crate) reason: &'static str,
 }
 
 pub type ModifyPcCallback = dyn FnMut(usize, usize, R, Option<R>, &mut dyn KPreconditioner<Scalar = S>) -> Result<(), KError>
@@ -258,6 +269,77 @@ impl FgmresSolver {
     #[inline]
     fn cgs_refinement_mode(&self) -> CgsRefinement {
         self.cgs_refinement
+    }
+
+    pub(crate) fn select_distcsr_policy(
+        &self,
+        diag: &DistributedPlanDiagnostics,
+        comm_size: usize,
+    ) -> DistCsrPolicyDecision {
+        let halo_volume = (diag.halo_recv_volume + diag.halo_send_volume) as f64;
+        let comm_pressure = diag.expected_communication_fraction;
+        let compute_pressure = diag.expected_computation_fraction;
+        let overlap_enabled = diag.overlap_mode == HaloOverlapMode::Interior;
+        let communication_heavy =
+            comm_size > 1 && (overlap_enabled || comm_pressure >= 0.55 || halo_volume >= 4096.0);
+
+        if communication_heavy {
+            let very_heavy = comm_pressure >= 0.70 || halo_volume >= 16_384.0;
+            let restart = if very_heavy {
+                self.restart.min(24).max(8)
+            } else {
+                self.restart.min(32).max(8)
+            };
+            DistCsrPolicyDecision {
+                variant: FgmresVariant::Pipelined,
+                pipeline_policy: if very_heavy {
+                    PipelinePolicy::PeriodicResidualReplacement
+                } else {
+                    PipelinePolicy::FallbackToClassicalOnStagnation
+                },
+                residual_check_policy: ResidualCheckPolicy::RestartOnly,
+                restart,
+                tag: "distcsr_policy=comm_heavy",
+                reason: "high halo/communication pressure detected",
+            }
+        } else {
+            DistCsrPolicyDecision {
+                variant: FgmresVariant::Classical,
+                pipeline_policy: PipelinePolicy::Strict,
+                residual_check_policy: if compute_pressure >= 0.70 {
+                    ResidualCheckPolicy::OnConvergence
+                } else {
+                    ResidualCheckPolicy::EveryIteration
+                },
+                restart: self.restart.max(16).min(self.maxits.max(1)),
+                tag: "distcsr_policy=compute_heavy",
+                reason: "low halo pressure and compute-dominant local work",
+            }
+        }
+    }
+
+    fn apply_distcsr_policy_hook(&mut self, diag: &DistributedPlanDiagnostics, comm_size: usize) {
+        let decision = self.select_distcsr_policy(diag, comm_size);
+        self.variant = decision.variant;
+        self.pipeline_policy = decision.pipeline_policy;
+        self.residual_check_policy = decision.residual_check_policy;
+        self.restart = decision.restart.max(1);
+
+        #[cfg(feature = "logging")]
+        if log::log_enabled!(log::Level::Info) {
+            log::info!(
+                "FGMRES DistCSR policy selected: {} reason={} variant={:?} pipeline_policy={:?} residual_check_policy={:?} restart={} comm_pressure={:.3} compute_pressure={:.3} overlap={:?}",
+                decision.tag,
+                decision.reason,
+                decision.variant,
+                decision.pipeline_policy,
+                decision.residual_check_policy,
+                decision.restart,
+                diag.expected_communication_fraction,
+                diag.expected_computation_fraction,
+                diag.overlap_mode,
+            );
+        }
     }
 
     fn should_run_cgs_refinement(&self, wnorm0: R, hnext: R) -> bool {
@@ -553,6 +635,24 @@ impl FgmresSolver {
     pub fn solve_k<A>(
         &mut self,
         a: &A,
+        pc: Option<&mut dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
+        self.solve_k_with_dist_policy(a, pc, b, x, pc_side, comm, monitors, work, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_k_with_dist_policy<A>(
+        &mut self,
+        a: &A,
         mut pc: Option<&mut dyn KPreconditioner<Scalar = S>>,
         b: &[S],
         x: &mut [S],
@@ -560,6 +660,7 @@ impl FgmresSolver {
         comm: &UniverseComm,
         monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
+        dist_plan_diag: Option<&DistributedPlanDiagnostics>,
     ) -> Result<SolveStats<R>, KError>
     where
         A: KLinOp<Scalar = S> + ?Sized,
@@ -582,6 +683,9 @@ impl FgmresSolver {
             )));
         }
 
+        if let Some(diag) = dist_plan_diag {
+            self.apply_distcsr_policy_hook(diag, comm.size());
+        }
         let workspace_cols = self.workspace_cols();
 
         let mut owned_ws;
@@ -1348,8 +1452,7 @@ impl FgmresSolver {
         if !op_comm.congruent(comm) {
             return Err(KError::InvalidInput(format!(
                 "FGMRES DistCSR route: communicator mismatch (A={:?}, solve={:?})",
-                op_comm,
-                comm
+                op_comm, comm
             )));
         }
 
@@ -1378,7 +1481,17 @@ impl FgmresSolver {
         monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
-        self.solve_k(a, pc, b, x, pc_side, comm, monitors, work)
+        self.solve_k_with_dist_policy(
+            a,
+            pc,
+            b,
+            x,
+            pc_side,
+            comm,
+            monitors,
+            work,
+            Some(a.plan_diagnostics()),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
