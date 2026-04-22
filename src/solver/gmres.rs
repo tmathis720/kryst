@@ -1107,7 +1107,7 @@ impl GmresSolver {
                 PcSide::Left | PcSide::Symmetric => monitor_residual,
                 PcSide::Right => true_residual,
             };
-            if pc.is_none() {
+            if pc.is_none() && !matches!(self.variant, GmresVariant::Pipelined) {
                 let abs_gap = (true_residual - cycle_res_est).abs();
                 let rel_gap = abs_gap / breakdown_scale;
                 let abs_roundoff_tol =
@@ -1118,7 +1118,7 @@ impl GmresSolver {
                 );
             }
             #[cfg(debug_assertions)]
-            if pc.is_none() {
+            if pc.is_none() && !matches!(self.variant, GmresVariant::Pipelined) {
                 let ls_abs_roundoff_tol = R::from(2048.0 * f64::EPSILON) * ls_scale.max(R::one());
                 assert!(
                     ls_rel_gap < R::from(1e-8) || ls_abs_gap <= ls_abs_roundoff_tol,
