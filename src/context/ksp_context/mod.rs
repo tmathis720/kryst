@@ -525,7 +525,10 @@ impl KspContext {
     #[inline]
     fn effective_side_for_solver(side: PcSide, solver_type: SolverType) -> PcSide {
         match solver_type {
-            SolverType::Fgmres | SolverType::Gcr | SolverType::PipeGcr => PcSide::Right,
+            SolverType::Fgmres | SolverType::Gcr | SolverType::PipeGcr => match side {
+                PcSide::Symmetric => PcSide::Right,
+                s => s,
+            },
             _ => match side {
                 PcSide::Symmetric => PcSide::Left,
                 s => s,
@@ -604,7 +607,7 @@ impl KspContext {
             side
         };
         if let Some(st) = self.solver_type {
-            if st.right_only_pc_side() && side != PcSide::Right {
+            if st.right_only_pc_side() && normalized != PcSide::Right {
                 return Err(KError::InvalidInput(format!(
                     "{st:?} supports only right preconditioning; got {side:?}"
                 )));
@@ -704,7 +707,9 @@ impl KspContext {
 
     pub fn set_type(&mut self, solver_type: SolverType) -> Result<&mut Self, KError> {
         if solver_type.right_only_pc_side() {
-            if self.pc_side_explicit && self.pc_side != PcSide::Right {
+            if self.pc_side_explicit
+                && Self::effective_side_for_solver(self.pc_side, solver_type) != PcSide::Right
+            {
                 return Err(KError::InvalidInput(format!(
                     "{solver_type:?} supports only right preconditioning; got {:?}",
                     self.pc_side
@@ -1054,7 +1059,7 @@ impl KspContext {
             (requested_solver_type, opts.pc_side.as_ref())
         {
             let parsed_side = PcSide::from_str(side_label)?;
-            if parsed_side != PcSide::Right {
+            if Self::effective_side_for_solver(parsed_side, SolverType::Fgmres) != PcSide::Right {
                 return Err(KError::InvalidInput(format!(
                     "FGMRES supports only right preconditioning; got {parsed_side:?} from -ksp_pc_side={side_label}"
                 )));
