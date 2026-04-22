@@ -1338,6 +1338,50 @@ impl FgmresSolver {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn validate_dist_csr_inputs(
+        a: &crate::matrix::DistCsrOp,
+        comm: &UniverseComm,
+        b_len: usize,
+        x_len: usize,
+    ) -> Result<(), KError> {
+        let op_comm = a.comm();
+        if !op_comm.congruent(comm) {
+            return Err(KError::InvalidInput(format!(
+                "FGMRES DistCSR route: communicator mismatch (A={:?}, solve={:?})",
+                op_comm,
+                comm
+            )));
+        }
+
+        let layout = a.dist_layout().ok_or_else(|| {
+            KError::InvalidInput("FGMRES DistCSR route: missing distributed layout".into())
+        })?;
+        let n_local = layout.row_end.saturating_sub(layout.row_start);
+        if b_len != n_local || x_len != n_local {
+            return Err(KError::InvalidInput(format!(
+                "FGMRES DistCSR route: local vector lengths must match layout rows (b={}, x={}, local_rows={})",
+                b_len, x_len, n_local
+            )));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_dist_csr(
+        &mut self,
+        a: &crate::matrix::DistCsrOp,
+        pc: Option<&mut dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError> {
+        self.solve_k(a, pc, b, x, pc_side, comm, monitors, work)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn solve_f64(
         &mut self,
         a: &dyn LinOp<S = f64>,
@@ -1355,26 +1399,25 @@ impl FgmresSolver {
                 "FGMRES: vector size mismatch".to_string(),
             ));
         }
+        if let Some(dist) = a.as_any().downcast_ref::<crate::matrix::DistCsrOp>() {
+            Self::validate_dist_csr_inputs(dist, comm, b.len(), x.len())?;
+        }
 
         let mut x_s = vec![S::zero(); n];
         copy_real_to_scalar_in(x, &mut x_s);
         let mut b_s = vec![S::zero(); n];
         copy_real_to_scalar_in(b, &mut b_s);
 
-        let op = as_s_op(a);
         let mut pc_storage = pc.map(as_s_pc_mut);
-        let stats = self.solve_k(
-            &op,
-            pc_storage
-                .as_mut()
-                .map(|w| w as &mut dyn KPreconditioner<Scalar = S>),
-            &b_s,
-            &mut x_s,
-            pc_side,
-            comm,
-            monitors,
-            work,
-        )?;
+        let pc_ref = pc_storage
+            .as_mut()
+            .map(|w| w as &mut dyn KPreconditioner<Scalar = S>);
+        let stats = if let Some(dist) = a.as_any().downcast_ref::<crate::matrix::DistCsrOp>() {
+            self.solve_dist_csr(dist, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work)?
+        } else {
+            let op = as_s_op(a);
+            self.solve_k(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work)?
+        };
 
         copy_scalar_to_real_in(&x_s, x);
         Ok(stats.with_reduction_model(self.reduction_model()))
