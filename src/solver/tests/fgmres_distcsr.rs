@@ -13,6 +13,7 @@ use crate::solver::fgmres::{FgmresSolver, FgmresVariant, PipelinePolicy, Residua
 use approx::assert_abs_diff_eq;
 use std::any::Any;
 
+#[cfg(not(feature = "complex"))]
 fn dist_fixture_2x2() -> Result<(DistCsrOp, Vec<f64>, Vec<f64>), KError> {
     let csr = CsrMatrix::from_csr(
         2,
@@ -29,10 +30,12 @@ fn dist_fixture_2x2() -> Result<(DistCsrOp, Vec<f64>, Vec<f64>), KError> {
     Ok((op, b, x_true))
 }
 
+#[cfg(not(feature = "complex"))]
 struct HiddenDistOp {
     inner: DistCsrOp,
 }
 
+#[cfg(not(feature = "complex"))]
 impl LinOp for HiddenDistOp {
     type S = f64;
 
@@ -62,6 +65,7 @@ impl LinOp for HiddenDistOp {
 }
 
 #[test]
+#[cfg(not(feature = "complex"))]
 fn fgmres_distcsr_and_generic_routes_match_numerics() -> Result<(), KError> {
     let (dist, b, x_true) = dist_fixture_2x2()?;
     let comm = UniverseComm::NoComm(NoComm);
@@ -115,6 +119,7 @@ fn fgmres_distcsr_and_generic_routes_match_numerics() -> Result<(), KError> {
 
 #[cfg(feature = "rayon")]
 #[test]
+#[cfg(not(feature = "complex"))]
 fn fgmres_distcsr_route_rejects_noncongruent_comm() {
     let (dist, b, _) = dist_fixture_2x2().expect("fixture");
 
