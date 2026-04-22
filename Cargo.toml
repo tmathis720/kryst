@@ -165,3 +165,7 @@ harness = false
 [[bench]]
 name = "fieldsplit_modes"
 harness = false
+[[bench]]
+name = "fgmres_rayon"
+harness = false
+

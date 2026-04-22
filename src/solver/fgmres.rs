@@ -25,6 +25,8 @@ use crate::utils::convergence::{ConvergedReason, FgmresCounters, ReductionModel,
 use crate::utils::monitor::{
     ResidualSnapshot, log_krylov_stagnation, log_residuals, stagnation_detected,
 };
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -350,6 +352,80 @@ impl FgmresSolver {
         }
     }
 
+    #[inline]
+    const fn rayon_len_threshold() -> usize {
+        2048
+    }
+
+    #[inline]
+    fn residual_update_in_place(&self, residual: &mut [S], rhs: &[S]) {
+        #[cfg(feature = "rayon")]
+        {
+            if residual.len() >= Self::rayon_len_threshold() {
+                residual
+                    .par_iter_mut()
+                    .zip(rhs.par_iter())
+                    .for_each(|(ri, &bi)| *ri = bi - *ri);
+                return;
+            }
+        }
+        #[cfg(not(feature = "rayon"))]
+        let _ = rhs;
+        for (ri, &bi) in residual.iter_mut().zip(rhs.iter()) {
+            *ri = bi - *ri;
+        }
+    }
+
+    #[inline]
+    fn scaled_copy(&self, dst: &mut [S], src: &[S], alpha: S) {
+        #[cfg(feature = "rayon")]
+        {
+            if dst.len() >= Self::rayon_len_threshold() {
+                dst.par_iter_mut()
+                    .zip(src.par_iter())
+                    .for_each(|(d, &s)| *d = s * alpha);
+                return;
+            }
+        }
+        #[cfg(not(feature = "rayon"))]
+        let _ = src;
+        for (d, &s) in dst.iter_mut().zip(src.iter()) {
+            *d = s * alpha;
+        }
+    }
+
+    #[inline]
+    fn scale_in_place(&self, v: &mut [S], alpha: S) {
+        #[cfg(feature = "rayon")]
+        {
+            if v.len() >= Self::rayon_len_threshold() {
+                v.par_iter_mut().for_each(|vi| *vi *= alpha);
+                return;
+            }
+        }
+        for vi in v.iter_mut() {
+            *vi *= alpha;
+        }
+    }
+
+    #[inline]
+    fn axpy_in_place(&self, y: &mut [S], x: &[S], alpha: S) {
+        #[cfg(feature = "rayon")]
+        {
+            if y.len() >= Self::rayon_len_threshold() {
+                y.par_iter_mut()
+                    .zip(x.par_iter())
+                    .for_each(|(yi, &xi)| *yi -= alpha * xi);
+                return;
+            }
+        }
+        #[cfg(not(feature = "rayon"))]
+        let _ = x;
+        for (yi, &xi) in y.iter_mut().zip(x.iter()) {
+            *yi -= alpha * xi;
+        }
+    }
+
     fn orthogonalize_cgs(
         &self,
         ws: &mut Workspace,
@@ -375,9 +451,7 @@ impl FgmresSolver {
 
         for (i, hij) in hvals.iter().copied().enumerate() {
             let vi = &ws.v_mem[i * n..(i + 1) * n];
-            for (w_i, &vi_val) in ws.tmp2[..n].iter_mut().zip(vi) {
-                *w_i -= hij * vi_val;
-            }
+            self.axpy_in_place(&mut ws.tmp2[..n], vi, hij);
         }
 
         let mut hnext = red.norm2(&ws.tmp2[..n]);
@@ -395,9 +469,7 @@ impl FgmresSolver {
             }
             for (i, corr_val) in corr.into_iter().enumerate() {
                 let vi = &ws.v_mem[i * n..(i + 1) * n];
-                for (w_i, &vi_val) in ws.tmp2[..n].iter_mut().zip(vi) {
-                    *w_i -= corr_val * vi_val;
-                }
+                self.axpy_in_place(&mut ws.tmp2[..n], vi, corr_val);
                 hvals[i] += corr_val;
             }
             hnext = red.norm2(&ws.tmp2[..n]);
@@ -420,9 +492,7 @@ impl FgmresSolver {
             let hij = red.dot(&ws.v_mem[i * n..(i + 1) * n], &ws.tmp2[..n]);
             *ws.h_at_mut(i, j) = hij;
             let vi = &ws.v_mem[i * n..(i + 1) * n];
-            for (w_i, &vi_val) in ws.tmp2[..n].iter_mut().zip(vi) {
-                *w_i -= hij * vi_val;
-            }
+            self.axpy_in_place(&mut ws.tmp2[..n], vi, hij);
         }
         (red.norm2(&ws.tmp2[..n]), false)
     }
@@ -506,9 +576,7 @@ impl FgmresSolver {
 
         if hij1 > R::default() {
             let inv = S::from_real(1.0 / hij1);
-            for val in &mut ws.tmp2[..n] {
-                *val *= inv;
-            }
+            self.scale_in_place(&mut ws.tmp2[..n], inv);
             ws.copy_tmp2_into_vcol(j + 1);
         } else {
             ws.v_col(j + 1).fill(S::zero());
@@ -623,6 +691,19 @@ impl FgmresSolver {
 
     #[inline]
     fn apply_solution_correction(&self, ws: &Workspace, n: usize, y: &[S], x: &mut [S]) {
+        #[cfg(feature = "rayon")]
+        {
+            if n >= Self::rayon_len_threshold() {
+                x.par_iter_mut().enumerate().for_each(|(col, xj)| {
+                    let mut accum = *xj;
+                    for (i, yi) in y.iter().enumerate() {
+                        accum += *yi * ws.z_mem[i * n + col];
+                    }
+                    *xj = accum;
+                });
+                return;
+            }
+        }
         for (i, yi) in y.iter().enumerate() {
             let zi = &ws.z_mem[i * n..(i + 1) * n];
             for (xj, &zij) in x.iter_mut().zip(zi) {
@@ -709,9 +790,7 @@ impl FgmresSolver {
         {
             metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
         }
-        for i in 0..n {
-            ws.tmp1[i] = b[i] - ws.tmp1[i];
-        }
+        self.residual_update_in_place(&mut ws.tmp1[..n], b);
 
         let mut norms = [R::zero(); 2];
         red.norm2_many_into(&[&ws.tmp1[..n], b], &mut norms);
@@ -728,9 +807,7 @@ impl FgmresSolver {
 
         if beta0 > R::default() {
             let inv = S::from_real(1.0 / beta0);
-            for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
-                *dst = src * inv;
-            }
+            self.scaled_copy(&mut ws.tmp2[..n], &ws.tmp1[..n], inv);
             ws.copy_tmp2_into_vcol(0);
         } else {
             ws.v_col(0).fill(S::zero());
@@ -1362,9 +1439,7 @@ impl FgmresSolver {
             {
                 metrics.matvec_nanos += matvec_start.elapsed().as_nanos() as u64;
             }
-            for i in 0..n {
-                ws.tmp1[i] = b[i] - ws.tmp1[i];
-            }
+            self.residual_update_in_place(&mut ws.tmp1[..n], b);
             beta0 = red.norm2(&ws.tmp1[..n]);
             #[cfg(feature = "metrics")]
             {
@@ -1376,9 +1451,7 @@ impl FgmresSolver {
             restart_count += 1;
             if beta0 > R::default() {
                 let inv = S::from_real(1.0 / beta0);
-                for (dst, &src) in ws.tmp2[..n].iter_mut().zip(&ws.tmp1[..n]) {
-                    *dst = src * inv;
-                }
+                self.scaled_copy(&mut ws.tmp2[..n], &ws.tmp1[..n], inv);
                 ws.copy_tmp2_into_vcol(0);
             } else {
                 ws.v_col(0).fill(S::zero());
