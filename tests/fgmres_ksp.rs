@@ -99,7 +99,7 @@ fn fgmres_rejects_non_right_side_via_api() {
         .expect_err("FGMRES must reject non-right sides");
     match err {
         KError::InvalidInput(msg) => {
-            assert!(msg.contains("FGMRES"));
+            assert!(msg.to_lowercase().contains("fgmres"));
             assert!(msg.to_lowercase().contains("right preconditioning"));
         }
         other => panic!("unexpected error: {other:?}"),
