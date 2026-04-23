@@ -599,6 +599,8 @@ impl FgmresSolver {
         recurrence_residual: R,
         pipeline_reductions: &mut usize,
         async_waits: &mut usize,
+        deferred_pipeline_waits: &mut usize,
+        immediate_pipeline_completions: &mut usize,
         modify_pc_calls: &mut usize,
         orthogonalization_passes: &mut usize,
         #[cfg(feature = "metrics")] metrics: &mut SolveMetrics,
@@ -636,29 +638,57 @@ impl FgmresSolver {
 
         ws.pipelined_w[..n].copy_from_slice(&ws.tmp2[..n]);
         let arnoldi_norm_scale = red.norm2(&ws.pipelined_w[..n]).max(R::one());
-        let pipe = ws.pipelined_arnoldi_step(j, n, red_engine, self.reorth, self.reorth_tol)?;
-        let reductions = match pipe {
-            crate::context::ksp_context::PipeReduct::Sync { reductions } => reductions,
-            crate::context::ksp_context::PipeReduct::Async { handle } => {
-                *async_waits += 1;
-                #[cfg(feature = "metrics")]
-                let wait_start = std::time::Instant::now();
-                let glob = handle.wait();
-                #[cfg(feature = "metrics")]
-                {
-                    metrics.reduction_wait_nanos += wait_start.elapsed().as_nanos() as u64;
-                }
-                ws.finish_pipelined_arnoldi(j, n, red_engine, self.reorth, self.reorth_tol, glob)?
-            }
-        };
-        *pipeline_reductions += reductions;
+        #[cfg(feature = "metrics")]
+        let reduction_launch_start = std::time::Instant::now();
+        let pipe = ws.launch_pipelined_arnoldi_reduction(j, n, red_engine)?;
         *orthogonalization_passes += match self.reorth {
             ReorthPolicy::Always => 2,
             _ => 1,
         };
         #[cfg(feature = "metrics")]
+        let payload_len = Workspace::pipelined_payload_len_for_k(j);
+        #[cfg(feature = "metrics")]
+        let reduction_launched_elapsed = reduction_launch_start.elapsed();
+        *deferred_pipeline_waits += 1;
+        let reductions = match pipe {
+            crate::context::ksp_context::PipeReduct::Sync { reductions } => reductions,
+            crate::context::ksp_context::PipeReduct::Async { handle } => {
+                if handle.is_ready() {
+                    *immediate_pipeline_completions += 1;
+                } else {
+                    *async_waits += 1;
+                }
+                #[cfg(feature = "metrics")]
+                {
+                    metrics.reduction_overlap_nanos += reduction_launched_elapsed.as_nanos() as u64;
+                    let wait_start = std::time::Instant::now();
+                    let glob = handle.wait();
+                    metrics.reduction_wait_nanos += wait_start.elapsed().as_nanos() as u64;
+                    ws.finish_pipelined_arnoldi(
+                        j,
+                        n,
+                        red_engine,
+                        self.reorth,
+                        self.reorth_tol,
+                        glob,
+                    )?
+                }
+                #[cfg(not(feature = "metrics"))]
+                {
+                    ws.finalize_pipelined_arnoldi(
+                        crate::context::ksp_context::PipeReduct::Async { handle },
+                        j,
+                        n,
+                        red_engine,
+                        self.reorth,
+                        self.reorth_tol,
+                    )?
+                }
+            }
+        };
+        *pipeline_reductions += reductions;
+        #[cfg(feature = "metrics")]
         {
-            let payload_len = ws.pipelined_payload.len();
             metrics.bytes_reduced += payload_len * std::mem::size_of::<R>() * reductions;
         }
         Ok(arnoldi_norm_scale)
@@ -823,6 +853,8 @@ impl FgmresSolver {
             .unwrap_or_else(|| comm.reduction_engine(ws.reduction_options()));
         let mut pipeline_reductions = 0usize;
         let mut async_waits = 0usize;
+        let mut deferred_pipeline_waits = 0usize;
+        let mut immediate_pipeline_completions = 0usize;
         let mut orthogonalization_passes = 0usize;
         let mut orthogonalization_rank_loss = false;
         let mut max_orthogonality_loss_estimate = R::zero();
@@ -875,6 +907,8 @@ impl FgmresSolver {
                     explicit_residual_checks,
                     pipeline_fallbacks,
                     modify_pc_calls,
+                    deferred_pipeline_waits,
+                    immediate_pipeline_completions,
                 })
                 .with_orthogonalization_diagnostics(
                     orthogonalization_passes,
@@ -947,6 +981,8 @@ impl FgmresSolver {
                     explicit_residual_checks,
                     pipeline_fallbacks,
                     modify_pc_calls,
+                    deferred_pipeline_waits,
+                    immediate_pipeline_completions,
                 })
                 .with_orthogonalization_diagnostics(
                     orthogonalization_passes,
@@ -1001,6 +1037,8 @@ impl FgmresSolver {
                         res,
                         &mut pipeline_reductions,
                         &mut async_waits,
+                        &mut deferred_pipeline_waits,
+                        &mut immediate_pipeline_completions,
                         &mut modify_pc_calls,
                         &mut orthogonalization_passes,
                         #[cfg(feature = "metrics")]
@@ -1120,6 +1158,8 @@ impl FgmresSolver {
                                 explicit_residual_checks,
                                 pipeline_fallbacks,
                                 modify_pc_calls,
+                                deferred_pipeline_waits,
+                                immediate_pipeline_completions,
                             })
                             .with_orthogonalization_diagnostics(
                                 orthogonalization_passes,
@@ -1301,6 +1341,8 @@ impl FgmresSolver {
                         explicit_residual_checks,
                         pipeline_fallbacks,
                         modify_pc_calls,
+                        deferred_pipeline_waits,
+                        immediate_pipeline_completions,
                     })
                     .with_orthogonalization_diagnostics(
                         orthogonalization_passes,
@@ -1358,6 +1400,8 @@ impl FgmresSolver {
                             explicit_residual_checks,
                             pipeline_fallbacks,
                             modify_pc_calls,
+                            deferred_pipeline_waits,
+                            immediate_pipeline_completions,
                         })
                         .with_orthogonalization_diagnostics(
                             orthogonalization_passes,
@@ -1500,6 +1544,8 @@ impl FgmresSolver {
                 explicit_residual_checks,
                 pipeline_fallbacks,
                 modify_pc_calls,
+                deferred_pipeline_waits,
+                immediate_pipeline_completions,
             })
             .with_orthogonalization_diagnostics(
                 orthogonalization_passes,
@@ -1607,6 +1653,95 @@ impl FgmresSolver {
 
         copy_scalar_to_real_in(&x_s, x);
         Ok(stats.with_reduction_model(self.reduction_model()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::algebra::bridge::BridgeScratch;
+    use crate::parallel::{NoComm, UniverseComm};
+    use crate::utils::reduction::{ReductExec, ReductOptions};
+
+    struct DiagOp {
+        diag: Vec<f64>,
+    }
+
+    impl KLinOp for DiagOp {
+        type Scalar = f64;
+
+        fn dims(&self) -> (usize, usize) {
+            (self.diag.len(), self.diag.len())
+        }
+
+        fn matvec_s(&self, x: &[Self::Scalar], y: &mut [Self::Scalar], _scratch: &mut BridgeScratch) {
+            for ((yi, &ai), &xi) in y.iter_mut().zip(self.diag.iter()).zip(x.iter()) {
+                *yi = ai * xi;
+            }
+        }
+    }
+
+    fn run_pipelined_with_options(comm: UniverseComm, exec: ReductExec) -> SolveStats<f64> {
+        let a = DiagOp {
+            diag: vec![4.0, 3.0, 2.0, 1.5],
+        };
+        let b = vec![1.0, -2.0, 3.0, -1.0];
+        let mut x = vec![0.0; b.len()];
+        let mut solver = FgmresSolver::new(1e-12, 60, 8);
+        solver.set_variant(FgmresVariant::Pipelined);
+        solver.set_pipeline_policy(PipelinePolicy::Strict);
+
+        let mut ws = Workspace::new(b.len());
+        ws.set_reduction_options(ReductOptions {
+            exec,
+            ..ReductOptions::default()
+        });
+
+        let stats = solver
+            .solve_k(&a, None, &b, &mut x, PcSide::Right, &comm, None, Some(&mut ws))
+            .expect("pipelined FGMRES solve should succeed");
+        assert!(
+            stats.final_residual < 1e-9,
+            "expected tight convergence, got residual={}",
+            stats.final_residual
+        );
+        stats
+    }
+
+    #[test]
+    fn pipelined_sync_reduction_converges_stably() {
+        let stats = run_pipelined_with_options(UniverseComm::NoComm(NoComm), ReductExec::Sync);
+        assert!(stats.iterations > 0);
+    }
+
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn pipelined_async_and_sync_reductions_are_numerically_equivalent() {
+        let sync_stats = run_pipelined_with_options(
+            UniverseComm::Rayon(crate::parallel::rayon_comm::RayonComm::new()),
+            ReductExec::Sync,
+        );
+        let async_stats = run_pipelined_with_options(
+            UniverseComm::Rayon(crate::parallel::rayon_comm::RayonComm::new()),
+            ReductExec::Async,
+        );
+
+        assert_eq!(sync_stats.reason, async_stats.reason);
+        assert!(
+            (sync_stats.final_residual - async_stats.final_residual).abs() < 1e-10,
+            "sync={} async={}",
+            sync_stats.final_residual,
+            async_stats.final_residual
+        );
+    }
+
+    #[cfg(feature = "mpi")]
+    #[test]
+    fn mpi_smoke_pipelined_overlap_counters_are_stable() {
+        let comm = UniverseComm::Mpi(std::sync::Arc::new(crate::parallel::mpi_comm::MpiComm::new()));
+        let stats = run_pipelined_with_options(comm, ReductExec::Async);
+        let counters = stats.fgmres_counters.expect("fgmres counters should be present");
+        assert!(counters.deferred_pipeline_waits >= counters.immediate_pipeline_completions);
     }
 }
 

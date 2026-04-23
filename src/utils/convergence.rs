@@ -434,6 +434,10 @@ pub struct FgmresCounters {
     pub pipeline_fallbacks: usize,
     /// Number of mutable preconditioner modification callback invocations.
     pub modify_pc_calls: usize,
+    /// Number of pipelined reductions whose completion check was deferred until after local work.
+    pub deferred_pipeline_waits: usize,
+    /// Number of pipelined reductions that were already complete at finalization time.
+    pub immediate_pipeline_completions: usize,
 }
 
 /// Estimated reduction counts grouped by algorithm phase.
@@ -509,6 +513,7 @@ pub struct NestedPcFailure {
 pub struct SolveMetrics {
     pub reductions: usize,
     pub reduction_wait_nanos: u64,
+    pub reduction_overlap_nanos: u64,
     pub matvec_nanos: u64,
     pub pc_apply_nanos: u64,
     pub bytes_reduced: usize,
