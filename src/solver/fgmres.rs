@@ -1660,15 +1660,16 @@ impl FgmresSolver {
 mod tests {
     use super::*;
     use crate::algebra::bridge::BridgeScratch;
+    use crate::algebra::scalar::KrystScalar;
     use crate::parallel::{NoComm, UniverseComm};
     use crate::utils::reduction::{ReductExec, ReductOptions};
 
     struct DiagOp {
-        diag: Vec<f64>,
+        diag: Vec<S>,
     }
 
     impl KLinOp for DiagOp {
-        type Scalar = f64;
+        type Scalar = S;
 
         fn dims(&self) -> (usize, usize) {
             (self.diag.len(), self.diag.len())
@@ -1683,10 +1684,10 @@ mod tests {
 
     fn run_pipelined_with_options(comm: UniverseComm, exec: ReductExec) -> SolveStats<f64> {
         let a = DiagOp {
-            diag: vec![4.0, 3.0, 2.0, 1.5],
+            diag: vec![S::from_real(4.0), S::from_real(3.0), S::from_real(2.0), S::from_real(1.5)],
         };
-        let b = vec![1.0, -2.0, 3.0, -1.0];
-        let mut x = vec![0.0; b.len()];
+        let b = vec![S::from_real(1.0), S::from_real(-2.0), S::from_real(3.0), S::from_real(-1.0)];
+        let mut x = vec![S::zero(); b.len()];
         let mut solver = FgmresSolver::new(1e-12, 60, 8);
         solver.set_variant(FgmresVariant::Pipelined);
         solver.set_pipeline_policy(PipelinePolicy::Strict);
