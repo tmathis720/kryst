@@ -347,6 +347,17 @@ impl IluCsr {
         let mut map = URowMap::new();
         map.ensure_size(n);
         let milu = matches!(self.cfg.kind, IluKind::Milu0);
+        let mut max_diag_abs = 0.0f64;
+        for i in 0..n {
+            let mut di = S::zero();
+            for p in rp[i]..rp[i + 1] {
+                if cj[p] == i {
+                    di = vv[p];
+                    break;
+                }
+            }
+            max_diag_abs = max_diag_abs.max(di.abs());
+        }
 
         for i in 0..n {
             map.prime(&self.u_row, &self.u_col, i);
@@ -386,10 +397,16 @@ impl IluCsr {
                 }
             }
 
-            let d = self.c_u_val[self.u_diag_ix[i]];
-            if d.abs() <= self.cfg.pivot_threshold {
-                return Err(KError::ZeroPivot(i));
-            }
+            let di_pos = self.u_diag_ix[i];
+            let fixed = pivot::handle_pivot_scalar(
+                self.c_u_val[di_pos],
+                self.cfg.pivot,
+                self.cfg.pivot_threshold,
+                self.cfg.diag_perturb_factor,
+                max_diag_abs,
+            )
+            .map_err(|_| KError::ZeroPivot(i))?;
+            self.c_u_val[di_pos] = fixed;
         }
 
         self.native_complex_active = true;
@@ -416,6 +433,17 @@ impl IluCsr {
         let vv = a.values();
         let mut map = URowMap::new();
         map.ensure_size(n);
+        let mut max_diag_abs = 0.0f64;
+        for i in 0..n {
+            let mut di = S::zero();
+            for p in rp[i]..rp[i + 1] {
+                if cj[p] == i {
+                    di = vv[p];
+                    break;
+                }
+            }
+            max_diag_abs = max_diag_abs.max(di.abs());
+        }
 
         for i in 0..n {
             map.prime(&self.u_row, &self.u_col, i);
@@ -453,9 +481,16 @@ impl IluCsr {
                 }
             }
 
-            if self.c_u_val[self.u_diag_ix[i]].abs() <= self.cfg.pivot_threshold {
-                return Err(KError::ZeroPivot(i));
-            }
+            let di_pos = self.u_diag_ix[i];
+            let fixed = pivot::handle_pivot_scalar(
+                self.c_u_val[di_pos],
+                self.cfg.pivot,
+                self.cfg.pivot_threshold,
+                self.cfg.diag_perturb_factor,
+                max_diag_abs,
+            )
+            .map_err(|_| KError::ZeroPivot(i))?;
+            self.c_u_val[di_pos] = fixed;
         }
 
         self.native_complex_active = true;
@@ -1776,4 +1811,75 @@ fn transpose_csr(
         }
     }
     (t_row, t_col, t_val)
+}
+
+#[cfg(all(test, feature = "complex"))]
+mod complex_pivot_tests {
+    use super::*;
+
+    fn checkerboard_zero_diag() -> CsrMatrix<S> {
+        CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 1, 2],
+            vec![1, 0],
+            vec![S::from_real(1.0), S::from_real(1.0)],
+        )
+    }
+
+    #[test]
+    fn ilu0_complex_zero_pivot_obeys_strategy() {
+        let a = checkerboard_zero_diag();
+
+        let mut strict = IluCsr::new_with_config(IluCsrConfig {
+            kind: IluKind::Ilu0,
+            pivot: PivotStrategy::Strict,
+            pivot_threshold: 1e-12,
+            diag_perturb_factor: 1e-10,
+            level_sched: false,
+            numeric_update_fixed: true,
+            logging: 0,
+            reordering: ReorderingOptions::default(),
+            conditioning: ConditioningOptions::default(),
+        });
+        assert!(strict.factor_ilu0_complex(&a).is_err());
+
+        let mut threshold = IluCsr::new_with_config(IluCsrConfig {
+            kind: IluKind::Ilu0,
+            pivot: PivotStrategy::Threshold,
+            pivot_threshold: 1e-12,
+            diag_perturb_factor: 1e-10,
+            level_sched: false,
+            numeric_update_fixed: true,
+            logging: 0,
+            reordering: ReorderingOptions::default(),
+            conditioning: ConditioningOptions::default(),
+        });
+        threshold
+            .factor_ilu0_complex(&a)
+            .expect("threshold pivot policy should floor tiny complex pivots");
+        for i in 0..threshold.n {
+            let d = threshold.c_u_val[threshold.u_diag_ix[i]];
+            assert!(d.abs() >= 1e-12, "row {i} pivot should be floored");
+        }
+
+        let mut perturb = IluCsr::new_with_config(IluCsrConfig {
+            kind: IluKind::Ilu0,
+            pivot: PivotStrategy::DiagonalPerturbation,
+            pivot_threshold: 1e-12,
+            diag_perturb_factor: 1e-10,
+            level_sched: false,
+            numeric_update_fixed: true,
+            logging: 0,
+            reordering: ReorderingOptions::default(),
+            conditioning: ConditioningOptions::default(),
+        });
+        perturb
+            .factor_ilu0_complex(&a)
+            .expect("diag perturbation should repair tiny complex pivots");
+        for i in 0..perturb.n {
+            let d = perturb.c_u_val[perturb.u_diag_ix[i]];
+            assert!(d.abs() > 0.0, "row {i} pivot should be nonzero");
+        }
+    }
 }
