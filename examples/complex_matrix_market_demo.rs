@@ -25,17 +25,17 @@ mod complex_demo {
     use kryst::algebra::bridge::BridgeScratch;
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
-    use kryst::matrix::sparse::CsrMatrix as SparseCsrMatrix;
     use kryst::matrix::DistCsrOp;
+    use kryst::matrix::sparse::CsrMatrix as SparseCsrMatrix;
     use kryst::ops::klinop::KLinOp;
     use kryst::ops::kpc::KPreconditioner;
     use kryst::parallel::{Comm, UniverseComm};
-    use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
-    use kryst::preconditioner::jacobi::Jacobi;
     use kryst::preconditioner::PcSide;
     use kryst::preconditioner::Preconditioner;
-    use kryst::solver::fgmres::{FgmresSolver, FgmresVariant, OrthogMethod};
+    use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
+    use kryst::preconditioner::jacobi::Jacobi;
     use kryst::solver::LinearSolver;
+    use kryst::solver::fgmres::{FgmresSolver, FgmresVariant, OrthogMethod};
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
 
@@ -687,6 +687,7 @@ mod complex_demo {
                 pc = Some(PcHandle::Jacobi(jacobi));
             }
             PcKind::Ilu0Local => {
+                validate_local_ilu_owned_block(problem.csr_for_pc.as_ref())?;
                 let mut cfg = IluCsrConfig::default();
                 cfg.kind = IluKind::Ilu0;
                 let mut ilu = IluCsr::new_with_config(cfg);
@@ -694,6 +695,7 @@ mod complex_demo {
                 pc = Some(PcHandle::Ilu0(ilu));
             }
             PcKind::MpiBlockJacobiIlu0Local => {
+                validate_local_ilu_owned_block(problem.csr_for_pc.as_ref())?;
                 let mut cfg = IluCsrConfig::default();
                 cfg.kind = IluKind::Ilu0;
                 let mut ilu = IluCsr::new_with_config(cfg);
@@ -781,6 +783,15 @@ mod complex_demo {
             reason: stats.reason,
             dof_per_sec,
         })
+    }
+
+    fn validate_local_ilu_owned_block(matrix: &SparseCsrMatrix<S>) -> Result<(), KError> {
+        if matrix.nrows() != matrix.ncols() {
+            return Err(KError::InvalidInput(
+                "local ILU requires square owned block".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn configured_solver(spec: &RunSpec) -> FgmresSolver {
@@ -962,6 +973,55 @@ mod complex_demo {
                 pc_block.col_idx().iter().all(|&c| c < local_n),
                 "rank {rank} has out-of-range local column index"
             );
+        }
+    }
+
+    #[test]
+    fn local_ilu_rejects_rectangular_owned_block() {
+        #[cfg(feature = "mpi")]
+        let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+        #[cfg(not(feature = "mpi"))]
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let op_local =
+            SparseCsrMatrix::from_csr(2, 2, vec![0, 1, 2], vec![0, 1], vec![S::one(), S::one()]);
+        let row_part = vec![0, 2];
+        let op = DistCsrOp::from_local_rows(2, 0, &op_local, &row_part, comm.clone())
+            .expect("build local dist op");
+
+        let rectangular_pc =
+            SparseCsrMatrix::from_csr(2, 3, vec![0, 1, 2], vec![0, 1], vec![S::one(), S::one()]);
+        let problem = Problem {
+            op: Arc::new(op),
+            rhs: vec![S::one(), S::one()],
+            csr_for_pc: Arc::new(rectangular_pc),
+            local_n: 2,
+            global_n: 2,
+            global_row_start: 0,
+            comm,
+            backend: CsrBackend::Serial,
+            backend_descr: "unit-test".to_string(),
+        };
+        let spec = RunSpec {
+            restart: 10,
+            variant: FgmresVariant::Classical,
+            orthog: OrthogMethod::ClassicalGS,
+            reorth: ReorthPolicy::IfNeeded,
+            pc_side: PcSide::Right,
+            pc: PcKind::Ilu0Local,
+        };
+        let bench_cfg = BenchmarkConfig {
+            warmup_runs: 0,
+            measured_runs: 1,
+            ..BenchmarkConfig::default()
+        };
+
+        match run_once(&problem, &spec, &bench_cfg) {
+            Err(KError::InvalidInput(msg)) => {
+                assert_eq!(msg, "local ILU requires square owned block");
+            }
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+            Ok(_) => panic!("expected rectangular ILU error"),
         }
     }
 }
