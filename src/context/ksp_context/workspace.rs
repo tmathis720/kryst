@@ -855,7 +855,7 @@ impl Workspace {
     }
 
     #[cfg(not(feature = "complex"))]
-    pub fn finish_pipe_reduction(
+    pub fn finalize_pipelined_arnoldi(
         &mut self,
         pipe: PipeReduct,
         k: usize,
@@ -874,7 +874,7 @@ impl Workspace {
     }
 
     #[cfg(feature = "complex")]
-    pub fn finish_pipe_reduction(
+    pub fn finalize_pipelined_arnoldi(
         &mut self,
         pipe: PipeReduct,
         k: usize,
@@ -893,18 +893,16 @@ impl Workspace {
     }
 
     #[cfg(not(feature = "complex"))]
-    pub fn pipelined_arnoldi_step(
+    pub fn launch_pipelined_arnoldi_reduction(
         &mut self,
         k: usize,
         n: usize,
         red: &dyn crate::parallel::ReductionEngine,
-        policy: ReorthPolicy,
-        tol: R,
     ) -> Result<PipeReduct, crate::error::KError> {
         debug_assert!(k < self.m);
 
         let w = &self.pipelined_w[..n];
-        let payload_len = k + 2;
+        let payload_len = Self::pipelined_payload_len_for_k(k);
         let mut payload = std::mem::take(&mut self.pipelined_payload);
         payload.resize(payload_len, R::zero());
         for i in 0..=k {
@@ -916,17 +914,10 @@ impl Workspace {
         let handle = red.iallreduce_sum_vec_r(payload);
 
         self.pipelined_wtmp[..n].copy_from_slice(w);
-
-        if handle.is_ready() {
-            let payload = handle.wait();
-            let reductions = self.finish_pipelined_arnoldi(k, n, red, policy, tol, payload)?;
-            Ok(PipeReduct::Sync { reductions })
-        } else {
-            Ok(PipeReduct::Async { handle })
-        }
+        Ok(PipeReduct::Async { handle })
     }
 
-    #[cfg(feature = "complex")]
+    #[cfg(not(feature = "complex"))]
     pub fn pipelined_arnoldi_step(
         &mut self,
         k: usize,
@@ -935,10 +926,38 @@ impl Workspace {
         policy: ReorthPolicy,
         tol: R,
     ) -> Result<PipeReduct, crate::error::KError> {
+        let pipe = self.launch_pipelined_arnoldi_reduction(k, n, red)?;
+        match pipe {
+            PipeReduct::Sync { reductions } => Ok(PipeReduct::Sync { reductions }),
+            PipeReduct::Async { handle } => {
+                if handle.is_ready() {
+                    let reductions = self.finalize_pipelined_arnoldi(
+                        PipeReduct::Async { handle },
+                        k,
+                        n,
+                        red,
+                        policy,
+                        tol,
+                    )?;
+                    Ok(PipeReduct::Sync { reductions })
+                } else {
+                    Ok(PipeReduct::Async { handle })
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "complex")]
+    pub fn launch_pipelined_arnoldi_reduction(
+        &mut self,
+        k: usize,
+        n: usize,
+        red: &dyn crate::parallel::ReductionEngine,
+    ) -> Result<PipeReduct, crate::error::KError> {
         debug_assert!(k < self.m);
 
         let w = &self.pipelined_w[..n];
-        let payload_len = 2 * (k + 1) + 1;
+        let payload_len = Self::pipelined_payload_len_for_k(k);
         let mut payload = std::mem::take(&mut self.pipelined_payload);
         payload.resize(payload_len, R::zero());
         for i in 0..=k {
@@ -959,14 +978,49 @@ impl Workspace {
         let handle = red.iallreduce_sum_vec_r(payload);
 
         self.pipelined_wtmp[..n].copy_from_slice(w);
+        Ok(PipeReduct::Async { handle })
+    }
 
-        if handle.is_ready() {
-            let payload = handle.wait();
-            let reductions = self.finish_pipelined_arnoldi(k, n, red, policy, tol, payload)?;
-            Ok(PipeReduct::Sync { reductions })
-        } else {
-            Ok(PipeReduct::Async { handle })
+    #[cfg(feature = "complex")]
+    pub fn pipelined_arnoldi_step(
+        &mut self,
+        k: usize,
+        n: usize,
+        red: &dyn crate::parallel::ReductionEngine,
+        policy: ReorthPolicy,
+        tol: R,
+    ) -> Result<PipeReduct, crate::error::KError> {
+        let pipe = self.launch_pipelined_arnoldi_reduction(k, n, red)?;
+        match pipe {
+            PipeReduct::Sync { reductions } => Ok(PipeReduct::Sync { reductions }),
+            PipeReduct::Async { handle } => {
+                if handle.is_ready() {
+                    let reductions = self.finalize_pipelined_arnoldi(
+                        PipeReduct::Async { handle },
+                        k,
+                        n,
+                        red,
+                        policy,
+                        tol,
+                    )?;
+                    Ok(PipeReduct::Sync { reductions })
+                } else {
+                    Ok(PipeReduct::Async { handle })
+                }
+            }
         }
+    }
+
+    #[cfg(not(feature = "complex"))]
+    #[inline]
+    pub fn pipelined_payload_len_for_k(k: usize) -> usize {
+        k + 2
+    }
+
+    #[cfg(feature = "complex")]
+    #[inline]
+    pub fn pipelined_payload_len_for_k(k: usize) -> usize {
+        2 * (k + 1) + 1
     }
 }
 
