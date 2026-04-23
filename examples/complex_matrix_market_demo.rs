@@ -331,11 +331,19 @@ mod complex_demo {
         pc: PcKind,
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum PcKind {
         None,
         JacobiWeak,
         Ilu0Local,
         MpiBlockJacobiIlu0Local,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum PcDispatchBranch {
+        None,
+        JacobiWeak,
+        Ilu0Local,
     }
 
     #[derive(Clone, Debug)]
@@ -612,7 +620,24 @@ mod complex_demo {
                 Self::None => "none (unpreconditioned reference)",
                 Self::JacobiWeak => "jacobi (weak baseline)",
                 Self::Ilu0Local => "local ILU(0) (strong baseline)",
-                Self::MpiBlockJacobiIlu0Local => "MPI block-Jacobi + local ILU(0)",
+                Self::MpiBlockJacobiIlu0Local => {
+                    "MPI block-Jacobi + local ILU(0) [alias: local ILU(0) path]"
+                }
+            }
+        }
+
+        fn dispatch_branch(self) -> PcDispatchBranch {
+            match self {
+                Self::None => PcDispatchBranch::None,
+                Self::JacobiWeak => PcDispatchBranch::JacobiWeak,
+                Self::Ilu0Local | Self::MpiBlockJacobiIlu0Local => PcDispatchBranch::Ilu0Local,
+            }
+        }
+
+        fn explicit_alias_of(self) -> Option<Self> {
+            match self {
+                Self::MpiBlockJacobiIlu0Local => Some(Self::Ilu0Local),
+                Self::None | Self::JacobiWeak | Self::Ilu0Local => None,
             }
         }
     }
@@ -679,28 +704,24 @@ mod complex_demo {
 
         let mut pc: Option<PcHandle> = None;
         let setup_start = Instant::now();
-        match spec.pc {
-            PcKind::None => {}
-            PcKind::JacobiWeak => {
+        match spec.pc.dispatch_branch() {
+            PcDispatchBranch::None => {}
+            PcDispatchBranch::JacobiWeak => {
                 let mut jacobi = Jacobi::new();
                 jacobi.setup(problem.csr_for_pc.as_ref())?;
                 pc = Some(PcHandle::Jacobi(jacobi));
             }
-            PcKind::Ilu0Local => {
+            PcDispatchBranch::Ilu0Local => {
                 validate_local_ilu_owned_block(problem.csr_for_pc.as_ref())?;
                 let mut cfg = IluCsrConfig::default();
                 cfg.kind = IluKind::Ilu0;
                 let mut ilu = IluCsr::new_with_config(cfg);
                 ilu.setup(problem.csr_for_pc.as_ref())?;
-                pc = Some(PcHandle::Ilu0(ilu));
-            }
-            PcKind::MpiBlockJacobiIlu0Local => {
-                validate_local_ilu_owned_block(problem.csr_for_pc.as_ref())?;
-                let mut cfg = IluCsrConfig::default();
-                cfg.kind = IluKind::Ilu0;
-                let mut ilu = IluCsr::new_with_config(cfg);
-                ilu.setup(problem.csr_for_pc.as_ref())?;
-                pc = Some(PcHandle::MpiBlockJacobiIlu0(ilu));
+                pc = Some(if spec.pc == PcKind::Ilu0Local {
+                    PcHandle::Ilu0(ilu)
+                } else {
+                    PcHandle::MpiBlockJacobiIlu0(ilu)
+                });
             }
         }
         let setup_secs = setup_start.elapsed().as_secs_f64();
@@ -1022,6 +1043,29 @@ mod complex_demo {
             }
             Err(other) => panic!("unexpected error variant: {other:?}"),
             Ok(_) => panic!("expected rectangular ILU error"),
+        }
+    }
+
+    #[test]
+    fn preconditioner_dispatch_variants_are_distinct_or_explicit_aliases() {
+        let variants = [
+            PcKind::None,
+            PcKind::JacobiWeak,
+            PcKind::Ilu0Local,
+            PcKind::MpiBlockJacobiIlu0Local,
+        ];
+
+        for (idx, left) in variants.iter().copied().enumerate() {
+            for right in variants.iter().copied().skip(idx + 1) {
+                if left.dispatch_branch() == right.dispatch_branch() {
+                    let explicit_alias = left.explicit_alias_of() == Some(right)
+                        || right.explicit_alias_of() == Some(left);
+                    assert!(
+                        explicit_alias,
+                        "dispatch collision without alias marker: {left:?} vs {right:?}"
+                    );
+                }
+            }
         }
     }
 }
