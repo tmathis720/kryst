@@ -21,7 +21,6 @@ mod complex_demo {
     use std::time::Instant;
 
     use super::KError;
-    use kryst::algebra::blas::nrm2;
     use kryst::algebra::bridge::BridgeScratch;
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
@@ -105,7 +104,8 @@ mod complex_demo {
                 }
             };
 
-            let rhs_norm = nrm2(&problem.rhs);
+            let rhs_norm2_local: f64 = problem.rhs.iter().map(|v| v.abs2()).sum();
+            let rhs_norm = problem.comm.all_reduce_f64(rhs_norm2_local).sqrt();
             if rank == 0 {
                 println!("=== {descr} — {} ===", problem.backend_descr);
                 println!(
