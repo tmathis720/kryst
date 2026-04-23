@@ -25,17 +25,17 @@ mod complex_demo {
     use kryst::algebra::bridge::BridgeScratch;
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
-    use kryst::matrix::DistCsrOp;
     use kryst::matrix::sparse::CsrMatrix as SparseCsrMatrix;
+    use kryst::matrix::DistCsrOp;
     use kryst::ops::klinop::KLinOp;
     use kryst::ops::kpc::KPreconditioner;
     use kryst::parallel::{Comm, UniverseComm};
-    use kryst::preconditioner::PcSide;
-    use kryst::preconditioner::Preconditioner;
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::jacobi::Jacobi;
-    use kryst::solver::LinearSolver;
+    use kryst::preconditioner::PcSide;
+    use kryst::preconditioner::Preconditioner;
     use kryst::solver::fgmres::{FgmresSolver, FgmresVariant, OrthogMethod};
+    use kryst::solver::LinearSolver;
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
 
@@ -813,6 +813,7 @@ mod complex_demo {
         let row_start = row_part[comm.rank()];
         let row_end = row_part[comm.rank() + 1];
         let local_csr = slice_csr_rows(&csr_sparse, row_start, row_end);
+        let local_pc_block = slice_csr_rows_owned_cols(&csr_sparse, row_start, row_end);
 
         let op = DistCsrOp::from_local_rows(nrows, row_start, &local_csr, &row_part, comm.clone())?;
         let op_arc: Arc<dyn KLinOp<Scalar = S>> = Arc::new(op);
@@ -835,7 +836,7 @@ mod complex_demo {
         Ok(Problem {
             op: op_arc,
             rhs,
-            csr_for_pc: Arc::new(local_csr),
+            csr_for_pc: Arc::new(local_pc_block),
             local_n,
             global_n,
             global_row_start: row_start,
@@ -860,6 +861,49 @@ mod complex_demo {
         let local_vals = values[start_nnz..end_nnz].to_vec();
 
         SparseCsrMatrix::from_csr(end - start, matrix.ncols(), local_rp, local_ci, local_vals)
+    }
+
+    fn slice_csr_rows_owned_cols(
+        matrix: &SparseCsrMatrix<S>,
+        row_start: usize,
+        row_end: usize,
+    ) -> SparseCsrMatrix<S> {
+        let row_ptr = matrix.row_ptr();
+        let col_idx = matrix.col_idx();
+        let values = matrix.values();
+        let local_n = row_end - row_start;
+
+        let mut local_rp = Vec::with_capacity(local_n + 1);
+        let mut local_ci = Vec::new();
+        let mut local_vals = Vec::new();
+        local_rp.push(0);
+
+        for global_r in row_start..row_end {
+            let mut row_nnz = 0usize;
+            for nz in row_ptr[global_r]..row_ptr[global_r + 1] {
+                let global_c = col_idx[nz];
+                if (row_start..row_end).contains(&global_c) {
+                    local_ci.push(global_c - row_start);
+                    local_vals.push(values[nz]);
+                    row_nnz += 1;
+                }
+            }
+            local_rp.push(local_rp.last().copied().unwrap_or(0) + row_nnz);
+        }
+
+        SparseCsrMatrix::from_csr(local_n, local_n, local_rp, local_ci, local_vals)
+    }
+
+    fn partition_rows_balanced_for_size(n_global: usize, size: usize) -> Vec<usize> {
+        let base = n_global / size;
+        let rem = n_global % size;
+        let mut out = Vec::with_capacity(size + 1);
+        out.push(0);
+        for rank in 0..size {
+            let take = base + usize::from(rank < rem);
+            out.push(out[rank] + take);
+        }
+        out
     }
 
     fn classify_backend(size: usize, local_n: usize, global_n: usize) -> CsrBackend {
@@ -887,6 +931,38 @@ mod complex_demo {
             }
         }
         None
+    }
+
+    #[test]
+    fn qc324_owned_pc_block_is_local_square_on_4_way_partition() {
+        let mat_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/mtx/qc324.mtx");
+        if !mat_path.exists() {
+            eprintln!("qc324.mtx unavailable; skipping local PC block-shape check.");
+            return;
+        }
+
+        let mm = read_matrix_market(&mat_path).expect("read qc324");
+        let csr_sparse: SparseCsrMatrix<S> = mm.to_csr_matrix_scalar().expect("qc324 to CSR");
+        let n = csr_sparse.nrows();
+        let part = partition_rows_balanced_for_size(n, 4);
+
+        for rank in 0..4 {
+            let row_start = part[rank];
+            let row_end = part[rank + 1];
+            let local_n = row_end - row_start;
+            let pc_block = slice_csr_rows_owned_cols(&csr_sparse, row_start, row_end);
+            eprintln!(
+                "qc324 rank {rank}: rows=[{row_start}..{row_end}), pc_block=({} x {})",
+                pc_block.nrows(),
+                pc_block.ncols()
+            );
+            assert_eq!(pc_block.nrows(), local_n, "rank {rank} local PC rows");
+            assert_eq!(pc_block.ncols(), local_n, "rank {rank} local PC cols");
+            assert!(
+                pc_block.col_idx().iter().all(|&c| c < local_n),
+                "rank {rank} has out-of-range local column index"
+            );
+        }
     }
 }
 
