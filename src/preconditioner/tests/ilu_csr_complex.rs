@@ -4,7 +4,8 @@ use crate::algebra::prelude::*;
 use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::Preconditioner;
 use crate::preconditioner::ilu_csr::{
-    IluComplexKernelMode, IluCsr, IluCsrConfig, IluKind, IlutParams, ReorderingOptions,
+    IluComplexKernelMode, IluCsr, IluCsrConfig, IluKind, IlutParams, ReorderingKind,
+    ReorderingOptions,
 };
 use crate::utils::conditioning::ConditioningOptions;
 
@@ -233,4 +234,122 @@ fn iluk_complex_native_beats_degraded_residual() {
         rn <= rd * 1.1,
         "ILU(k) native residual {rn} should be <= degraded residual {rd}"
     );
+}
+
+#[test]
+fn complex_setup_uses_distinct_nonsymmetric_permutation_path() {
+    let row_ptr = vec![0, 2, 4, 6, 8];
+    let col_idx = vec![0, 1, 0, 2, 1, 3, 2, 3];
+    let vals = vec![
+        S::from_parts(1.0, 0.0),
+        S::from_parts(9.0, 0.5),
+        S::from_parts(8.0, -0.3),
+        S::from_parts(1.2, 0.0),
+        S::from_parts(0.8, 0.1),
+        S::from_parts(7.5, -0.2),
+        S::from_parts(6.0, 0.4),
+        S::from_parts(1.1, 0.0),
+    ];
+    let a = CsrMatrix::from_csr(4, 4, row_ptr, col_idx, vals);
+    let rhs = vec![
+        S::from_parts(1.0, -0.2),
+        S::from_parts(0.3, 0.6),
+        S::from_parts(-0.5, 0.1),
+        S::from_parts(0.9, -0.4),
+    ];
+
+    let mut cfg = IluCsrConfig {
+        kind: IluKind::Ilu0,
+        ..IluCsrConfig::default()
+    };
+    cfg.reordering = ReorderingOptions {
+        kind: ReorderingKind::None,
+        symmetric: true,
+        deterministic: true,
+    };
+
+    let mut sym = IluCsr::new_with_config(cfg.clone());
+    sym.setup(&a).unwrap();
+    let mut y_sym = vec![S::zero(); 4];
+    sym.apply(crate::preconditioner::PcSide::Left, &rhs, &mut y_sym)
+        .unwrap();
+
+    cfg.reordering.symmetric = false;
+    let mut nonsym = IluCsr::new_with_config(cfg);
+    nonsym.setup(&a).unwrap();
+    let mut y_nonsym = vec![S::zero(); 4];
+    nonsym
+        .apply(crate::preconditioner::PcSide::Left, &rhs, &mut y_nonsym)
+        .unwrap();
+
+    let diff: f64 = y_sym
+        .iter()
+        .zip(y_nonsym.iter())
+        .map(|(a, b)| (*a - *b).abs())
+        .sum();
+    assert!(
+        diff > 1e-8,
+        "expected different outputs between symmetric and nonsymmetric permutation paths"
+    );
+}
+
+#[test]
+fn complex_nonsymmetric_numeric_update_matches_fresh_setup() {
+    let row_ptr = vec![0, 2, 4, 6, 8];
+    let col_idx = vec![0, 1, 0, 2, 1, 3, 2, 3];
+    let vals = vec![
+        S::from_parts(1.0, 0.0),
+        S::from_parts(10.0, 0.0),
+        S::from_parts(8.0, 0.0),
+        S::from_parts(1.0, 0.0),
+        S::from_parts(1.0, 0.0),
+        S::from_parts(7.0, 0.0),
+        S::from_parts(6.0, 0.0),
+        S::from_parts(1.0, 0.0),
+    ];
+    let a = CsrMatrix::from_csr(4, 4, row_ptr.clone(), col_idx.clone(), vals);
+    let rhs = vec![
+        S::from_parts(1.0, 0.2),
+        S::from_parts(-0.4, 0.1),
+        S::from_parts(0.7, -0.3),
+        S::from_parts(0.2, 0.5),
+    ];
+
+    let cfg = IluCsrConfig {
+        kind: IluKind::Iluk { k: 1 },
+        reordering: ReorderingOptions {
+            kind: ReorderingKind::None,
+            symmetric: false,
+            deterministic: true,
+        },
+        ..IluCsrConfig::default()
+    };
+
+    let mut updated = IluCsr::new_with_config(cfg.clone());
+    updated.setup(&a).unwrap();
+
+    let mut vals2 = a.values().to_vec();
+    for (k, v) in vals2.iter_mut().enumerate() {
+        *v += S::from_parts(0.05 * (k as f64 + 1.0), -0.01 * (k as f64));
+    }
+    let a2 = CsrMatrix::from_csr(4, 4, row_ptr, col_idx, vals2);
+    updated.update_numeric(&a2).unwrap();
+    let mut y_update = vec![S::zero(); 4];
+    updated
+        .apply(crate::preconditioner::PcSide::Left, &rhs, &mut y_update)
+        .unwrap();
+
+    let mut fresh = IluCsr::new_with_config(cfg);
+    fresh.setup(&a2).unwrap();
+    let mut y_fresh = vec![S::zero(); 4];
+    fresh
+        .apply(crate::preconditioner::PcSide::Left, &rhs, &mut y_fresh)
+        .unwrap();
+
+    for (i, (yu, yf)) in y_update.iter().zip(y_fresh.iter()).enumerate() {
+        assert!(
+            (*yu - *yf).abs() < 1e-8,
+            "numeric update should match fresh setup at index {i}"
+        );
+    }
 }

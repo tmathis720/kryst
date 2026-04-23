@@ -74,6 +74,44 @@ pub fn permute_csr_symmetric<T: KrystScalar>(a: &CsrMatrix<T>, perm: &Permutatio
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, values)
 }
 
+/// Nonsymmetric permutation of CSR matrix: A' = P_row A P_col^T
+pub fn permute_csr_nonsymmetric<T: KrystScalar>(
+    a: &CsrMatrix<T>,
+    row_perm: &Permutation,
+    col_perm: &Permutation,
+) -> CsrMatrix<T> {
+    let n = a.nrows();
+    assert_eq!(n, a.ncols());
+    let rp = a.row_ptr();
+    let cj = a.col_idx();
+    let vv = a.values();
+
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx = Vec::with_capacity(vv.len());
+    let mut values = Vec::with_capacity(vv.len());
+    row_ptr.push(0);
+
+    for new_i in 0..n {
+        let old_i = row_perm.p[new_i];
+        let rs = rp[old_i];
+        let re = rp[old_i + 1];
+        let mut entries = Vec::with_capacity(re - rs);
+        for k in rs..re {
+            let old_j = cj[k];
+            let new_j = col_perm.pinv[old_j];
+            entries.push((new_j, vv[k]));
+        }
+        entries.sort_unstable_by_key(|e| e.0);
+        for (j, v) in entries {
+            col_idx.push(j);
+            values.push(v);
+        }
+        row_ptr.push(col_idx.len());
+    }
+
+    CsrMatrix::from_csr(n, n, row_ptr, col_idx, values)
+}
+
 /// Reverse Cuthill-McKee ordering for a symmetric graph given by CSR matrix.
 pub fn rcm_csr<T>(a: &CsrMatrix<T>) -> Permutation {
     let n = a.nrows();
