@@ -12,7 +12,9 @@ use crate::preconditioner::{
 use crate::utils::conditioning::ConditioningOptions;
 use crate::utils::permutation::Permutation;
 #[cfg(feature = "complex")]
-use crate::utils::permutation::{amd_csr, permute_csr_symmetric, rcm_csr};
+use crate::utils::permutation::{
+    amd_csr, permute_csr_nonsymmetric, permute_csr_symmetric, rcm_csr,
+};
 use crate::utils::preconditioning_pipeline::{
     PreconditioningMetadata, apply_preconditioning_pipeline,
 };
@@ -1421,14 +1423,34 @@ impl Preconditioner for IluCsr {
                 }
             };
             let a_perm = if self.cfg.reordering.symmetric {
-                permute_csr_symmetric(csr, &perm)
+                self.perm = perm.clone();
+                self.pipeline_meta = PreconditioningMetadata::identity(csr.nrows());
+                self.pipeline_meta.left_perm = perm.clone();
+                self.pipeline_meta.right_perm = perm;
+                permute_csr_symmetric(csr, &self.pipeline_meta.left_perm)
             } else {
-                permute_csr_symmetric(csr, &perm)
+                let a_real = CsrMatrix::from_csr(
+                    csr.nrows(),
+                    csr.ncols(),
+                    csr.row_ptr().to_vec(),
+                    csr.col_idx().to_vec(),
+                    csr.values().iter().map(|v| v.real()).collect(),
+                );
+                let pipeline = apply_preconditioning_pipeline(
+                    &a_real,
+                    &ConditioningOptions::default(),
+                    &self.cfg.reordering,
+                )?;
+                self.perm = pipeline.metadata.left_perm.clone();
+                self.pipeline_meta = PreconditioningMetadata::identity(csr.nrows());
+                self.pipeline_meta.left_perm = pipeline.metadata.left_perm.clone();
+                self.pipeline_meta.right_perm = pipeline.metadata.right_perm;
+                permute_csr_nonsymmetric(
+                    csr,
+                    &self.pipeline_meta.left_perm,
+                    &self.pipeline_meta.right_perm,
+                )
             };
-            self.perm = perm.clone();
-            self.pipeline_meta = PreconditioningMetadata::identity(csr.nrows());
-            self.pipeline_meta.left_perm = perm.clone();
-            self.pipeline_meta.right_perm = perm;
 
             match self.cfg.kind {
                 IluKind::Ilu0 | IluKind::Milu0 => {
@@ -1544,7 +1566,15 @@ impl Preconditioner for IluCsr {
         let csr = op.as_any().downcast_ref::<CsrMatrix<S>>().ok_or_else(|| {
             KError::Unsupported("IluCsr complex numeric update requires CSR".into())
         })?;
-        let a_perm = permute_csr_symmetric(csr, &self.perm);
+        let a_perm = if self.cfg.reordering.symmetric {
+            permute_csr_symmetric(csr, &self.pipeline_meta.left_perm)
+        } else {
+            permute_csr_nonsymmetric(
+                csr,
+                &self.pipeline_meta.left_perm,
+                &self.pipeline_meta.right_perm,
+            )
+        };
         match self.cfg.kind {
             IluKind::Ilu0 | IluKind::Milu0 => {
                 if self.complex_force_degraded {
