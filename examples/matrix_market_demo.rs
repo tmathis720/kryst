@@ -108,8 +108,10 @@ mod real_demo {
         reason: ConvergedReason,
         dof_per_sec: f64,
         diagnostic_note: Option<String>,
+        fallback_summary: Option<String>,
     }
 
+    #[derive(Clone)]
     enum PcConfigSpec {
         Type {
             pc_type: PcType,
@@ -124,6 +126,13 @@ mod real_demo {
         pc_side: PcSide,
         pc: PcConfigSpec,
         setup: Option<SolverConfigurator>,
+        fallback_candidates: Vec<FallbackCandidate>,
+    }
+
+    #[derive(Clone)]
+    struct FallbackCandidate {
+        label: &'static str,
+        pc: PcConfigSpec,
     }
 
     struct MenuPlan {
@@ -183,32 +192,37 @@ mod real_demo {
         let cases = [
             (
                 "e05r0000/e05r0000.mtx",
-                "e05r0000/e05r0000_rhs1.mtx",
+                Some("e05r0000/e05r0000_rhs1.mtx"),
                 "Driven cavity (Re = 0)",
             ),
             (
                 "e05r0300/e05r0300.mtx",
-                "e05r0300/e05r0300_rhs1.mtx",
+                Some("e05r0300/e05r0300_rhs1.mtx"),
                 "Driven cavity (Re = 300)",
             ),
             (
                 "e30r0000/e30r0000.mtx",
-                "e30r0000/e30r0000_rhs1.mtx",
+                Some("e30r0000/e30r0000_rhs1.mtx"),
                 "Driven cavity 30x30 (Re = 0)",
             ),
             (
                 "e30r1000/e30r1000.mtx",
-                "e30r1000/e30r1000_rhs1.mtx",
+                Some("e30r1000/e30r1000_rhs1.mtx"),
                 "Driven cavity 30x30 (Re = 1000)",
+            ),
+            (
+                "mtx/dwg961a.mtx",
+                None,
+                "Regression hard nonsymmetric (dwg961a)",
             ),
         ];
 
         for (mat_rel, rhs_rel, descr) in cases {
             let mat_path = base.join(mat_rel);
-            let rhs_path = base.join(rhs_rel);
+            let rhs_path = rhs_rel.map(|rhs| base.join(rhs));
 
             #[cfg_attr(not(feature = "mpi"), allow(unused_mut))]
-            let mut available = mat_path.exists() && rhs_path.exists();
+            let mut available = mat_path.exists() && rhs_path.as_ref().map_or(true, |p| p.exists());
             if is_parallel {
                 #[cfg(feature = "mpi")]
                 {
@@ -226,16 +240,17 @@ mod real_demo {
                 continue;
             }
 
-            let (problem, analysis) = match load_and_distribute(&mat_path, &rhs_path, &comm) {
-                Ok(res) => res,
-                Err(e) => {
-                    if rank == 0 {
-                        println!("❌ Failed to load {descr}: {e}");
-                        println!();
+            let (problem, analysis) =
+                match load_and_distribute(&mat_path, rhs_path.as_deref(), &comm) {
+                    Ok(res) => res,
+                    Err(e) => {
+                        if rank == 0 {
+                            println!("❌ Failed to load {descr}: {e}");
+                            println!();
+                        }
+                        continue;
                     }
-                    continue;
-                }
-            };
+                };
 
             let rhs_norm_sq_local: f64 = problem.rhs.iter().map(|x| x * x).sum();
             let rhs_norm = problem.comm.all_reduce_f64(rhs_norm_sq_local).sqrt();
@@ -291,6 +306,9 @@ mod real_demo {
                                 status
                             );
                             emit_residual_warning(&row);
+                            if let Some(summary) = row.fallback_summary.as_deref() {
+                                println!("    ↪ {summary}");
+                            }
                             if row.converged {
                                 println!(
                                     "    → {:.2e} DOF/s (reason: {:?})",
@@ -337,11 +355,69 @@ mod real_demo {
     }
 
     fn run_once(problem: &Problem, spec: &RunSpec) -> Result<ResultRow, KError> {
+        let mut attempts: Vec<(&str, &PcConfigSpec)> = vec![("primary", &spec.pc)];
+        for fallback in &spec.fallback_candidates {
+            attempts.push((fallback.label, &fallback.pc));
+        }
+
+        let mut first_failure_cause: Option<String> = None;
+        let mut transitions: Vec<String> = Vec::new();
+        let mut chosen_variant = "primary";
+        let mut last_error: Option<KError> = None;
+
+        for (attempt_idx, (label, pc_cfg)) in attempts.iter().enumerate() {
+            if attempt_idx > 0 {
+                chosen_variant = label;
+            }
+            match solve_once(problem, spec, pc_cfg, label) {
+                Ok(mut row) => {
+                    if !transitions.is_empty() {
+                        let mut summary = String::new();
+                        if let Some(cause) = &first_failure_cause {
+                            summary.push_str(&format!("first failure cause: {cause}; "));
+                        }
+                        summary.push_str(&format!("fallback path: {}", transitions.join(" → ")));
+                        summary.push_str(&format!("; chosen fallback: {chosen_variant}"));
+                        row.fallback_summary = Some(summary);
+                    }
+                    return Ok(row);
+                }
+                Err(err) => {
+                    last_error = Some(err);
+                    let Some(current_err) = last_error.as_ref() else {
+                        continue;
+                    };
+                    let can_fallback = attempt_idx + 1 < attempts.len()
+                        && ilu_fallback_enabled()
+                        && is_ilu_instability_error(current_err);
+                    if attempt_idx == 0 {
+                        first_failure_cause = Some(current_err.to_string());
+                    }
+                    if can_fallback {
+                        let from = *label;
+                        let to = attempts[attempt_idx + 1].0;
+                        transitions.push(format!("{from}->{to}"));
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| KError::SolveError("unknown solve failure".into())))
+    }
+
+    fn solve_once(
+        problem: &Problem,
+        spec: &RunSpec,
+        pc_cfg: &PcConfigSpec,
+        label: &str,
+    ) -> Result<ResultRow, KError> {
         let mut ksp = KspContext::new();
         ksp.set_type(spec.solver)?;
         ksp.try_set_pc_side(spec.pc_side)?;
 
-        match &spec.pc {
+        match pc_cfg {
             PcConfigSpec::Type { pc_type, options } => {
                 let opts_ref = options.as_ref();
                 ksp.set_pc_type(*pc_type, opts_ref)?;
@@ -361,6 +437,7 @@ mod real_demo {
         let early_stop_note = Arc::new(Mutex::new(None));
         if progress_every > 0 || early_stop.window > 0 {
             let method = spec.name;
+            let method_label = format!("{method}/{label}");
             let progress_start = Instant::now();
             let stop_note_handle = Arc::clone(&early_stop_note);
             let history: Arc<Mutex<VecDeque<f64>>> = Arc::new(Mutex::new(VecDeque::with_capacity(
@@ -370,7 +447,7 @@ mod real_demo {
                 if progress_every > 0 && iter > 0 && iter % progress_every == 0 {
                     let elapsed = progress_start.elapsed().as_secs_f64();
                     println!(
-                        "    [{method}] iter {iter:4} | reported residual {:.2e} | reductions {reductions:>6} | {:.2}s elapsed",
+                        "    [{method_label}] iter {iter:4} | reported residual {:.2e} | reductions {reductions:>6} | {:.2}s elapsed",
                         residual, elapsed
                     );
                 }
@@ -444,6 +521,7 @@ mod real_demo {
             reason: stats.reason,
             dof_per_sec,
             diagnostic_note,
+            fallback_summary: None,
         })
     }
 
@@ -479,6 +557,17 @@ mod real_demo {
             "ILU0 defaults (size-based): reordering={}.",
             ilu0_reordering(analysis)
         ));
+        if ilu_fallback_enabled() {
+            let chain =
+                env::var("KRYST_ILU_FALLBACK_CHAIN").unwrap_or_else(|_| "ilut,ilutp".into());
+            notes.push(format!(
+                "ILU fallback promotion enabled: ILU0 setup failures (pivot/instability) escalate via {chain}."
+            ));
+        } else {
+            notes.push(
+                "ILU fallback promotion disabled (KRYST_ENABLE_ILU_FALLBACKS=0).".to_string(),
+            );
+        }
         if !enable_stress_solvers {
             notes.push(
                 "Set KRYST_ENABLE_STRESS_SOLVERS=1 to include TFQMR/BiCGStab runs.".to_string(),
@@ -537,6 +626,7 @@ mod real_demo {
                 } else {
                     Some(fgmres_hook())
                 },
+                fallback_candidates: Vec::new(),
             });
         }
 
@@ -572,6 +662,7 @@ mod real_demo {
             } else {
                 Some(fgmres_hook())
             },
+            fallback_candidates: Vec::new(),
         });
 
         if !analysis.has_diag_zeros && !is_parallel {
@@ -581,6 +672,7 @@ mod real_demo {
                 pc_side: PcSide::Right,
                 pc: PcConfigSpec::Builder(amg_builder(false, relax_amg)),
                 setup: Some(fgmres_hook()),
+                fallback_candidates: Vec::new(),
             });
         } else if is_parallel {
             notes.push(
@@ -619,6 +711,7 @@ mod real_demo {
                                 options: Some(amg_spd_options()),
                             },
                             setup: Some(pcg_pipelined_hook()),
+                            fallback_candidates: Vec::new(),
                         },
                         &mut notes,
                     )?;
@@ -638,6 +731,7 @@ mod real_demo {
                             options: Some(asm_ilutp_options()),
                         },
                         setup: Some(pcg_pipelined_hook()),
+                        fallback_candidates: Vec::new(),
                     },
                     &mut notes,
                 )?;
@@ -649,6 +743,7 @@ mod real_demo {
                         pc_side: PcSide::Left,
                         pc: PcConfigSpec::Builder(amg_builder(true, relax_amg)),
                         setup: Some(pcg_pipelined_hook()),
+                        fallback_candidates: Vec::new(),
                     },
                     &mut notes,
                 )?;
@@ -674,6 +769,7 @@ mod real_demo {
                         }
                     },
                     setup: None,
+                    fallback_candidates: Vec::new(),
                 },
                 &mut notes,
             )?;
@@ -687,6 +783,7 @@ mod real_demo {
                     options: Some(asm_ilutp_options()),
                 },
                 setup: None,
+                fallback_candidates: Vec::new(),
             });
             if spd_probe.is_symmetric && !spd_probe.is_spd {
                 if !analysis.has_diag_zeros {
@@ -703,6 +800,7 @@ mod real_demo {
                             PcConfigSpec::Builder(amg_builder(false, true))
                         },
                         setup: None,
+                        fallback_candidates: Vec::new(),
                     });
                 } else {
                     notes.push(
@@ -723,6 +821,7 @@ mod real_demo {
                     options: Some(block_jacobi_ilu0_options(analysis)),
                 },
                 setup: Some(gmres_hook()),
+                fallback_candidates: ilu_fallback_candidates(analysis, is_parallel),
             });
         }
 
@@ -751,6 +850,7 @@ mod real_demo {
                     }
                 },
                 setup: None,
+                fallback_candidates: Vec::new(),
             });
 
             specs.push(RunSpec {
@@ -773,6 +873,7 @@ mod real_demo {
                     }
                 },
                 setup: None,
+                fallback_candidates: Vec::new(),
             });
         }
 
@@ -787,6 +888,7 @@ mod real_demo {
                         options: None,
                     },
                     setup: None,
+                    fallback_candidates: Vec::new(),
                 });
             } else {
                 notes.push("Dense LU requires the dense-direct feature.".to_string());
@@ -803,6 +905,7 @@ mod real_demo {
                         options: None,
                     },
                     setup: None,
+                    fallback_candidates: Vec::new(),
                 });
             }
         } else {
@@ -822,6 +925,69 @@ mod real_demo {
             ),
             Err(_) => false,
         }
+    }
+
+    fn ilu_fallback_enabled() -> bool {
+        match env::var("KRYST_ENABLE_ILU_FALLBACKS") {
+            Ok(value) => !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            ),
+            Err(_) => true,
+        }
+    }
+
+    fn ilu_fallback_candidates(analysis: &Analysis, is_parallel: bool) -> Vec<FallbackCandidate> {
+        if !ilu_fallback_enabled() {
+            return Vec::new();
+        }
+        let chain = env::var("KRYST_ILU_FALLBACK_CHAIN").unwrap_or_else(|_| "ilut,ilutp".into());
+        chain
+            .split(',')
+            .filter_map(|token| {
+                let token = token.trim().to_ascii_lowercase();
+                match token.as_str() {
+                    "ilut" => Some(FallbackCandidate {
+                        label: "ilut",
+                        pc: if is_parallel {
+                            PcConfigSpec::Type {
+                                pc_type: PcType::BlockJacobi,
+                                options: Some(block_jacobi_ilut_options(analysis)),
+                            }
+                        } else {
+                            PcConfigSpec::Type {
+                                pc_type: PcType::Ilut,
+                                options: Some(ilut_options(analysis)),
+                            }
+                        },
+                    }),
+                    "ilutp" => Some(FallbackCandidate {
+                        label: "ilutp",
+                        pc: if is_parallel {
+                            PcConfigSpec::Type {
+                                pc_type: PcType::Asm,
+                                options: Some(asm_ilutp_options()),
+                            }
+                        } else {
+                            PcConfigSpec::Type {
+                                pc_type: PcType::Ilutp,
+                                options: Some(ilutp_options()),
+                            }
+                        },
+                    }),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    fn is_ilu_instability_error(err: &KError) -> bool {
+        let msg = err.to_string().to_ascii_lowercase();
+        msg.contains("pivot")
+            || msg.contains("singular")
+            || msg.contains("instability")
+            || msg.contains("breakdown")
+            || msg.contains("zero diagonal")
     }
 
     fn spd_probe(problem: &Problem) -> Result<SpdProbe, KError> {
@@ -979,6 +1145,15 @@ mod real_demo {
         opts
     }
 
+    fn ilutp_options() -> PcOptions {
+        let mut opts = PcOptions::default();
+        opts.ilutp_max_fill = Some(20);
+        opts.ilutp_drop_tol = Some(1e-4);
+        opts.ilutp_perm_tol = Some(0.1);
+        opts.ilu_reordering = Some("amd".into());
+        opts
+    }
+
     fn ilu0_reordering(analysis: &Analysis) -> &'static str {
         if analysis.nrows <= tiny_matrix_threshold() {
             "natural"
@@ -1111,7 +1286,7 @@ mod real_demo {
 
     fn load_and_distribute(
         mat_path: &Path,
-        rhs_path: &Path,
+        rhs_path: Option<&Path>,
         comm: &UniverseComm,
     ) -> Result<(Problem, Analysis), KError> {
         let rank = comm.rank();
@@ -1123,14 +1298,21 @@ mod real_demo {
 
         if rank == 0 {
             let mat_mm = read_matrix_market(mat_path)?;
-            let rhs_mm = read_matrix_market(rhs_path)?;
             let csr = mat_mm.to_csr_matrix()?;
             let (csr_fixed, fixed) = repair_diagonal_csr(&csr, 1e-14, 1e-8);
             if fixed > 0 {
                 eprintln!("(info) repaired {fixed} diagonal entries (|diag|<=1e-14 or missing).");
             }
+            let rhs = if let Some(rhs_path) = rhs_path {
+                let rhs_mm = read_matrix_market(rhs_path)?;
+                rhs_mm.to_vector()?
+            } else {
+                (0..csr_fixed.nrows())
+                    .map(|i| pseudo_random(i, 0xA24BAED4963EE407))
+                    .collect()
+            };
             matrix_root = Some(csr_fixed);
-            rhs_root = Some(rhs_mm.to_vector()?);
+            rhs_root = Some(rhs);
         }
 
         if is_parallel {
