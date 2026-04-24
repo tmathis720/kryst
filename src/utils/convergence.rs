@@ -604,6 +604,12 @@ pub struct SolveStats<R> {
     pub orthogonalization_rank_loss: bool,
     /// Max estimate of orthogonality loss observed during the solve.
     pub max_orthogonality_loss_estimate: R,
+    /// Effective solver variant selected at runtime (if policy hooks mutated it).
+    pub effective_variant: Option<String>,
+    /// Effective restart value selected at runtime.
+    pub effective_restart: Option<usize>,
+    /// Effective residual-check policy selected at runtime.
+    pub effective_residual_check_policy: Option<String>,
 }
 
 impl<R: Default> SolveStats<R> {
@@ -637,6 +643,9 @@ impl<R: Default> SolveStats<R> {
             orthogonalization_passes: 0,
             orthogonalization_rank_loss: false,
             max_orthogonality_loss_estimate: R::default(),
+            effective_variant: None,
+            effective_restart: None,
+            effective_residual_check_policy: None,
         }
     }
 
@@ -700,6 +709,19 @@ impl<R: Default> SolveStats<R> {
         self.orthogonalization_passes = passes;
         self.orthogonalization_rank_loss = rank_loss;
         self.max_orthogonality_loss_estimate = max_loss_estimate;
+        self
+    }
+
+    /// Attach runtime-effective policy knobs selected by the solver.
+    pub fn with_effective_runtime_policy(
+        mut self,
+        variant: impl Into<String>,
+        restart: usize,
+        residual_check_policy: impl Into<String>,
+    ) -> Self {
+        self.effective_variant = Some(variant.into());
+        self.effective_restart = Some(restart);
+        self.effective_residual_check_policy = Some(residual_check_policy.into());
         self
     }
 }
