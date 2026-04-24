@@ -25,6 +25,7 @@ mod complex_demo {
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
     use kryst::matrix::DistCsrOp;
+    use kryst::matrix::dist_csr::DistributedPlanDiagnostics;
     use kryst::matrix::sparse::CsrMatrix as SparseCsrMatrix;
     use kryst::ops::klinop::KLinOp;
     use kryst::ops::kpc::KPreconditioner;
@@ -34,7 +35,7 @@ mod complex_demo {
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::jacobi::Jacobi;
     use kryst::solver::LinearSolver;
-    use kryst::solver::fgmres::{FgmresSolver, FgmresVariant, OrthogMethod};
+    use kryst::solver::fgmres::{FgmresSolver, FgmresVariant, OrthogMethod, ResidualCheckPolicy};
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
 
@@ -144,8 +145,10 @@ mod complex_demo {
                 );
                 if include_dof_col {
                     println!(
-                        "{:<36} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26} {:>12}",
+                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26} {:>12}",
                         "Method",
+                        "Requested policy",
+                        "Effective policy",
                         "Setup(s)",
                         "Med(s)",
                         "Min(s)",
@@ -158,8 +161,10 @@ mod complex_demo {
                     );
                 } else {
                     println!(
-                        "{:<36} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
+                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
                         "Method",
+                        "Requested policy",
+                        "Effective policy",
                         "Setup(s)",
                         "Med(s)",
                         "Min(s)",
@@ -170,7 +175,7 @@ mod complex_demo {
                         "Reason"
                     );
                 }
-                println!("{}", "-".repeat(if include_dof_col { 160 } else { 146 }));
+                println!("{}", "-".repeat(if include_dof_col { 236 } else { 222 }));
             }
 
             let runs = RunSpec::build_default_matrix(&config, &problem);
@@ -188,44 +193,19 @@ mod complex_demo {
                                 .map(|v| format!("{v:.2e}"))
                                 .unwrap_or_else(|| "N/A".to_string());
                             if include_dof_col {
-                                let dof = row
-                                    .dof_per_sec
-                                    .map(|v| format!("{v:.2e}"))
-                                    .unwrap_or_else(|| "N/A".to_string());
-                                println!(
-                                    "{:<36} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?} {:>12}",
-                                    row.method,
-                                    row.setup_secs,
-                                    row.median_solve_secs,
-                                    row.min_solve_secs,
-                                    row.iterations,
-                                    row.reductions,
-                                    row.reported_residual,
-                                    explicit_true,
-                                    row.reason,
-                                    dof
-                                );
+                                println!("{}", render_result_row(&row, explicit_true, true));
                             } else {
-                                println!(
-                                    "{:<36} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?}",
-                                    row.method,
-                                    row.setup_secs,
-                                    row.median_solve_secs,
-                                    row.min_solve_secs,
-                                    row.iterations,
-                                    row.reductions,
-                                    row.reported_residual,
-                                    explicit_true,
-                                    row.reason
-                                );
+                                println!("{}", render_result_row(&row, explicit_true, false));
                             }
                         }
                     }
                     Err(err) => {
                         if rank == 0 {
                             println!(
-                                "{:<36} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
+                                "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
                                 spec.method_label(),
+                                spec.requested_policy_label(),
+                                "N/A",
                                 "FAIL",
                                 "FAIL",
                                 "FAIL",
@@ -266,6 +246,7 @@ mod complex_demo {
 
     struct Problem {
         op: Arc<dyn KLinOp<Scalar = S>>,
+        dist_plan_diagnostics: DistributedPlanDiagnostics,
         rhs: Vec<S>,
         csr_for_pc: Arc<SparseCsrMatrix<S>>,
         local_n: usize,
@@ -311,6 +292,8 @@ mod complex_demo {
 
     struct ResultRow {
         method: String,
+        requested_policy: String,
+        effective_policy: String,
         setup_secs: f64,
         median_solve_secs: f64,
         min_solve_secs: f64,
@@ -325,6 +308,7 @@ mod complex_demo {
     struct RunSpec {
         restart: usize,
         variant: FgmresVariant,
+        residual_check_policy: ResidualCheckPolicy,
         orthog: OrthogMethod,
         reorth: ReorthPolicy,
         pc_side: PcSide,
@@ -552,6 +536,7 @@ mod complex_demo {
                             runs.push(Self {
                                 restart,
                                 variant,
+                                residual_check_policy: ResidualCheckPolicy::OnConvergence,
                                 orthog,
                                 reorth,
                                 pc_side: PcSide::Right,
@@ -561,6 +546,7 @@ mod complex_demo {
                                 runs.push(Self {
                                     restart,
                                     variant,
+                                    residual_check_policy: ResidualCheckPolicy::OnConvergence,
                                     orthog,
                                     reorth,
                                     pc_side: PcSide::Right,
@@ -570,6 +556,7 @@ mod complex_demo {
                             runs.push(Self {
                                 restart,
                                 variant,
+                                residual_check_policy: ResidualCheckPolicy::OnConvergence,
                                 orthog,
                                 reorth,
                                 pc_side: PcSide::Right,
@@ -578,6 +565,7 @@ mod complex_demo {
                             runs.push(Self {
                                 restart,
                                 variant,
+                                residual_check_policy: ResidualCheckPolicy::OnConvergence,
                                 orthog,
                                 reorth,
                                 pc_side: PcSide::Right,
@@ -602,14 +590,24 @@ mod complex_demo {
                 )
             };
             format!(
-                "FGMRES+{} [m={}, v={}, orth={}, reorth={}, pc=requested {}, effective {}]",
+                "FGMRES+{} [m={}, v={}, reschk={}, orth={}, reorth={}, pc=requested {}, effective {}]",
                 self.pc.label(),
                 self.restart,
                 variant_label(self.variant),
+                residual_check_policy_label(self.residual_check_policy),
                 orthog_label(self.orthog),
                 reorth_label(self.reorth),
                 pc_side_label(self.pc_side),
                 side_desc,
+            )
+        }
+
+        fn requested_policy_label(&self) -> String {
+            format!(
+                "variant={}, restart={}, residual-check={}",
+                variant_label(self.variant),
+                self.restart,
+                residual_check_policy_label(self.residual_check_policy)
             )
         }
     }
@@ -661,6 +659,15 @@ mod complex_demo {
             ReorthPolicy::Never => "never",
             ReorthPolicy::IfNeeded => "if-needed",
             ReorthPolicy::Always => "always",
+        }
+    }
+
+    fn residual_check_policy_label(policy: ResidualCheckPolicy) -> &'static str {
+        match policy {
+            ResidualCheckPolicy::RestartOnly => "restart-only",
+            ResidualCheckPolicy::OnConvergence => "on-convergence",
+            ResidualCheckPolicy::EveryIteration => "every-iteration",
+            ResidualCheckPolicy::Debug => "debug",
         }
     }
 
@@ -728,6 +735,7 @@ mod complex_demo {
         for _ in 0..bench_cfg.warmup_runs {
             let mut x = vec![S::zero(); problem.local_n];
             let mut solver = configured_solver(spec);
+            apply_dist_plan_policy(&mut solver, problem);
             let mut workspace = Workspace::new(problem.local_n);
             solver.setup_workspace(&mut workspace);
             let _ = solver.solve_k(
@@ -750,6 +758,7 @@ mod complex_demo {
             problem.comm.barrier();
             let start = Instant::now();
             let mut solver = configured_solver(spec);
+            apply_dist_plan_policy(&mut solver, problem);
             let mut workspace = Workspace::new(problem.local_n);
             solver.setup_workspace(&mut workspace);
             let stats = solver.solve_k(
@@ -794,6 +803,19 @@ mod complex_demo {
 
         Ok(ResultRow {
             method: spec.method_label(),
+            requested_policy: spec.requested_policy_label(),
+            effective_policy: format!(
+                "variant={}, restart={}, residual-check={}",
+                stats
+                    .effective_variant
+                    .as_deref()
+                    .unwrap_or(variant_label(spec.variant)),
+                stats.effective_restart.unwrap_or(spec.restart),
+                stats
+                    .effective_residual_check_policy
+                    .as_deref()
+                    .unwrap_or(residual_check_policy_label(spec.residual_check_policy))
+            ),
             setup_secs,
             median_solve_secs,
             min_solve_secs,
@@ -818,11 +840,16 @@ mod complex_demo {
     fn configured_solver(spec: &RunSpec) -> FgmresSolver {
         let mut solver = FgmresSolver::new(1e-8, 500, spec.restart);
         solver.variant = spec.variant;
+        solver.residual_check_policy = spec.residual_check_policy;
         solver.orthog = spec.orthog;
         solver.reorth = spec.reorth;
         solver.atol = 1e-12;
         solver.dtol = 1e6;
         solver
+    }
+
+    fn apply_dist_plan_policy(solver: &mut FgmresSolver, problem: &Problem) {
+        solver.apply_distcsr_policy(&problem.dist_plan_diagnostics, problem.comm.size());
     }
 
     fn median(samples: &mut [f64]) -> f64 {
@@ -832,6 +859,45 @@ mod complex_demo {
             samples[n / 2]
         } else {
             (samples[n / 2 - 1] + samples[n / 2]) * 0.5
+        }
+    }
+
+    fn render_result_row(row: &ResultRow, explicit_true: String, include_dof_col: bool) -> String {
+        if include_dof_col {
+            let dof = row
+                .dof_per_sec
+                .map(|v| format!("{v:.2e}"))
+                .unwrap_or_else(|| "N/A".to_string());
+            format!(
+                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?} {:>12}",
+                row.method,
+                row.requested_policy,
+                row.effective_policy,
+                row.setup_secs,
+                row.median_solve_secs,
+                row.min_solve_secs,
+                row.iterations,
+                row.reductions,
+                row.reported_residual,
+                explicit_true,
+                row.reason,
+                dof
+            )
+        } else {
+            format!(
+                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?}",
+                row.method,
+                row.requested_policy,
+                row.effective_policy,
+                row.setup_secs,
+                row.median_solve_secs,
+                row.min_solve_secs,
+                row.iterations,
+                row.reductions,
+                row.reported_residual,
+                explicit_true,
+                row.reason
+            )
         }
     }
 
@@ -848,6 +914,7 @@ mod complex_demo {
         let local_pc_block = slice_csr_rows_owned_cols(&csr_sparse, row_start, row_end);
 
         let op = DistCsrOp::from_local_rows(nrows, row_start, &local_csr, &row_part, comm.clone())?;
+        let dist_plan_diagnostics = op.plan_diagnostics().clone();
         let op_arc: Arc<dyn KLinOp<Scalar = S>> = Arc::new(op);
 
         let rhs_global = match try_load_rhs_s(mat_path, nrows) {
@@ -867,6 +934,7 @@ mod complex_demo {
 
         Ok(Problem {
             op: op_arc,
+            dist_plan_diagnostics,
             rhs,
             csr_for_pc: Arc::new(local_pc_block),
             local_n,
@@ -1014,6 +1082,17 @@ mod complex_demo {
             SparseCsrMatrix::from_csr(2, 3, vec![0, 1, 2], vec![0, 1], vec![S::one(), S::one()]);
         let problem = Problem {
             op: Arc::new(op),
+            dist_plan_diagnostics: DistributedPlanDiagnostics {
+                overlap_mode: kryst::matrix::dist_csr::HaloOverlapMode::Disabled,
+                kernel_strategy: kryst::matrix::dist_csr::DistLocalKernelStrategy::RowSplitScalar,
+                local_spmv_kernel: None,
+                row_locality_ratio: 1.0,
+                border_ratio: 0.0,
+                halo_recv_volume: 0,
+                halo_send_volume: 0,
+                expected_communication_fraction: 0.0,
+                expected_computation_fraction: 1.0,
+            },
             rhs: vec![S::one(), S::one()],
             csr_for_pc: Arc::new(rectangular_pc),
             local_n: 2,
@@ -1026,6 +1105,7 @@ mod complex_demo {
         let spec = RunSpec {
             restart: 10,
             variant: FgmresVariant::Classical,
+            residual_check_policy: ResidualCheckPolicy::OnConvergence,
             orthog: OrthogMethod::ClassicalGS,
             reorth: ReorthPolicy::IfNeeded,
             pc_side: PcSide::Right,
@@ -1044,6 +1124,73 @@ mod complex_demo {
             Err(other) => panic!("unexpected error variant: {other:?}"),
             Ok(_) => panic!("expected rectangular ILU error"),
         }
+    }
+
+    #[test]
+    fn run_once_reports_requested_and_effective_policy_after_dist_policy_mutation() {
+        #[cfg(feature = "mpi")]
+        let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+        #[cfg(not(feature = "mpi"))]
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let op_local =
+            SparseCsrMatrix::from_csr(2, 2, vec![0, 1, 2], vec![0, 1], vec![S::one(), S::one()]);
+        let row_part = vec![0, 2];
+        let op = DistCsrOp::from_local_rows(2, 0, &op_local, &row_part, comm.clone())
+            .expect("build local dist op");
+
+        let problem = Problem {
+            op: Arc::new(op),
+            dist_plan_diagnostics: DistributedPlanDiagnostics {
+                overlap_mode: kryst::matrix::dist_csr::HaloOverlapMode::Disabled,
+                kernel_strategy: kryst::matrix::dist_csr::DistLocalKernelStrategy::RowSplitScalar,
+                local_spmv_kernel: None,
+                row_locality_ratio: 1.0,
+                border_ratio: 0.0,
+                halo_recv_volume: 0,
+                halo_send_volume: 0,
+                expected_communication_fraction: 0.1,
+                expected_computation_fraction: 0.5,
+            },
+            rhs: vec![S::one(), S::one()],
+            csr_for_pc: Arc::new(op_local),
+            local_n: 2,
+            global_n: 2,
+            global_row_start: 0,
+            comm,
+            backend: CsrBackend::Serial,
+            backend_descr: "unit-test".to_string(),
+        };
+        let spec = RunSpec {
+            restart: 5,
+            variant: FgmresVariant::Classical,
+            residual_check_policy: ResidualCheckPolicy::OnConvergence,
+            orthog: OrthogMethod::ClassicalGS,
+            reorth: ReorthPolicy::IfNeeded,
+            pc_side: PcSide::Right,
+            pc: PcKind::None,
+        };
+        let bench_cfg = BenchmarkConfig {
+            warmup_runs: 0,
+            measured_runs: 1,
+            ..BenchmarkConfig::default()
+        };
+
+        let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
+        assert!(row.requested_policy.contains("restart=5"));
+        assert!(
+            row.requested_policy
+                .contains("residual-check=on-convergence")
+        );
+        assert!(row.effective_policy.contains("restart=16"));
+        assert!(
+            row.effective_policy
+                .contains("residual-check=every-iteration")
+        );
+
+        let rendered = render_result_row(&row, "1.00e-16".to_string(), false);
+        assert!(rendered.contains(&row.requested_policy));
+        assert!(rendered.contains(&row.effective_policy));
     }
 
     #[test]

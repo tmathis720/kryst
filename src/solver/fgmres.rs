@@ -223,6 +223,24 @@ impl FgmresSolver {
     }
 
     #[inline]
+    fn effective_variant_label(&self) -> &'static str {
+        match self.variant {
+            FgmresVariant::Classical => "classical",
+            FgmresVariant::Pipelined => "pipelined",
+        }
+    }
+
+    #[inline]
+    fn effective_residual_check_policy_label(&self) -> &'static str {
+        match self.residual_check_policy {
+            ResidualCheckPolicy::RestartOnly => "restart-only",
+            ResidualCheckPolicy::OnConvergence => "on-convergence",
+            ResidualCheckPolicy::EveryIteration => "every-iteration",
+            ResidualCheckPolicy::Debug => "debug",
+        }
+    }
+
+    #[inline]
     fn workspace_cols(&self) -> usize {
         if self.preallocate {
             self.restart.min(self.maxits)
@@ -342,6 +360,10 @@ impl FgmresSolver {
                 diag.overlap_mode,
             );
         }
+    }
+
+    pub fn apply_distcsr_policy(&mut self, diag: &DistributedPlanDiagnostics, comm_size: usize) {
+        self.apply_distcsr_policy_hook(diag, comm_size);
     }
 
     fn should_run_cgs_refinement(&self, wnorm0: R, hnext: R) -> bool {
@@ -845,7 +867,12 @@ impl FgmresSolver {
 
         let mut total_iters = 0usize;
         let mut res = beta0;
-        let mut stats = SolveStats::new(0, res, ConvergedReason::Continued);
+        let mut stats = SolveStats::new(0, res, ConvergedReason::Continued)
+            .with_effective_runtime_policy(
+                self.effective_variant_label(),
+                self.restart,
+                self.effective_residual_check_policy_label(),
+            );
         stats.final_recurrence_residual = Some(res);
         let red_engine = ws
             .reduction_engine()
@@ -898,6 +925,11 @@ impl FgmresSolver {
                 residual_replacements: async_waits,
             };
             let mut stats = SolveStats::new(0, true_res, ConvergedReason::StoppedByMonitor)
+                .with_effective_runtime_policy(
+                    self.effective_variant_label(),
+                    self.restart,
+                    self.effective_residual_check_policy_label(),
+                )
                 .with_counters(counters)
                 .with_fgmres_counters(FgmresCounters {
                     restart_count,
@@ -1675,7 +1707,12 @@ mod tests {
             (self.diag.len(), self.diag.len())
         }
 
-        fn matvec_s(&self, x: &[Self::Scalar], y: &mut [Self::Scalar], _scratch: &mut BridgeScratch) {
+        fn matvec_s(
+            &self,
+            x: &[Self::Scalar],
+            y: &mut [Self::Scalar],
+            _scratch: &mut BridgeScratch,
+        ) {
             for ((yi, &ai), &xi) in y.iter_mut().zip(self.diag.iter()).zip(x.iter()) {
                 *yi = ai * xi;
             }
@@ -1684,9 +1721,19 @@ mod tests {
 
     fn run_pipelined_with_options(comm: UniverseComm, exec: ReductExec) -> SolveStats<f64> {
         let a = DiagOp {
-            diag: vec![S::from_real(4.0), S::from_real(3.0), S::from_real(2.0), S::from_real(1.5)],
+            diag: vec![
+                S::from_real(4.0),
+                S::from_real(3.0),
+                S::from_real(2.0),
+                S::from_real(1.5),
+            ],
         };
-        let b = vec![S::from_real(1.0), S::from_real(-2.0), S::from_real(3.0), S::from_real(-1.0)];
+        let b = vec![
+            S::from_real(1.0),
+            S::from_real(-2.0),
+            S::from_real(3.0),
+            S::from_real(-1.0),
+        ];
         let mut x = vec![S::zero(); b.len()];
         let mut solver = FgmresSolver::new(1e-12, 60, 8);
         solver.set_variant(FgmresVariant::Pipelined);
@@ -1699,7 +1746,16 @@ mod tests {
         });
 
         let stats = solver
-            .solve_k(&a, None, &b, &mut x, PcSide::Right, &comm, None, Some(&mut ws))
+            .solve_k(
+                &a,
+                None,
+                &b,
+                &mut x,
+                PcSide::Right,
+                &comm,
+                None,
+                Some(&mut ws),
+            )
             .expect("pipelined FGMRES solve should succeed");
         assert!(
             stats.final_residual < 1e-9,
@@ -1739,9 +1795,13 @@ mod tests {
     #[cfg(feature = "mpi")]
     #[test]
     fn mpi_smoke_pipelined_overlap_counters_are_stable() {
-        let comm = UniverseComm::Mpi(std::sync::Arc::new(crate::parallel::mpi_comm::MpiComm::new()));
+        let comm = UniverseComm::Mpi(std::sync::Arc::new(
+            crate::parallel::mpi_comm::MpiComm::new(),
+        ));
         let stats = run_pipelined_with_options(comm, ReductExec::Async);
-        let counters = stats.fgmres_counters.expect("fgmres counters should be present");
+        let counters = stats
+            .fgmres_counters
+            .expect("fgmres counters should be present");
         assert!(counters.deferred_pipeline_waits >= counters.immediate_pipeline_completions);
     }
 }
