@@ -63,6 +63,7 @@ mod complex_demo {
 
         if rank == 0 {
             println!("Complex Matrix Market demo (FGMRES)");
+            println!("Run mode: {}", config.run_mode.label());
             println!(
                 "Parallel backend: {}",
                 if is_parallel {
@@ -75,15 +76,40 @@ mod complex_demo {
                 "Benchmark runs: warmup={}, measured={}",
                 config.warmup_runs, config.measured_runs
             );
+            println!(
+                "Mode profile: {}",
+                match config.run_mode {
+                    RunMode::Correctness => {
+                        "small matrices, explicit true residuals, optional replicated operator checks"
+                    }
+                    RunMode::Scalability => {
+                        "distributed operator + local-block PC only, global norms only, lightweight reporting"
+                    }
+                }
+            );
+            if config.run_mode == RunMode::Correctness {
+                println!(
+                    "Replicated operator checks: {}",
+                    if config.correctness_replicated_check {
+                        "enabled (metadata/checkpoint reporting)"
+                    } else {
+                        "disabled"
+                    }
+                );
+            }
             println!("===============================================================");
             println!();
         }
 
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/mtx");
-        let cases = [
+        let all_cases = [
             ("qc324.mtx", "qc324 (complex, general)"),
             ("dwg961a.mtx", "dwg961a (complex, general)"),
         ];
+        let cases: Vec<(&str, &str)> = match config.run_mode {
+            RunMode::Correctness => all_cases.to_vec(),
+            RunMode::Scalability => all_cases.to_vec(),
+        };
 
         for (mat_name, descr) in cases {
             let mat_path = base.join(mat_name);
@@ -95,7 +121,12 @@ mod complex_demo {
                 continue;
             }
 
-            let problem = match load_problem_complex(&mat_path, &comm) {
+            let problem = match load_problem_complex(
+                &mat_path,
+                &comm,
+                config.run_mode,
+                config.correctness_replicated_check,
+            ) {
                 Ok(p) => p,
                 Err(err) => {
                     if rank == 0 {
@@ -108,7 +139,11 @@ mod complex_demo {
             let rhs_norm2_local: f64 = problem.rhs.iter().map(|v| v.abs2()).sum();
             let rhs_norm = problem.comm.all_reduce_f64(rhs_norm2_local).sqrt();
             if rank == 0 {
-                println!("=== {descr} — {} ===", problem.backend_descr);
+                println!(
+                    "=== [{} mode] {descr} — {} ===",
+                    config.run_mode.label(),
+                    problem.backend_descr
+                );
                 println!(
                     "Run backend: {} ({})",
                     problem.backend.run_label(),
@@ -128,22 +163,44 @@ mod complex_demo {
                 if problem.comm.size() > 1 && problem.local_n == problem.global_n {
                     println!("Note: replicated execution: MPI ranks are not sharing SpMV rows.");
                 }
-                println!(
-                    "MPI scalability note: use this distributed complex CSR example for scalability claims; use replicated demos only as correctness/smoke benchmarks."
-                );
+                if config.run_mode == RunMode::Correctness {
+                    println!(
+                        "MPI scalability note: use distributed mode for scaling claims; correctness mode emphasizes solver validation."
+                    );
+                }
                 println!("‖rhs‖₂ = {:.3e}", rhs_norm);
                 println!("Residual semantics: rec/reported = solver recurrence/monitor residual.");
-                println!(
-                    "                    true(explicit) = ||b - A x||₂ recomputed after solve."
-                );
+                if config.run_mode == RunMode::Correctness {
+                    println!(
+                        "                    true(explicit) = ||b - A x||₂ recomputed after solve."
+                    );
+                }
                 println!(
                     "FGMRES side policy: requested left/symmetric are normalized to effective right preconditioning."
                 );
+                if config.run_mode == RunMode::Correctness && config.correctness_replicated_check {
+                    println!(
+                        "Replicated check marker: ENABLED (log-only marker for cross-run comparison)."
+                    );
+                }
                 let include_dof_col = matches!(
                     problem.backend,
                     CsrBackend::Serial | CsrBackend::Distributed
                 );
-                if include_dof_col {
+                if config.run_mode == RunMode::Scalability {
+                    println!(
+                        "{:<36} {:<34} {:>9} {:>9} {:>7} {:>6} {:>14} {:>12}",
+                        "Method",
+                        "Effective policy",
+                        "Med(s)",
+                        "Min(s)",
+                        "Iters",
+                        "Reds",
+                        "Rec/Reported",
+                        "DOF/s"
+                    );
+                    println!("{}", "-".repeat(140));
+                } else if include_dof_col {
                     println!(
                         "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26} {:>12}",
                         "Method",
@@ -159,6 +216,7 @@ mod complex_demo {
                         "Reason",
                         "DOF/s"
                     );
+                    println!("{}", "-".repeat(236));
                 } else {
                     println!(
                         "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
@@ -174,8 +232,8 @@ mod complex_demo {
                         "True(explicit)",
                         "Reason"
                     );
+                    println!("{}", "-".repeat(222));
                 }
-                println!("{}", "-".repeat(if include_dof_col { 236 } else { 222 }));
             }
 
             let runs = RunSpec::build_default_matrix(&config, &problem);
@@ -184,37 +242,39 @@ mod complex_demo {
                 match run_once(&problem, &spec, &config) {
                     Ok(row) => {
                         if rank == 0 {
-                            let include_dof_col = matches!(
-                                problem.backend,
-                                CsrBackend::Serial | CsrBackend::Distributed
-                            );
-                            let explicit_true = row
-                                .explicit_true_residual
-                                .map(|v| format!("{v:.2e}"))
-                                .unwrap_or_else(|| "N/A".to_string());
-                            if include_dof_col {
-                                println!("{}", render_result_row(&row, explicit_true, true));
-                            } else {
-                                println!("{}", render_result_row(&row, explicit_true, false));
-                            }
+                            println!("{}", render_result_row(&row, config.run_mode, &problem));
                         }
                     }
                     Err(err) => {
                         if rank == 0 {
-                            println!(
-                                "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
-                                spec.method_label(),
-                                spec.requested_policy_label(),
-                                "N/A",
-                                "FAIL",
-                                "FAIL",
-                                "FAIL",
-                                "N/A",
-                                "N/A",
-                                "N/A",
-                                "N/A",
-                                "N/A"
-                            );
+                            if config.run_mode == RunMode::Scalability {
+                                println!(
+                                    "{:<36} {:<34} {:>9} {:>9} {:>7} {:>6} {:>14} {:>12}",
+                                    spec.method_label(),
+                                    "N/A",
+                                    "FAIL",
+                                    "FAIL",
+                                    "N/A",
+                                    "N/A",
+                                    "N/A",
+                                    "N/A"
+                                );
+                            } else {
+                                println!(
+                                    "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
+                                    spec.method_label(),
+                                    spec.requested_policy_label(),
+                                    "N/A",
+                                    "FAIL",
+                                    "FAIL",
+                                    "FAIL",
+                                    "N/A",
+                                    "N/A",
+                                    "N/A",
+                                    "N/A",
+                                    "N/A"
+                                );
+                            }
                             println!("    → {err}");
                         }
                     }
@@ -332,6 +392,7 @@ mod complex_demo {
 
     #[derive(Clone, Debug)]
     struct BenchmarkConfig {
+        run_mode: RunMode,
         warmup_runs: usize,
         measured_runs: usize,
         restarts: Vec<usize>,
@@ -339,11 +400,38 @@ mod complex_demo {
         variants: Vec<FgmresVariant>,
         orthogs: Vec<OrthogMethod>,
         reorths: Vec<ReorthPolicy>,
+        correctness_replicated_check: bool,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RunMode {
+        Correctness,
+        Scalability,
+    }
+
+    impl RunMode {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Correctness => "correctness",
+                Self::Scalability => "scalability",
+            }
+        }
+
+        fn parse(token: &str) -> Result<Self, KError> {
+            match token.trim().to_ascii_lowercase().as_str() {
+                "correctness" => Ok(Self::Correctness),
+                "scalability" => Ok(Self::Scalability),
+                other => Err(KError::InvalidInput(format!(
+                    "invalid run mode '{other}', expected correctness|scalability"
+                ))),
+            }
+        }
     }
 
     impl Default for BenchmarkConfig {
         fn default() -> Self {
             Self {
+                run_mode: RunMode::Correctness,
                 warmup_runs: 1,
                 measured_runs: 5,
                 restarts: vec![50, 100, 150],
@@ -351,6 +439,7 @@ mod complex_demo {
                 variants: vec![FgmresVariant::Classical],
                 orthogs: vec![OrthogMethod::ClassicalGS],
                 reorths: vec![ReorthPolicy::IfNeeded],
+                correctness_replicated_check: false,
             }
         }
     }
@@ -380,14 +469,23 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--warmup-runs N] [--measured-runs N] [--restarts csv] [--include-restart-200] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--restarts csv] [--include-restart-200] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--warmup-runs N] [--measured-runs N] [--restarts csv] [--include-restart-200] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--restarts csv] [--include-restart-200] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
                             );
                         }
                         std::process::exit(0);
+                    }
+                    "--mode" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput("missing value for --mode".into()));
+                        };
+                        cfg.run_mode = RunMode::parse(&v)?;
+                    }
+                    "--correctness-replicated-check" => {
+                        cfg.correctness_replicated_check = true;
                     }
                     "--restarts" => {
                         let Some(v) = args.next() else {
@@ -434,6 +532,9 @@ mod complex_demo {
             }
             if cfg.include_restart_200 && !cfg.restarts.contains(&200) {
                 cfg.restarts.push(200);
+            }
+            if cfg.run_mode == RunMode::Scalability {
+                cfg.correctness_replicated_check = false;
             }
             Ok(cfg)
         }
@@ -528,49 +629,65 @@ mod complex_demo {
     impl RunSpec {
         fn build_default_matrix(cfg: &BenchmarkConfig, problem: &Problem) -> Vec<Self> {
             let mut runs = Vec::new();
-            let include_mpi_block_jacobi = problem.comm.size() > 1;
             for &restart in &cfg.restarts {
                 for &variant in &cfg.variants {
                     for &orthog in &cfg.orthogs {
                         for &reorth in &cfg.reorths {
-                            runs.push(Self {
-                                restart,
-                                variant,
-                                residual_check_policy: ResidualCheckPolicy::OnConvergence,
-                                orthog,
-                                reorth,
-                                pc_side: PcSide::Right,
-                                pc: PcKind::Ilu0Local,
-                            });
-                            if include_mpi_block_jacobi {
-                                runs.push(Self {
-                                    restart,
-                                    variant,
-                                    residual_check_policy: ResidualCheckPolicy::OnConvergence,
-                                    orthog,
-                                    reorth,
-                                    pc_side: PcSide::Right,
-                                    pc: PcKind::MpiBlockJacobiIlu0Local,
-                                });
+                            match cfg.run_mode {
+                                RunMode::Correctness => {
+                                    let include_mpi_block_jacobi = problem.comm.size() > 1;
+                                    runs.push(Self {
+                                        restart,
+                                        variant,
+                                        residual_check_policy: ResidualCheckPolicy::OnConvergence,
+                                        orthog,
+                                        reorth,
+                                        pc_side: PcSide::Right,
+                                        pc: PcKind::Ilu0Local,
+                                    });
+                                    if include_mpi_block_jacobi {
+                                        runs.push(Self {
+                                            restart,
+                                            variant,
+                                            residual_check_policy:
+                                                ResidualCheckPolicy::OnConvergence,
+                                            orthog,
+                                            reorth,
+                                            pc_side: PcSide::Right,
+                                            pc: PcKind::MpiBlockJacobiIlu0Local,
+                                        });
+                                    }
+                                    runs.push(Self {
+                                        restart,
+                                        variant,
+                                        residual_check_policy: ResidualCheckPolicy::OnConvergence,
+                                        orthog,
+                                        reorth,
+                                        pc_side: PcSide::Right,
+                                        pc: PcKind::JacobiWeak,
+                                    });
+                                    runs.push(Self {
+                                        restart,
+                                        variant,
+                                        residual_check_policy: ResidualCheckPolicy::OnConvergence,
+                                        orthog,
+                                        reorth,
+                                        pc_side: PcSide::Right,
+                                        pc: PcKind::None,
+                                    });
+                                }
+                                RunMode::Scalability => {
+                                    runs.push(Self {
+                                        restart,
+                                        variant,
+                                        residual_check_policy: ResidualCheckPolicy::RestartOnly,
+                                        orthog,
+                                        reorth,
+                                        pc_side: PcSide::Right,
+                                        pc: PcKind::Ilu0Local,
+                                    });
+                                }
                             }
-                            runs.push(Self {
-                                restart,
-                                variant,
-                                residual_check_policy: ResidualCheckPolicy::OnConvergence,
-                                orthog,
-                                reorth,
-                                pc_side: PcSide::Right,
-                                pc: PcKind::JacobiWeak,
-                            });
-                            runs.push(Self {
-                                restart,
-                                variant,
-                                residual_check_policy: ResidualCheckPolicy::OnConvergence,
-                                orthog,
-                                reorth,
-                                pc_side: PcSide::Right,
-                                pc: PcKind::None,
-                            });
                         }
                     }
                 }
@@ -783,14 +900,18 @@ mod complex_demo {
         let median_solve_secs = median(&mut solve_times);
 
         let reductions = stats.counters.num_global_reductions;
-        let mut ax = vec![S::zero(); b.len()];
-        let mut scratch = BridgeScratch::default();
-        problem.op.matvec_s(&x_last, &mut ax, &mut scratch);
-        for (ri, bi) in ax.iter_mut().zip(b.iter().copied()) {
-            *ri = bi - *ri;
-        }
-        let r2_local = ax.iter().map(|v| v.abs2()).sum::<f64>();
-        let explicit_true_residual = Some(problem.comm.all_reduce_f64(r2_local).sqrt());
+        let explicit_true_residual = if bench_cfg.run_mode == RunMode::Correctness {
+            let mut ax = vec![S::zero(); b.len()];
+            let mut scratch = BridgeScratch::default();
+            problem.op.matvec_s(&x_last, &mut ax, &mut scratch);
+            for (ri, bi) in ax.iter_mut().zip(b.iter().copied()) {
+                *ri = bi - *ri;
+            }
+            let r2_local = ax.iter().map(|v| v.abs2()).sum::<f64>();
+            Some(problem.comm.all_reduce_f64(r2_local).sqrt())
+        } else {
+            None
+        };
         let dof_per_sec = if matches!(
             problem.backend,
             CsrBackend::Serial | CsrBackend::Distributed
@@ -815,7 +936,13 @@ mod complex_demo {
                     .effective_residual_check_policy
                     .as_deref()
                     .unwrap_or(residual_check_policy_label(spec.residual_check_policy))
-            ),
+            ) + if bench_cfg.run_mode == RunMode::Correctness
+                && bench_cfg.correctness_replicated_check
+            {
+                " [replicated-check=enabled]"
+            } else {
+                ""
+            },
             setup_secs,
             median_solve_secs,
             min_solve_secs,
@@ -862,7 +989,32 @@ mod complex_demo {
         }
     }
 
-    fn render_result_row(row: &ResultRow, explicit_true: String, include_dof_col: bool) -> String {
+    fn render_result_row(row: &ResultRow, mode: RunMode, problem: &Problem) -> String {
+        let include_dof_col = matches!(
+            problem.backend,
+            CsrBackend::Serial | CsrBackend::Distributed
+        );
+        if mode == RunMode::Scalability {
+            let dof = row
+                .dof_per_sec
+                .map(|v| format!("{v:.2e}"))
+                .unwrap_or_else(|| "N/A".to_string());
+            return format!(
+                "{:<36} {:<34} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>12}",
+                row.method,
+                row.effective_policy,
+                row.median_solve_secs,
+                row.min_solve_secs,
+                row.iterations,
+                row.reductions,
+                row.reported_residual,
+                dof
+            );
+        }
+        let explicit_true = row
+            .explicit_true_residual
+            .map(|v| format!("{v:.2e}"))
+            .unwrap_or_else(|| "N/A".to_string());
         if include_dof_col {
             let dof = row
                 .dof_per_sec
@@ -901,7 +1053,12 @@ mod complex_demo {
         }
     }
 
-    fn load_problem_complex(mat_path: &Path, comm: &UniverseComm) -> Result<Problem, KError> {
+    fn load_problem_complex(
+        mat_path: &Path,
+        comm: &UniverseComm,
+        _run_mode: RunMode,
+        _correctness_replicated_check: bool,
+    ) -> Result<Problem, KError> {
         let mm = read_matrix_market(mat_path)?;
         let csr_sparse: SparseCsrMatrix<S> = mm.to_csr_matrix_scalar()?;
         let nrows = csr_sparse.nrows();
@@ -1188,7 +1345,7 @@ mod complex_demo {
                 .contains("residual-check=every-iteration")
         );
 
-        let rendered = render_result_row(&row, "1.00e-16".to_string(), false);
+        let rendered = render_result_row(&row, RunMode::Correctness, &problem);
         assert!(rendered.contains(&row.requested_policy));
         assert!(rendered.contains(&row.effective_policy));
     }
