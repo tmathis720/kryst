@@ -183,8 +183,8 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
         },
         "fidap001" => OptimalConfig {
             solver: "gmres",
-            preconditioner: "ilut",
-            _description: "GMRES (ILUT) - nonsymmetric-safe structural default",
+            preconditioner: "ilu",
+            _description: "GMRES (CSR ILU family) - nonsymmetric-safe structural default",
             expected_iterations: 500,
             fallback_solver: "bicgstab",
             amg_nonsymmetric_override: false,
@@ -215,8 +215,8 @@ fn get_optimal_config(matrix_name: &str) -> OptimalConfig {
         },
         _ => OptimalConfig {
             solver: "gmres",
-            preconditioner: "ilut",
-            _description: "GMRES (ILUT) - general nonsymmetric-safe sparse default",
+            preconditioner: "ilu",
+            _description: "GMRES (CSR ILUK/ILUT family) - general nonsymmetric-safe sparse default",
             expected_iterations: 500,
             fallback_solver: "bicgstab",
             amg_nonsymmetric_override: false,
@@ -479,13 +479,13 @@ fn build_preconditioner_options(
         return None;
     }
 
-    if pc != "ilu" && pc != "ilut" {
+    if pc != "ilu" {
         return None;
     }
 
     let mut opts = PcOptions::default();
     let prep_cfg = prep_config_for(matrix_name);
-    opts.ilu_type = Some(if pc == "ilut" { "ilut" } else { "iluk" }.to_string());
+    opts.ilu_type = Some("iluk".to_string());
     opts.ilu_level_of_fill = Some(1);
     opts.ilu_max_fill_per_row = Some(24);
     opts.ilu_offdiag_drop_tolerance = Some(1e-4);
@@ -508,7 +508,7 @@ fn build_preconditioner_options(
     }
 
     match matrix_name {
-        "e05r0100" if fallback_rung == Some(1) && pc == "ilut" => {
+        "e05r0100" if fallback_rung == Some(1) => {
             opts.ilu_max_fill_per_row = Some(48);
             opts.ilu_offdiag_drop_tolerance = Some(1e-6);
             opts.ilu_reordering_type = Some("amd".to_string());
@@ -554,7 +554,7 @@ fn build_preconditioner_options(
         }
         _ => {}
     }
-    if fallback_rung == Some(1) && matches!(solver, "gmres" | "fgmres") && pc == "ilut" {
+    if fallback_rung == Some(1) && matches!(solver, "gmres" | "fgmres") {
         opts.ilu_type = Some("ilut".to_string());
         opts.ilu_max_fill_per_row = Some(opts.ilu_max_fill_per_row.unwrap_or(48).max(64));
         opts.ilu_offdiag_drop_tolerance =
@@ -1234,15 +1234,15 @@ fn default_fallback_ladder() -> Vec<FallbackStep> {
     vec![
         FallbackStep {
             solver: "fgmres".to_string(),
-            pc: "ilut".to_string(),
+            pc: "ilu".to_string(),
             rung: 1,
-            note: "rung=1 fallback: GMRES/FGMRES(right) + stronger ILUT profile".to_string(),
+            note: "rung=1 fallback: GMRES/FGMRES(right) + stronger CSR-ILUT profile".to_string(),
         },
         FallbackStep {
             solver: "bicgstab".to_string(),
-            pc: "ilut".to_string(),
+            pc: "ilu".to_string(),
             rung: 2,
-            note: "rung=2 fallback: BiCGStab + ILUT".to_string(),
+            note: "rung=2 fallback: BiCGStab + CSR-ILUT".to_string(),
         },
     ]
 }
@@ -1309,7 +1309,7 @@ fn select_solver_policy(
                 "gmres"
             };
         primary_solver = safe_solver.to_string();
-        primary_pc = "ilut".to_string();
+        primary_pc = "ilu".to_string();
         contract_checks.push(cg_screen.reason.clone());
         contract_checks.push(format!(
             "CG diagnostics (base): pairs={}, sym_violations={} ({:.2}%), non_positive_diag={}, weak_gershgorin={}, mm_structural_symmetry_hint={:?}",
@@ -1325,7 +1325,7 @@ fn select_solver_policy(
             cg_screen.diagnostics.symmetry.verdict
         ));
         rationale.push(format!(
-            "CG screened out; switched primary to {} + ILUT",
+            "CG screened out; switched primary to {} + CSR-ILU",
             safe_solver.to_uppercase()
         ));
     } else {
@@ -1456,7 +1456,7 @@ fn select_solver_policy(
             }
             AmgMode::Disabled => {
                 primary_pc = if screen.diagonal_healthy {
-                    "ilut".to_string()
+                    "ilu".to_string()
                 } else {
                     "ilu".to_string()
                 };
@@ -1489,14 +1489,14 @@ fn select_solver_policy(
             primary_solver = "gmres".to_string();
             primary_pc = "none".to_string();
             rationale.push(
-                "policy override: hard nonsymmetric ladder ordering = baseline GMRES+NONE, rung1 FGMRES(right)+ILUT, rung2 BiCGStab+ILUT"
+                "policy override: hard nonsymmetric ladder ordering = baseline GMRES+NONE, rung1 FGMRES(right)+CSR-ILUT, rung2 BiCGStab+CSR-ILUT"
                     .to_string(),
             );
         }
         "fidap001" => {
             if cg_screen.is_hard_reject {
                 primary_solver = "gmres".to_string();
-                primary_pc = "ilut".to_string();
+                primary_pc = "ilu".to_string();
                 rationale.push(
                     "policy override: CG hard reject; keep nonsymmetric fallback ladder"
                         .to_string(),
@@ -1514,7 +1514,7 @@ fn select_solver_policy(
 
     if !screen.diagonal_healthy && jacobi_strength_mode == JacobiStrengthMode::Plain {
         if primary_pc == "jacobi" {
-            primary_pc = "ilut".to_string();
+            primary_pc = "ilu".to_string();
             rationale.push(
                 "diagonal-bad screen: avoided plain Jacobi primary (enable KRYST_DEMO_JACOBI_STRENGTH=fixdiag|rowl1 to allow Jacobi)"
                     .to_string(),
@@ -1522,7 +1522,7 @@ fn select_solver_policy(
         }
         for step in &mut fallback_ladder {
             if step.pc == "jacobi" {
-                step.pc = "ilut".to_string();
+                step.pc = "ilu".to_string();
                 rationale.push(
                     "diagonal-bad screen: avoided plain Jacobi fallback (enable KRYST_DEMO_JACOBI_STRENGTH=fixdiag|rowl1 to allow Jacobi)"
                         .to_string(),
@@ -1741,6 +1741,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Optimized Matrix Market Solver Demonstration");
         println!("===========================================");
         println!("Using benchmark-proven optimal configurations");
+        println!(
+            "Comparison scope: canonical CSR ILU family (ILUK/ILUT/ILUTP); row-filter pc_type=ilut is experimental/non-comparable and excluded by default"
+        );
         println!(
             "Recommended structural-CG compare workflow: KRYST_DEMO_COMPARE_STRUCTURAL_CG_SCREEN=1 cargo run --example optimized_solver_demo --features backend-faer"
         );

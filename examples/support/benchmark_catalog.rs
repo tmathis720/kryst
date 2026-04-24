@@ -29,6 +29,10 @@ pub(crate) struct BenchmarkDelta {
 }
 
 const CATALOG: &[MatrixExpectation] = &[
+    // Catalog expectations intentionally track canonical CSR ILU-family methods
+    // (ILUK/ILUT via `pc_type=ilu`, plus ILUTP). The row-filter `pc_type=ilut`
+    // implementation (`src/preconditioner/ilut.rs`) is experimental and excluded
+    // from default comparable benchmark rows.
     MatrixExpectation {
         matrix: "fidap005",
         solver_families: &["cg"],
@@ -48,7 +52,7 @@ const CATALOG: &[MatrixExpectation] = &[
     MatrixExpectation {
         matrix: "fidap001",
         solver_families: &["gmres"],
-        preconditioner_families: &["ilu", "ilut"],
+        preconditioner_families: &["ilu", "ilutp"],
         iteration_range: IterationRange { min: 350, max: 700 },
         time_note: None,
         confidence: ComparisonConfidence::Approximate,
@@ -56,7 +60,7 @@ const CATALOG: &[MatrixExpectation] = &[
     MatrixExpectation {
         matrix: "sherman3",
         solver_families: &["gmres", "fgmres"],
-        preconditioner_families: &["ilu", "ilut"],
+        preconditioner_families: &["ilu", "ilutp"],
         iteration_range: IterationRange { min: 20, max: 80 },
         time_note: Some("ILU-family preconditioners should dominate wall time tradeoffs"),
         confidence: ComparisonConfidence::Approximate,
@@ -64,7 +68,7 @@ const CATALOG: &[MatrixExpectation] = &[
     MatrixExpectation {
         matrix: "add20",
         solver_families: &["cg", "bicgstab", "gmres"],
-        preconditioner_families: &["ilu", "ilut"],
+        preconditioner_families: &["ilu", "ilutp"],
         iteration_range: IterationRange { min: 2, max: 10 },
         time_note: None,
         confidence: ComparisonConfidence::Exact,
@@ -72,7 +76,7 @@ const CATALOG: &[MatrixExpectation] = &[
     MatrixExpectation {
         matrix: "memplus",
         solver_families: &["bicgstab", "gmres"],
-        preconditioner_families: &["ilu", "ilut"],
+        preconditioner_families: &["ilu", "ilutp"],
         iteration_range: IterationRange { min: 3, max: 12 },
         time_note: Some("without ILU-family preconditioning this matrix may stall badly"),
         confidence: ComparisonConfidence::Approximate,
