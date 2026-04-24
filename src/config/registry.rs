@@ -412,7 +412,7 @@ pub static SPECS: &[Spec] = &[
         key: "pc_local",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "local PC for block Jacobi: ilu | ilut | ilutp | jacobi | sor | chebyshev | fsai | spai",
+        doc: "local PC for block Jacobi: ilu | ilutp | jacobi | sor | chebyshev | fsai | spai (ilut row-filter is experimental, requires -pc_ilut_row_filter_opt_in)",
     },
     Spec {
         flag: "-pc_dist_local_apply",
@@ -535,6 +535,13 @@ pub static SPECS: &[Spec] = &[
         doc: "ILUTP pivot tol",
     },
     Spec {
+        flag: "-pc_ilut_row_filter_opt_in",
+        key: "pc_ilut_row_filter_opt_in",
+        arity: Arity::Zero,
+        kind: ValueKind::Bool,
+        doc: "explicitly allow experimental row-filter ILUT mode (pc_type=ilut / pc_local=ilut)",
+    },
+    Spec {
         flag: "-pc_ilutp_max_fill",
         key: "pc_ilutp_max_fill",
         arity: Arity::One,
@@ -637,7 +644,7 @@ pub static SPECS: &[Spec] = &[
         key: "pc_asm_inner_pc",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "jacobi|ilu|ilut|ilutp",
+        doc: "jacobi|ilu|ilutp (ilut row-filter is experimental, requires -pc_ilut_row_filter_opt_in)",
     },
     Spec {
         flag: "-pc_chebyshev_lambda_min",

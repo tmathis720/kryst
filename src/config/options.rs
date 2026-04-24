@@ -184,6 +184,8 @@ pub struct PcOptions {
     /// Maximum fill for ILUT.
     pub ilut_max_fill: Option<usize>,
     pub ilut_perm_tol: Option<f64>,
+    /// Explicit opt-in gate for the experimental row-filter ILUT path (`pc_type=ilut` / `pc_local=ilut`).
+    pub ilut_row_filter_opt_in: Option<bool>,
     pub ilutp_max_fill: Option<usize>,
     pub ilutp_drop_tol: Option<f64>,
     pub ilutp_perm_tol: Option<f64>,
@@ -583,6 +585,20 @@ impl PcOptions {
         }
         if let Some(ref t) = self.sor_mat_side {
             kinds::SorMatSideKind::from_str(t)?;
+        }
+        if matches!(self.pc_type.as_deref(), Some("ilut"))
+            && !self.ilut_row_filter_opt_in.unwrap_or(false)
+        {
+            return Err(KError::InvalidInput(
+                "pc_type=ilut selects the experimental row-filter ILUT path (src/preconditioner/ilut.rs) and is excluded from default benchmark comparisons; set -pc_ilut_row_filter_opt_in true to enable it".into(),
+            ));
+        }
+        if matches!(self.pc_local.as_deref(), Some("ilut"))
+            && !self.ilut_row_filter_opt_in.unwrap_or(false)
+        {
+            return Err(KError::InvalidInput(
+                "pc_local=ilut selects the experimental row-filter ILUT path (src/preconditioner/ilut.rs); set -pc_ilut_row_filter_opt_in true to enable it".into(),
+            ));
         }
         self.sync_ilu_all();
         Ok(())
@@ -1144,6 +1160,7 @@ impl Sink for PcOptions {
             "pc_approxinv_parallel" => set_opt!(&mut self.approxinv_parallel, v),
             "pc_dist_native_required" => set_opt!(&mut self.pc_dist_native_required, v),
             "pc_fixdiag" => set_opt!(&mut self.pc_fixdiag, v),
+            "pc_ilut_row_filter_opt_in" => set_opt!(&mut self.ilut_row_filter_opt_in, v),
             "pc_bddc_use_vertices" => set_opt!(&mut self.pc_bddc_use_vertices, v),
             "pc_view" => set_opt!(&mut self.pc_view, v),
             _ => Err(KError::SolveError(format!("Unknown PC bool key: {key}"))),
@@ -2432,6 +2449,10 @@ impl PcOptions {
                     KError::SolveError(format!("Invalid KRYST_PC_ILUT_PERM_TOL: {v}"))
                 })?);
         }
+        if let Ok(v) = std::env::var("KRYST_PC_ILUT_ROW_FILTER_OPT_IN") {
+            let l = v.to_ascii_lowercase();
+            me.ilut_row_filter_opt_in = Some(matches!(l.as_str(), "true" | "1" | "yes" | "on"));
+        }
         if let Ok(v) = std::env::var("KRYST_PC_REORDER") {
             me.reorder = Some(v.to_lowercase());
         }
@@ -2551,6 +2572,7 @@ impl PcOptions {
         o!(ilut_drop_tol);
         o!(ilut_max_fill);
         o!(ilut_perm_tol);
+        o!(ilut_row_filter_opt_in);
         o!(ilutp_max_fill);
         o!(ilutp_drop_tol);
         o!(ilutp_perm_tol);
@@ -4185,6 +4207,35 @@ mod old_tests {
         assert_eq!(opts.ilu_reordering_type, Some("none".to_string()));
         assert!(matches!(opts.ilu.kind, IluKind::ILU0));
         assert_eq!(opts.ilu.reordering, ReorderingType::None);
+    }
+
+    #[test]
+    fn test_pc_type_ilut_requires_explicit_opt_in() {
+        let args = vec!["-pc_type", "ilut"];
+        let err = PcOptions::from_args(&args).expect_err("pc_type=ilut should be gated");
+        match err {
+            KError::InvalidInput(msg) => {
+                assert!(msg.contains("-pc_ilut_row_filter_opt_in"));
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
+
+        let args_opt_in = vec!["-pc_type", "ilut", "-pc_ilut_row_filter_opt_in", "true"];
+        let opts = PcOptions::from_args(&args_opt_in).expect("opt-in should allow pc_type=ilut");
+        assert_eq!(opts.pc_type.as_deref(), Some("ilut"));
+        assert_eq!(opts.ilut_row_filter_opt_in, Some(true));
+    }
+
+    #[test]
+    fn test_pc_local_ilut_requires_explicit_opt_in() {
+        let args = vec!["-pc_type", "blockjacobi", "-pc_local", "ilut"];
+        let err = PcOptions::from_args(&args).expect_err("pc_local=ilut should be gated");
+        match err {
+            KError::InvalidInput(msg) => {
+                assert!(msg.contains("-pc_ilut_row_filter_opt_in"));
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 
     #[test]

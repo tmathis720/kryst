@@ -514,12 +514,12 @@ Example AMG invocation:
 - `-pc_type approxinv` - Approximate inverse preconditioner
 
 #### ILU preconditioners
-`-pc_type ilu` selects Kryst's HYPRE-inspired incomplete LU family (`Ilu`). `-pc_type ilut`/`-pc_type
-ilutp` run the lighter-weight row-filter ILUT or pivoting ILUTP preconditioners, while
-`-pc_type blockjacobi` with `-pc_local <ilu|ilut|ilutp>` wraps a local ILU variant inside MPI
-block-Jacobi. Setting `-pc_type ilu` with `-pc_ilu_type ilut` runs the canonical ILU threshold
-factorization; `Ilu::create_specialized` may route that variant to `crate::preconditioner::ilut::Ilut`
-for simplicity/efficiency.
+`-pc_type ilu` selects Kryst's canonical CSR ILU family (`ILU0`/`ILUK`/`ILUT`), and `-pc_type ilutp`
+selects pivoting ILUTP. For serious benchmarks and comparisons, prefer this CSR ILU family
+(`-pc_type ilu` + `-pc_ilu_type iluk|ilut`, or `-pc_type ilutp`) and avoid row-filter mode.
+`-pc_type ilut` and `-pc_local ilut` select the experimental row-filter path
+(`src/preconditioner/ilut.rs`), which is non-comparable by default and requires explicit opt-in via
+`-pc_ilut_row_filter_opt_in true` (or `KRYST_PC_ILUT_ROW_FILTER_OPT_IN=1`).
 
 | CLI flag | Config field | Notes |
 | --- | --- | --- |
@@ -532,12 +532,13 @@ for simplicity/efficiency.
 | `-pc_ilu_lower_jacobi_iters <int>` / `-pc_ilu_upper_jacobi_iters <int>` | Jacobi iteration counts | Only used when the triangular solve is iterative. |
 | `-pc_ilu_tolerance <float>` / `-pc_ilu_max_iterations <int>` | Iterative solve controls | Defaults 1e-6 & 1; iterative delivers residual-based refinement. |
 | `-pc_ilu_parallel_factorization` / `-pc_ilu_parallel_trisolve` / `-pc_ilu_parallel_chunk_size <int>` | `IluConfig::enable_parallel_*`, `parallel_chunk_size` | Enable experimental rayon paths; chunk size typically 16–256. |
-| `-pc_ilut_drop_tol <float>` | `IluConfig::drop_tolerance` (row-filter ILUT) | Simple heuristic ILUT drop threshold (1e-3–1e-6). |
-| `-pc_ilut_max_fill <int>` | `IluConfig::max_fill_per_row` (row-filter ILUT) | Limits kept entries per row (10–100). |
-| `-pc_ilut_perm_tol <float>` | Pivot tolerance for row-filter ILUT | Not used by canonical `Ilu` but available for the lightweight ILUT preconditioner. |
+| `-pc_ilut_drop_tol <float>` | `IluConfig::drop_tolerance` (for `pc_ilu_type=ilut`) | Canonical CSR-ILUT drop threshold (typical 1e-3–1e-6). |
+| `-pc_ilut_max_fill <int>` | `IluConfig::max_fill_per_row` (for `pc_ilu_type=ilut`) | Per-row retention limit used by CSR ILUT (10–100 typical). |
+| `-pc_ilut_perm_tol <float>` | Pivot/perm heuristic | Reserved/compat knob; primarily relevant to experimental row-filter mode. |
+| `-pc_ilut_row_filter_opt_in <bool>` | `PcOptions::ilut_row_filter_opt_in` | Required to enable experimental `pc_type=ilut` / `pc_local=ilut` paths. |
 | `-pc_ilutp_max_fill <int>` / `-pc_ilutp_drop_tol <float>` / `-pc_ilutp_perm_tol <float>` | `Ilutp` parameters | Controls density, drop tolerance, and pivoting aggressiveness for ILUTP. |
 
-Environment variables mirror the flags: `KRYST_PC_ILU_TYPE`, `KRYST_PC_ILU_LEVEL_OF_FILL`, `KRYST_PC_ILU_MAX_FILL_PER_ROW`, `KRYST_PC_ILU_OFFDIAG_DROP_TOL`, `KRYST_PC_ILU_SCHUR_DROP_TOL`, `KRYST_PC_ILU_TRI_SOLVE`, `KRYST_PC_ILU_LOWER_JACOBI_ITERS`, `KRYST_PC_ILU_UPPER_JACOBI_ITERS`, `KRYST_PC_ILU_PARALLEL_FACTORIZATION`, `KRYST_PC_ILU_PARALLEL_TRISOLVE`, `KRYST_PC_ILU_PARALLEL_CHUNK_SIZE`, plus `KRYST_PC_ILUT_DROP_TOL`, `KRYST_PC_ILUT_MAX_FILL`, `KRYST_PC_ILUT_PERM_TOL`, `KRYST_PC_ILUTP_MAX_FILL`, `KRYST_PC_ILUTP_DROP_TOL`, and `KRYST_PC_ILUTP_PERM_TOL`. Command-line flags override environment variables, which in turn override the built-in defaults.
+Environment variables mirror the flags: `KRYST_PC_ILU_TYPE`, `KRYST_PC_ILU_LEVEL_OF_FILL`, `KRYST_PC_ILU_MAX_FILL_PER_ROW`, `KRYST_PC_ILU_OFFDIAG_DROP_TOL`, `KRYST_PC_ILU_SCHUR_DROP_TOL`, `KRYST_PC_ILU_TRI_SOLVE`, `KRYST_PC_ILU_LOWER_JACOBI_ITERS`, `KRYST_PC_ILU_UPPER_JACOBI_ITERS`, `KRYST_PC_ILU_PARALLEL_FACTORIZATION`, `KRYST_PC_ILU_PARALLEL_TRISOLVE`, `KRYST_PC_ILU_PARALLEL_CHUNK_SIZE`, plus `KRYST_PC_ILUT_DROP_TOL`, `KRYST_PC_ILUT_MAX_FILL`, `KRYST_PC_ILUT_PERM_TOL`, `KRYST_PC_ILUT_ROW_FILTER_OPT_IN`, `KRYST_PC_ILUTP_MAX_FILL`, `KRYST_PC_ILUTP_DROP_TOL`, and `KRYST_PC_ILUTP_PERM_TOL`. Command-line flags override environment variables, which in turn override the built-in defaults.
 
 ##### Examples
 
