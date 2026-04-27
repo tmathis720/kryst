@@ -74,6 +74,7 @@ pub type Csr = crate::matrix::sparse::CsrMatrix<S>;
 #[cfg(feature = "backend-faer")]
 pub type Csc = crate::matrix::csc::CscMatrix<S>;
 
+pub use dist::{DistRowCsr, LocalSquareCsr};
 pub use dist_csr::DistCsrOp;
 pub use format::OpFormat;
 pub use op::{ChangeIds, LinOp, LinOpF64, StructureId, ValuesId};

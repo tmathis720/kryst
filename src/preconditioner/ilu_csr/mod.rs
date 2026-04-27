@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::algebra::scalar::KrystScalar;
 use crate::error::KError;
 use crate::matrix::convert::csr_from_linop;
+use crate::matrix::dist::LocalSquareCsr;
 use crate::matrix::format::OpFormat;
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
 use crate::matrix::sparse::CsrMatrix;
@@ -1271,25 +1272,16 @@ impl IluCsr {
         }
         self.ilut_numeric_only(a, max_diag_abs)
     }
-}
 
-#[cfg(not(feature = "complex"))]
-impl Preconditioner for IluCsr {
-    fn dims(&self) -> (usize, usize) {
-        (self.n, self.n)
-    }
-
-    fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
-        let drop = 0.0; // use full numerical content by default
-        let a: Arc<CsrMatrix<f64>> = csr_from_linop(op, drop)?;
-        let pipeline = apply_preconditioning_pipeline(
-            a.as_ref(),
-            &self.cfg.conditioning,
-            &self.cfg.reordering,
-        )?;
+    fn setup_from_local_square_ids(
+        &mut self,
+        a: &CsrMatrix<f64>,
+        sid: StructureId,
+        vid: ValuesId,
+    ) -> Result<(), KError> {
+        let pipeline =
+            apply_preconditioning_pipeline(a, &self.cfg.conditioning, &self.cfg.reordering)?;
         let a = &pipeline.matrix;
-        let sid = op.structure_id();
-        let vid = op.values_id();
 
         let structure_changed = self.last_sid != Some(sid);
         let values_changed = self.last_vid != Some(vid);
@@ -1311,6 +1303,25 @@ impl Preconditioner for IluCsr {
         } else {
             Ok(())
         }
+    }
+
+    pub fn setup_local_square(&mut self, local: &LocalSquareCsr<f64>) -> Result<(), KError> {
+        let op = local.as_csr();
+        self.setup_from_local_square_ids(op, op.structure_id(), op.values_id())
+    }
+}
+
+#[cfg(not(feature = "complex"))]
+impl Preconditioner for IluCsr {
+    fn dims(&self) -> (usize, usize) {
+        (self.n, self.n)
+    }
+
+    fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
+        let drop = 0.0; // use full numerical content by default
+        let a: Arc<CsrMatrix<f64>> = csr_from_linop(op, drop)?;
+        let local = LocalSquareCsr::try_from(a.as_ref().clone())?;
+        self.setup_from_local_square_ids(local.as_csr(), op.structure_id(), op.values_id())
     }
 
     fn apply(&self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
@@ -1392,6 +1403,8 @@ impl Preconditioner for IluCsr {
                     "IluCsr complex setup currently requires a CSR operator; non-CSR LinOp paths have no lossless complex ILU fallback".into(),
                 )
             })?;
+        let local = LocalSquareCsr::try_from(csr.clone())?;
+        let csr = local.as_csr();
 
         let sid = op.structure_id();
         let vid = op.values_id();
