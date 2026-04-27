@@ -19,10 +19,10 @@ use crate::algebra::prelude::*;
 use crate::core::traits::{MatrixGet, RowPattern};
 use crate::error::KError;
 #[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
-use crate::matrix::op::CsrOp;
-#[cfg(feature = "dense-direct")]
-use crate::matrix::sparse::CsrMatrix;
+use crate::matrix::LocalSquareCsr;
 #[cfg(all(not(feature = "dense-direct"), not(feature = "complex")))]
+use crate::matrix::sparse::CsrMatrix;
+#[cfg(feature = "dense-direct")]
 use crate::matrix::sparse::CsrMatrix;
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
@@ -158,9 +158,10 @@ impl BlockJacobi {
             }
             let csr =
                 std::sync::Arc::new(CsrMatrix::<f64>::from_csr(n, n, row_ptr, col_idx, values));
+            let local_square =
+                LocalSquareCsr::try_from(csr.as_ref().clone()).expect("block CSR should be square");
             let mut ilu = IluCsr::new_with_config(cfg.clone());
-            let op = CsrOp::new(csr.clone());
-            let _ = ilu.setup(&op);
+            let _ = ilu.setup_local_square(&local_square);
             self.block_factors_ilu
                 .push((block.clone(), std::sync::Arc::new(ilu)));
         }
@@ -260,9 +261,10 @@ impl BlockJacobi {
             }
             let csr =
                 std::sync::Arc::new(CsrMatrix::<f64>::from_csr(n, n, row_ptr, col_idx, values));
+            let local_square =
+                LocalSquareCsr::try_from(csr.as_ref().clone()).expect("block CSR should be square");
             let mut ilu = IluCsr::new_with_config(cfg.clone());
-            let op = CsrOp::new(csr.clone());
-            let _ = ilu.setup(&op);
+            let _ = ilu.setup_local_square(&local_square);
             self.block_factors_ilu
                 .push((block.clone(), std::sync::Arc::new(ilu)));
         }
@@ -395,8 +397,8 @@ impl Preconditioner for BlockJacobi {
             }
             #[cfg(not(feature = "dense-direct"))]
             {
-                let local = dist.local_block_csr();
-                self.setup_from_csr_ilu(&local);
+                let local_square = dist.local_square_block();
+                self.setup_from_csr_ilu(local_square.as_csr());
                 return Ok(());
             }
         }

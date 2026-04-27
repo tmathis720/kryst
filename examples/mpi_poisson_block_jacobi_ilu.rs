@@ -91,6 +91,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let local_csr = build_local_poisson_block(n_global, row_start, row_end);
     let dist_op =
         DistCsrOp::from_local_rows(n_global, row_start, &local_csr, &part_prefix, comm.clone())?;
+    let owned_rows = dist_op.local_rows_csr();
+    let local_square = dist_op.local_square_block();
 
     let mut mpi_opts = MpiPcOptions::default();
     mpi_opts.global_pc = GlobalPcKind::BlockJacobi;
@@ -114,10 +116,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let global_norm_sq = comm.allreduce_sum_real(local_norm_sq);
 
     println!(
-        "Rank {} owns rows {}..{} and preconditioned {} entries",
+        "Rank {} owns rows {}..{} (owned-row nnz={}, local-square nnz={}) and preconditioned {} entries",
         rank,
         row_start,
         row_end,
+        owned_rows.as_csr().nnz(),
+        local_square.as_csr().nnz(),
         row_end - row_start
     );
 

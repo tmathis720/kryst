@@ -261,7 +261,8 @@ fn build_obj_block_pc<L>(
 where
     L: ObjPreconditioner + 'static,
 {
-    let local = Arc::new(dist_op.local_block_csr());
+    let local_square = dist_op.local_square_block();
+    let local = Arc::new(local_square.as_csr().clone());
     let op = CsrOp::new(local);
     ObjPreconditioner::setup(&mut local_pc, &op)?;
     let native_plan = if supports_native {
@@ -543,7 +544,8 @@ pub fn build_block_jacobi_pc(
                 )?),
                 LocalPcKind::Jacobi => {
                     let mut jacobi = Jacobi::new();
-                    let local = Arc::new(dist_op.local_block_csr());
+                    let local_square = dist_op.local_square_block();
+                    let local = Arc::new(local_square.as_csr().clone());
                     let op = CsrOp::new(local);
                     ObjPreconditioner::setup(&mut jacobi, &op)?;
                     Box::new(BlockJacobiLocalPc::new(

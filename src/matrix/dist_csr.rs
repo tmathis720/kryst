@@ -12,6 +12,7 @@ use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::scalar::{KrystScalar, S};
 use crate::error::KError;
 use crate::matrix::csr::CsrMatrix as PlanCsrMatrix;
+use crate::matrix::dist::csr_types::{DistRowCsr, LocalSquareCsr};
 use crate::matrix::dist::halo::{HaloIndexPlan, HaloPlan, HaloTuning};
 use crate::matrix::dist::spmv_dist::RowRanges;
 use crate::matrix::op::{ChangeIds, DistLayout, LinOp, StructureId, ValuesId};
@@ -439,6 +440,12 @@ impl DistCsrOp {
         )
     }
 
+    /// Extract local owned rows with global column indexing.
+    pub fn local_rows_csr(&self) -> DistRowCsr<S> {
+        DistRowCsr::new(self.local_matrix(), self.row_start, self.n_global)
+            .expect("DistCsrOp::local_matrix shape invariant violated")
+    }
+
     /// Extract the owned diagonal block as a CSR matrix (local rows/cols only).
     pub fn local_block_csr(&self) -> CsrMatrix<S> {
         let n = self.n_local;
@@ -457,6 +464,12 @@ impl DistCsrOp {
             row_ptr.push(col_idx.len());
         }
         CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
+    }
+
+    /// Extract the owned diagonal block with local square semantics.
+    pub fn local_square_block(&self) -> LocalSquareCsr<S> {
+        LocalSquareCsr::try_from(self.local_block_csr())
+            .expect("DistCsrOp local block must be square by construction")
     }
 
     #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
