@@ -596,3 +596,66 @@ fn main() {
     )
     .expect("write artifact");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{build_part_prefix, fallback_total};
+    use serde_json::{Map, Value};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn qc324_style_partition_is_deterministic_and_covers_domain() {
+        let first = build_part_prefix(324, 4, 324);
+        let second = build_part_prefix(324, 4, 324);
+        assert_eq!(first, second, "partitioning must be deterministic");
+        assert_eq!(first.first().copied(), Some(0));
+        assert_eq!(first.last().copied(), Some(324));
+        assert_eq!(first.len(), 5);
+        assert!(
+            first.windows(2).all(|w| w[1] > w[0]),
+            "all partitions should own at least one row"
+        );
+    }
+
+    #[test]
+    fn benchmark_summary_route_fields_track_requested_vs_effective_policy() {
+        let mut summary = BTreeMap::new();
+        summary.insert(
+            "pc_dist_requested_distributed_mode".into(),
+            Value::from("native_distributed"),
+        );
+        summary.insert(
+            "pc_dist_selected_route".into(),
+            Value::from("configured_global"),
+        );
+        summary.insert(
+            "pc_dist_fallback_reason".into(),
+            Value::from("native setup failed on dwg961a pivot stress"),
+        );
+
+        let mut counters = Map::new();
+        counters.insert("native_setup_failed".into(), Value::from(1_u64));
+        counters.insert("configured_global_fallback".into(), Value::from(1_u64));
+        summary.insert("pc_dist_fallback_counters".into(), Value::Object(counters));
+
+        assert_eq!(
+            summary
+                .get("pc_dist_requested_distributed_mode")
+                .and_then(Value::as_str),
+            Some("native_distributed")
+        );
+        assert_eq!(
+            summary
+                .get("pc_dist_selected_route")
+                .and_then(Value::as_str),
+            Some("configured_global")
+        );
+        assert_eq!(
+            summary
+                .get("pc_dist_fallback_reason")
+                .and_then(Value::as_str),
+            Some("native setup failed on dwg961a pivot stress")
+        );
+        assert_eq!(fallback_total(&summary), 2);
+    }
+}
