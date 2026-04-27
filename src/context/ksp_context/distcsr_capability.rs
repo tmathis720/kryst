@@ -245,4 +245,27 @@ mod tests {
         assert!(report.native_required);
         assert_eq!(report.max_allowed_fallbacks, Some(0));
     }
+
+    #[test]
+    fn route_report_preserves_requested_vs_effective_modes_for_summary_fields() {
+        let mut opts = MpiPcOptions::default();
+        opts.local_apply_mode = DistLocalApplyMode::NativeLocalHalo;
+
+        let report = build_dist_route_decision_report(
+            &opts,
+            DistRouteSelection::ConfiguredGlobal,
+            Some("native setup failed on pivot stress fixture".to_string()),
+            1,
+        );
+        assert_eq!(report.requested_mode, "native_distributed");
+        assert_eq!(
+            report.selected_mode,
+            DistRouteSelection::ConfiguredGlobal.as_str()
+        );
+        assert_eq!(
+            report.fallback_reason.as_deref(),
+            Some("native setup failed on pivot stress fixture")
+        );
+        assert_eq!(report.fallback_chain_len, 1);
+    }
 }

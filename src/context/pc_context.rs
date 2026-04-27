@@ -1319,4 +1319,12 @@ mod tests {
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[1].options.as_ref().and_then(|o| o.ilu_level), Some(4));
     }
+
+    #[test]
+    fn chain_ilu0_to_ilut_to_ilutp_promotion_path_parses_in_order() {
+        let opts = crate::config::options::PcOptions::default();
+        let specs = PcFactory::create_pc_chain_from_str("ilu0->ilut->ilutp", Some(&opts)).unwrap();
+        let labels: Vec<PcType> = specs.iter().map(|s| s.pc_type.clone()).collect();
+        assert_eq!(labels, vec![PcType::Ilu0, PcType::Ilut, PcType::Ilutp]);
+    }
 }

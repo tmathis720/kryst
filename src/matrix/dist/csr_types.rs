@@ -73,3 +73,27 @@ impl<S: KrystScalar> TryFrom<CsrMatrix<S>> for LocalSquareCsr<S> {
         Self::try_from_csr(value)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::LocalSquareCsr;
+    use crate::matrix::sparse::CsrMatrix;
+
+    #[test]
+    fn local_square_csr_rejects_rectangular_with_clear_error() {
+        let rectangular = CsrMatrix::from_csr(
+            2,
+            3,
+            vec![0, 2, 4],
+            vec![0, 1, 1, 2],
+            vec![1.0, 2.0, 3.0, 4.0],
+        );
+
+        let err = LocalSquareCsr::try_from(rectangular).expect_err("rectangular must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("LocalSquareCsr requires square matrix") && msg.contains("2x3"),
+            "unexpected rejection text: {msg}"
+        );
+    }
+}
