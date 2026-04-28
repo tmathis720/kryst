@@ -35,7 +35,9 @@ mod complex_demo {
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::jacobi::Jacobi;
     use kryst::solver::LinearSolver;
-    use kryst::solver::fgmres::{FgmresSolver, FgmresVariant, OrthogMethod, ResidualCheckPolicy};
+    use kryst::solver::fgmres::{
+        FgmresSolver, FgmresVariant, OrthogMethod, PipelinePolicy, ResidualCheckPolicy,
+    };
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
 
@@ -395,11 +397,16 @@ mod complex_demo {
         run_mode: RunMode,
         warmup_runs: usize,
         measured_runs: usize,
+        rtol: f64,
+        atol: f64,
+        maxits: usize,
         restarts: Vec<usize>,
+        pcs: Vec<PcKind>,
         include_restart_200: bool,
         variants: Vec<FgmresVariant>,
         orthogs: Vec<OrthogMethod>,
         reorths: Vec<ReorthPolicy>,
+        disable_stagnation_restart: bool,
         correctness_replicated_check: bool,
     }
 
@@ -434,11 +441,16 @@ mod complex_demo {
                 run_mode: RunMode::Correctness,
                 warmup_runs: 1,
                 measured_runs: 5,
+                rtol: 1e-8,
+                atol: 1e-12,
+                maxits: 500,
                 restarts: vec![50, 100, 150],
+                pcs: Vec::new(),
                 include_restart_200: false,
                 variants: vec![FgmresVariant::Classical],
                 orthogs: vec![OrthogMethod::ClassicalGS],
                 reorths: vec![ReorthPolicy::IfNeeded],
+                disable_stagnation_restart: false,
                 correctness_replicated_check: false,
             }
         }
@@ -469,11 +481,11 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--restarts csv] [--include-restart-200] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--restarts csv] [--include-restart-200] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
                             );
                         }
                         std::process::exit(0);
@@ -495,8 +507,37 @@ mod complex_demo {
                         };
                         cfg.restarts = parse_usize_csv("--restarts", &v)?;
                     }
+                    "--rtol" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput("missing value for --rtol".into()));
+                        };
+                        cfg.rtol = parse_positive_f64("--rtol", &v)?;
+                    }
+                    "--atol" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput("missing value for --atol".into()));
+                        };
+                        cfg.atol = parse_positive_f64("--atol", &v)?;
+                    }
+                    "--maxits" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --maxits".into(),
+                            ));
+                        };
+                        cfg.maxits = parse_positive_usize("--maxits", &v)?;
+                    }
+                    "--pcs" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput("missing value for --pcs".into()));
+                        };
+                        cfg.pcs = parse_pc_csv("--pcs", &v)?;
+                    }
                     "--include-restart-200" => {
                         cfg.include_restart_200 = true;
+                    }
+                    "--disable-stagnation-restart" => {
+                        cfg.disable_stagnation_restart = true;
                     }
                     "--fgmres-variant" => {
                         let Some(v) = args.next() else {
@@ -546,6 +587,20 @@ mod complex_demo {
                 "invalid value '{value}' for {flag}, expected non-negative integer"
             ))
         })
+    }
+
+    fn parse_positive_f64(flag: &str, value: &str) -> Result<f64, KError> {
+        let val = value.parse::<f64>().map_err(|_| {
+            KError::InvalidInput(format!(
+                "invalid value '{value}' for {flag}, expected non-negative float"
+            ))
+        })?;
+        if val < 0.0 {
+            return Err(KError::InvalidInput(format!(
+                "invalid value '{value}' for {flag}, expected non-negative float"
+            )));
+        }
+        Ok(val)
     }
 
     fn parse_usize_csv(flag: &str, value: &str) -> Result<Vec<usize>, KError> {
@@ -608,6 +663,24 @@ mod complex_demo {
         parse_csv(flag, value, parse_reorth)
     }
 
+    fn parse_pc(token: &str) -> Result<PcKind, KError> {
+        match token.trim().to_ascii_lowercase().as_str() {
+            "none" | "off" => Ok(PcKind::None),
+            "jacobi" | "jacobi-weak" | "weak-jacobi" => Ok(PcKind::JacobiWeak),
+            "ilu0" | "ilu0-local" | "local-ilu0" => Ok(PcKind::Ilu0Local),
+            "mpi-block-jacobi-ilu0" | "block-jacobi-ilu0" | "mpi-block-ilu0" => {
+                Ok(PcKind::MpiBlockJacobiIlu0Local)
+            }
+            other => Err(KError::InvalidInput(format!(
+                "invalid pc '{other}', expected none|jacobi|ilu0|mpi-block-jacobi-ilu0"
+            ))),
+        }
+    }
+
+    fn parse_pc_csv(flag: &str, value: &str) -> Result<Vec<PcKind>, KError> {
+        parse_csv(flag, value, parse_pc)
+    }
+
     fn parse_csv<T, F>(flag: &str, value: &str, mut parser: F) -> Result<Vec<T>, KError>
     where
         F: FnMut(&str) -> Result<T, KError>,
@@ -628,65 +701,40 @@ mod complex_demo {
 
     impl RunSpec {
         fn build_default_matrix(cfg: &BenchmarkConfig, problem: &Problem) -> Vec<Self> {
+            let pcs = if cfg.pcs.is_empty() {
+                match cfg.run_mode {
+                    RunMode::Correctness => vec![
+                        PcKind::Ilu0Local,
+                        PcKind::MpiBlockJacobiIlu0Local,
+                        PcKind::JacobiWeak,
+                        PcKind::None,
+                    ],
+                    RunMode::Scalability => vec![PcKind::Ilu0Local],
+                }
+            } else {
+                cfg.pcs.clone()
+            };
             let mut runs = Vec::new();
             for &restart in &cfg.restarts {
                 for &variant in &cfg.variants {
                     for &orthog in &cfg.orthogs {
                         for &reorth in &cfg.reorths {
-                            match cfg.run_mode {
-                                RunMode::Correctness => {
-                                    let include_mpi_block_jacobi = problem.comm.size() > 1;
-                                    runs.push(Self {
-                                        restart,
-                                        variant,
-                                        residual_check_policy: ResidualCheckPolicy::OnConvergence,
-                                        orthog,
-                                        reorth,
-                                        pc_side: PcSide::Right,
-                                        pc: PcKind::Ilu0Local,
-                                    });
-                                    if include_mpi_block_jacobi {
-                                        runs.push(Self {
-                                            restart,
-                                            variant,
-                                            residual_check_policy:
-                                                ResidualCheckPolicy::OnConvergence,
-                                            orthog,
-                                            reorth,
-                                            pc_side: PcSide::Right,
-                                            pc: PcKind::MpiBlockJacobiIlu0Local,
-                                        });
-                                    }
-                                    runs.push(Self {
-                                        restart,
-                                        variant,
-                                        residual_check_policy: ResidualCheckPolicy::OnConvergence,
-                                        orthog,
-                                        reorth,
-                                        pc_side: PcSide::Right,
-                                        pc: PcKind::JacobiWeak,
-                                    });
-                                    runs.push(Self {
-                                        restart,
-                                        variant,
-                                        residual_check_policy: ResidualCheckPolicy::OnConvergence,
-                                        orthog,
-                                        reorth,
-                                        pc_side: PcSide::Right,
-                                        pc: PcKind::None,
-                                    });
+                            for &pc in &pcs {
+                                if pc == PcKind::MpiBlockJacobiIlu0Local && problem.comm.size() <= 1 {
+                                    continue;
                                 }
-                                RunMode::Scalability => {
-                                    runs.push(Self {
-                                        restart,
-                                        variant,
-                                        residual_check_policy: ResidualCheckPolicy::RestartOnly,
-                                        orthog,
-                                        reorth,
-                                        pc_side: PcSide::Right,
-                                        pc: PcKind::Ilu0Local,
-                                    });
-                                }
+                                runs.push(Self {
+                                    restart,
+                                    variant,
+                                    residual_check_policy: match cfg.run_mode {
+                                        RunMode::Correctness => ResidualCheckPolicy::OnConvergence,
+                                        RunMode::Scalability => ResidualCheckPolicy::RestartOnly,
+                                    },
+                                    orthog,
+                                    reorth,
+                                    pc_side: PcSide::Right,
+                                    pc,
+                                });
                             }
                         }
                     }
@@ -851,7 +899,7 @@ mod complex_demo {
         let setup_secs = setup_start.elapsed().as_secs_f64();
         for _ in 0..bench_cfg.warmup_runs {
             let mut x = vec![S::zero(); problem.local_n];
-            let mut solver = configured_solver(spec);
+            let mut solver = configured_solver(spec, bench_cfg);
             apply_dist_plan_policy(&mut solver, problem);
             let mut workspace = Workspace::new(problem.local_n);
             solver.setup_workspace(&mut workspace);
@@ -874,7 +922,7 @@ mod complex_demo {
             let mut x = vec![S::zero(); problem.local_n];
             problem.comm.barrier();
             let start = Instant::now();
-            let mut solver = configured_solver(spec);
+            let mut solver = configured_solver(spec, bench_cfg);
             apply_dist_plan_policy(&mut solver, problem);
             let mut workspace = Workspace::new(problem.local_n);
             solver.setup_workspace(&mut workspace);
@@ -964,14 +1012,17 @@ mod complex_demo {
         Ok(())
     }
 
-    fn configured_solver(spec: &RunSpec) -> FgmresSolver {
-        let mut solver = FgmresSolver::new(1e-8, 500, spec.restart);
+    fn configured_solver(spec: &RunSpec, bench_cfg: &BenchmarkConfig) -> FgmresSolver {
+        let mut solver = FgmresSolver::new(bench_cfg.rtol, bench_cfg.maxits, spec.restart);
         solver.variant = spec.variant;
         solver.residual_check_policy = spec.residual_check_policy;
         solver.orthog = spec.orthog;
         solver.reorth = spec.reorth;
-        solver.atol = 1e-12;
+        solver.atol = bench_cfg.atol;
         solver.dtol = 1e6;
+        if bench_cfg.disable_stagnation_restart {
+            solver.pipeline_policy = PipelinePolicy::Strict;
+        }
         solver
     }
 
