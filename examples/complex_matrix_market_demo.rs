@@ -16,7 +16,9 @@ use kryst::error::KError;
 #[cfg(feature = "complex")]
 mod complex_demo {
     use std::env;
-    use std::path::Path;
+    use std::fs::File;
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::Instant;
 
@@ -34,7 +36,7 @@ mod complex_demo {
     use kryst::preconditioner::Preconditioner;
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::jacobi::Jacobi;
-    use kryst::solver::LinearSolver;
+    use kryst::solver::{LinearSolver, MonitorAction, MonitorCallback};
     use kryst::solver::fgmres::{
         FgmresSolver, FgmresVariant, OrthogMethod, PipelinePolicy, ResidualCheckPolicy,
     };
@@ -98,6 +100,10 @@ mod complex_demo {
                         "disabled"
                     }
                 );
+            }
+            if config.residual_history {
+                println!("Residual history: enabled{}",
+                    config.residual_history_file.as_ref().map(|p| format!(", output={}", p.display())).unwrap_or_default());
             }
             println!("===============================================================");
             println!();
@@ -422,6 +428,9 @@ mod complex_demo {
         reorths: Vec<ReorthPolicy>,
         disable_stagnation_restart: bool,
         correctness_replicated_check: bool,
+        residual_history: bool,
+        residual_history_file: Option<PathBuf>,
+        residual_history_force: bool,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -466,6 +475,9 @@ mod complex_demo {
                 reorths: vec![ReorthPolicy::IfNeeded],
                 disable_stagnation_restart: false,
                 correctness_replicated_check: false,
+                residual_history: false,
+                residual_history_file: None,
+                residual_history_force: false,
             }
         }
     }
@@ -495,11 +507,11 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force]"
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv]"
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force]"
                             );
                         }
                         std::process::exit(0);
@@ -567,6 +579,20 @@ mod complex_demo {
                         };
                         cfg.orthogs = parse_orthog_csv("--fgmres-orthog", &v)?;
                     }
+                    "--residual-history" => {
+                        cfg.residual_history = true;
+                    }
+                    "--residual-history-file" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --residual-history-file".into(),
+                            ));
+                        };
+                        cfg.residual_history_file = Some(PathBuf::from(v));
+                    }
+                    "--residual-history-force" => {
+                        cfg.residual_history_force = true;
+                    }
                     "--fgmres-reorth" => {
                         let Some(v) = args.next() else {
                             return Err(KError::InvalidInput(
@@ -588,6 +614,9 @@ mod complex_demo {
             }
             if cfg.run_mode == RunMode::Scalability {
                 cfg.correctness_replicated_check = false;
+            }
+            if cfg.residual_history && cfg.run_mode != RunMode::Correctness && !cfg.residual_history_force {
+                cfg.residual_history = false;
             }
             Ok(cfg)
         }
@@ -864,6 +893,19 @@ mod complex_demo {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct ResidualHistoryEntry {
+        iter: usize,
+        recurrence_residual: R,
+        true_residual: Option<R>,
+        checkpoint: bool,
+    }
+
+    #[derive(Default)]
+    struct RunResidualHistory {
+        entries: Vec<ResidualHistoryEntry>,
+    }
+
     fn run_once(
         problem: &Problem,
         spec: &RunSpec,
@@ -931,6 +973,7 @@ mod complex_demo {
         let mut solve_times = Vec::with_capacity(bench_cfg.measured_runs);
         let mut x_last = vec![S::zero(); problem.local_n];
         let mut final_stats = None;
+        let mut residual_history_last = RunResidualHistory::default();
         for _ in 0..bench_cfg.measured_runs {
             let mut x = vec![S::zero(); problem.local_n];
             problem.comm.barrier();
@@ -939,6 +982,25 @@ mod complex_demo {
             apply_dist_plan_policy(&mut solver, problem);
             let mut workspace = Workspace::new(problem.local_n);
             solver.setup_workspace(&mut workspace);
+            let mut run_history = RunResidualHistory::default();
+            let mut monitors: Vec<Box<MonitorCallback<R>>> = Vec::new();
+            if bench_cfg.residual_history {
+                monitors.push(Box::new(|it, res, _| {
+                    let _ = (it, res);
+                    MonitorAction::Continue
+                }));
+            }
+            let history_ref = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(usize, R)>::new()));
+            if bench_cfg.residual_history {
+                let history_ref_c = history_ref.clone();
+                monitors.clear();
+                monitors.push(Box::new(move |it, res, _| {
+                    if let Ok(mut h) = history_ref_c.lock() {
+                        h.push((it, res));
+                    }
+                    MonitorAction::Continue
+                }));
+            }
             let stats = solver.solve_k(
                 problem.op.as_ref(),
                 pc.as_mut().map(PcHandle::as_kpc_mut),
@@ -946,9 +1008,15 @@ mod complex_demo {
                 &mut x,
                 effective_pc_side,
                 &problem.comm,
-                None,
+                if monitors.is_empty() { None } else { Some(&monitors) },
                 Some(&mut workspace),
             )?;
+            if bench_cfg.residual_history {
+                if let Ok(h) = history_ref.lock() {
+                    run_history.entries = h.iter().map(|(it,res)| ResidualHistoryEntry{iter:*it, recurrence_residual:*res, true_residual:None, checkpoint:false}).collect();
+                }
+                residual_history_last = run_history;
+            }
             problem.comm.barrier();
             let solve_secs = start.elapsed().as_secs_f64();
             solve_times.push(solve_secs);
@@ -978,6 +1046,31 @@ mod complex_demo {
             } else {
                 (None, None)
             };
+        if bench_cfg.residual_history && bench_cfg.measured_runs > 0 && problem.comm.rank() == 0 {
+            let mut checkpoint_count = 0usize;
+            // mark restart boundaries based on effective restart interval and policy
+            let restart = stats.effective_restart.unwrap_or(spec.restart).max(1);
+            for e in &mut residual_history_last.entries {
+                if e.iter > 0 && e.iter % restart == 0 {
+                    e.checkpoint = true;
+                    if matches!(spec.residual_check_policy, ResidualCheckPolicy::RestartOnly | ResidualCheckPolicy::OnConvergence | ResidualCheckPolicy::EveryIteration | ResidualCheckPolicy::Debug) {
+                        e.true_residual = explicit_true_residual;
+                    }
+                    checkpoint_count += 1;
+                }
+            }
+            println!(
+                "[history][rank0] {}: {} points, {} restart checkpoints",
+                spec.method_label(),
+                residual_history_last.entries.len(),
+                checkpoint_count
+            );
+            if let Some(path) = &bench_cfg.residual_history_file {
+                dump_residual_history(path, &residual_history_last)?;
+                println!("[history][rank0] wrote {}", path.display());
+            }
+        }
+
         let x_error_rel = if bench_cfg.run_mode == RunMode::Correctness
             && problem.rhs_source == RhsSource::GeneratedAOnes
         {
@@ -1062,6 +1155,27 @@ mod complex_demo {
 
     fn apply_dist_plan_policy(solver: &mut FgmresSolver, problem: &Problem) {
         solver.apply_distcsr_policy(&problem.dist_plan_diagnostics, problem.comm.size());
+    }
+
+    fn dump_residual_history(path: &Path, history: &RunResidualHistory) -> Result<(), KError> {
+        let mut f = File::create(path)
+            .map_err(|e| KError::InvalidInput(format!("failed to create history file: {e}")))?;
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            writeln!(f, "[").map_err(|e| KError::InvalidInput(format!("write failed: {e}")))?;
+            for (i, e) in history.entries.iter().enumerate() {
+                writeln!(f, "  {{\"iter\":{},\"recurrence_residual\":{},\"true_residual\":{},\"checkpoint\":{}}}{}", e.iter, e.recurrence_residual, e.true_residual.map(|v| v.to_string()).unwrap_or_else(|| "null".to_string()), e.checkpoint, if i + 1 == history.entries.len() {""} else {","})
+                    .map_err(|e| KError::InvalidInput(format!("write failed: {e}")))?;
+            }
+            writeln!(f, "]").map_err(|e| KError::InvalidInput(format!("write failed: {e}")))?;
+        } else {
+            writeln!(f, "iter,recurrence_residual,true_residual,checkpoint")
+                .map_err(|e| KError::InvalidInput(format!("write failed: {e}")))?;
+            for e in &history.entries {
+                writeln!(f, "{},{},{},{}", e.iter, e.recurrence_residual, e.true_residual.map(|v| v.to_string()).unwrap_or_default(), e.checkpoint)
+                    .map_err(|e| KError::InvalidInput(format!("write failed: {e}")))?;
+            }
+        }
+        Ok(())
     }
 
     fn median(samples: &mut [f64]) -> f64 {
