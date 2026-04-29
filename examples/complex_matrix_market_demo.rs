@@ -339,6 +339,7 @@ mod complex_demo {
         rhs: Vec<S>,
         rhs_source: RhsSource,
         csr_for_pc: Arc<SparseCsrMatrix<S>>,
+        local_rows_nnz: usize,
         local_n: usize,
         global_n: usize,
         global_row_start: usize,
@@ -414,6 +415,16 @@ mod complex_demo {
         reorth: ReorthPolicy,
         pc_side: PcSide,
         pc: PcKind,
+    }
+
+    #[derive(Clone, Debug)]
+    struct CsrForPcDiagnostics {
+        nnz_local_block: usize,
+        nnz_local_rows: usize,
+        nnz_ratio: f64,
+        diag_min_abs: f64,
+        diag_max_abs: f64,
+        diag_tiny_or_missing_count: usize,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -846,9 +857,11 @@ mod complex_demo {
             match self {
                 Self::None => "none (unpreconditioned reference)",
                 Self::JacobiWeak => "jacobi (weak baseline)",
-                Self::Ilu0Local => "local ILU(0) (strong baseline)",
+                Self::Ilu0Local => {
+                    "local ILU(0) (block-Jacobi ILU(0), zero overlap/local owned block)"
+                }
                 Self::MpiBlockJacobiIlu0Local => {
-                    "MPI block-Jacobi + local ILU(0) [alias: local ILU(0) path]"
+                    "MPI block-Jacobi + local ILU(0) [block-Jacobi ILU(0), zero overlap/local owned block]"
                 }
             }
         }
@@ -935,6 +948,8 @@ mod complex_demo {
     ) -> Result<ResultRow, KError> {
         let b = &problem.rhs;
         let effective_pc_side = normalized_fgmres_side(spec.pc_side);
+        let csr_pc_diag =
+            csr_for_pc_diagnostics(problem.csr_for_pc.as_ref(), problem.local_rows_nnz);
         enum PcHandle {
             Jacobi(Jacobi),
             Ilu0(IluCsr),
@@ -966,6 +981,14 @@ mod complex_demo {
                 cfg.kind = IluKind::Ilu0;
                 let mut ilu = IluCsr::new_with_config(cfg);
                 ilu.setup(problem.csr_for_pc.as_ref())?;
+                if bench_cfg.run_mode == RunMode::Correctness && problem.comm.rank() == 0 {
+                    let pivot_perturbation_count = None::<usize>;
+                    print_csr_for_pc_diagnostics(
+                        &spec.method_label(),
+                        &csr_pc_diag,
+                        pivot_perturbation_count,
+                    );
+                }
                 pc = Some(if spec.pc == PcKind::Ilu0Local {
                     PcHandle::Ilu0(ilu)
                 } else {
@@ -1182,6 +1205,71 @@ mod complex_demo {
         Ok(())
     }
 
+    fn csr_for_pc_diagnostics(
+        matrix: &SparseCsrMatrix<S>,
+        nnz_local_rows: usize,
+    ) -> CsrForPcDiagnostics {
+        let mut diag_min_abs = f64::INFINITY;
+        let mut diag_max_abs = 0.0f64;
+        let mut diag_tiny_or_missing_count = 0usize;
+        let tiny_diag_threshold = 1e-14f64;
+        let row_ptr = matrix.row_ptr();
+        let col_idx = matrix.col_idx();
+        let values = matrix.values();
+        for r in 0..matrix.nrows() {
+            let mut diag = None;
+            for nz in row_ptr[r]..row_ptr[r + 1] {
+                if col_idx[nz] == r {
+                    diag = Some(values[nz].abs());
+                    break;
+                }
+            }
+            match diag {
+                Some(v) => {
+                    diag_min_abs = diag_min_abs.min(v);
+                    diag_max_abs = diag_max_abs.max(v);
+                    if v <= tiny_diag_threshold {
+                        diag_tiny_or_missing_count += 1;
+                    }
+                }
+                None => diag_tiny_or_missing_count += 1,
+            }
+        }
+        if !diag_min_abs.is_finite() {
+            diag_min_abs = 0.0;
+        }
+        let nnz_local_block = values.len();
+        let nnz_ratio = nnz_local_block as f64 / (nnz_local_rows.max(1) as f64);
+        CsrForPcDiagnostics {
+            nnz_local_block,
+            nnz_local_rows,
+            nnz_ratio,
+            diag_min_abs,
+            diag_max_abs,
+            diag_tiny_or_missing_count,
+        }
+    }
+
+    fn print_csr_for_pc_diagnostics(
+        method_label: &str,
+        diag: &CsrForPcDiagnostics,
+        pivot_perturbation_count: Option<usize>,
+    ) {
+        let pivot_text = pivot_perturbation_count
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        println!(
+            "[diag][rank0] {method_label}: nnz(A_ii)/nnz(local rows)={}/{}={:.3e}, |diag|min={:.3e}, |diag|max={:.3e}, tiny/missing diag={}, pivot perturbations={}",
+            diag.nnz_local_block,
+            diag.nnz_local_rows,
+            diag.nnz_ratio,
+            diag.diag_min_abs,
+            diag.diag_max_abs,
+            diag.diag_tiny_or_missing_count,
+            pivot_text
+        );
+    }
+
     fn configured_solver(spec: &RunSpec, bench_cfg: &BenchmarkConfig) -> FgmresSolver {
         let mut solver = FgmresSolver::new(bench_cfg.rtol, bench_cfg.maxits, spec.restart);
         solver.variant = spec.variant;
@@ -1380,6 +1468,7 @@ mod complex_demo {
             rhs,
             rhs_source,
             csr_for_pc: Arc::new(local_pc_block),
+            local_rows_nnz: local_csr.values().len(),
             local_n,
             global_n,
             global_row_start: row_start,
@@ -1539,6 +1628,7 @@ mod complex_demo {
             rhs: vec![S::one(), S::one()],
             rhs_source: RhsSource::GeneratedAOnes,
             csr_for_pc: Arc::new(rectangular_pc),
+            local_rows_nnz: op_local.values().len(),
             local_n: 2,
             global_n: 2,
             global_row_start: 0,
@@ -1599,6 +1689,7 @@ mod complex_demo {
             rhs: vec![S::one(), S::one()],
             rhs_source: RhsSource::GeneratedAOnes,
             csr_for_pc: Arc::new(op_local),
+            local_rows_nnz: 2,
             local_n: 2,
             global_n: 2,
             global_row_start: 0,
