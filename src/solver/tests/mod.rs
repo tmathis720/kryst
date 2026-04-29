@@ -5,6 +5,7 @@ mod breakdown_true_residual;
 mod cg_pipelined;
 mod cg_side;
 mod fgmres_distcsr;
+mod fgmres_stagnation_policy;
 mod gmres_left_right;
 mod gmres_right_z_basis;
 mod gmres_variants;
