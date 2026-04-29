@@ -204,7 +204,7 @@ mod complex_demo {
                     println!("{}", "-".repeat(140));
                 } else if include_dof_col {
                     println!(
-                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
                         "Method",
                         "Requested policy",
                         "Effective policy",
@@ -216,13 +216,14 @@ mod complex_demo {
                         "Rec/Reported",
                         "True(explicit)",
                         "True(rel)",
+                        "x_err(rel)",
                         "Reason",
                         "DOF/s"
                     );
-                    println!("{}", "-".repeat(252));
+                    println!("{}", "-".repeat(268));
                 } else {
                     println!(
-                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>14} {:>26}",
+                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26}",
                         "Method",
                         "Requested policy",
                         "Effective policy",
@@ -234,9 +235,10 @@ mod complex_demo {
                         "Rec/Reported",
                         "True(explicit)",
                         "True(rel)",
+                        "x_err(rel)",
                         "Reason"
                     );
-                    println!("{}", "-".repeat(238));
+                    println!("{}", "-".repeat(252));
                 }
             }
 
@@ -313,6 +315,7 @@ mod complex_demo {
         op: Arc<dyn KLinOp<Scalar = S>>,
         dist_plan_diagnostics: DistributedPlanDiagnostics,
         rhs: Vec<S>,
+        rhs_source: RhsSource,
         csr_for_pc: Arc<SparseCsrMatrix<S>>,
         local_n: usize,
         global_n: usize,
@@ -320,6 +323,12 @@ mod complex_demo {
         comm: UniverseComm,
         backend: CsrBackend,
         backend_descr: String,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum RhsSource {
+        LoadedFromFile,
+        GeneratedAOnes,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -367,6 +376,7 @@ mod complex_demo {
         reported_residual: R,
         explicit_true_residual: Option<R>,
         explicit_true_residual_rel: Option<R>,
+        x_error_rel: Option<R>,
         reason: ConvergedReason,
         dof_per_sec: Option<f64>,
     }
@@ -968,6 +978,20 @@ mod complex_demo {
             } else {
                 (None, None)
             };
+        let x_error_rel = if bench_cfg.run_mode == RunMode::Correctness
+            && problem.rhs_source == RhsSource::GeneratedAOnes
+        {
+            let err2_local = x_last
+                .iter()
+                .map(|xi| (*xi - S::one()).abs2())
+                .sum::<f64>();
+            let one2_local = x_last.iter().map(|_| S::one().abs2()).sum::<f64>();
+            let err = problem.comm.all_reduce_f64(err2_local).sqrt();
+            let one_norm = problem.comm.all_reduce_f64(one2_local).sqrt();
+            Some(err / one_norm.max(f64::MIN_POSITIVE))
+        } else {
+            None
+        };
         let dof_per_sec = if matches!(
             problem.backend,
             CsrBackend::Serial | CsrBackend::Distributed
@@ -1007,6 +1031,7 @@ mod complex_demo {
             reported_residual: stats.final_residual,
             explicit_true_residual,
             explicit_true_residual_rel,
+            x_error_rel,
             reason: stats.reason,
             dof_per_sec,
         })
@@ -1079,13 +1104,17 @@ mod complex_demo {
             .explicit_true_residual_rel
             .map(|v| format!("{v:.2e}"))
             .unwrap_or_else(|| "N/A".to_string());
+        let x_error_rel = row
+            .x_error_rel
+            .map(|v| format!("{v:.2e}"))
+            .unwrap_or_else(|| "N/A".to_string());
         if include_dof_col {
             let dof = row
                 .dof_per_sec
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             format!(
-                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>14} {:>26?} {:>12}",
+                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?} {:>12}",
                 row.method,
                 row.requested_policy,
                 row.effective_policy,
@@ -1097,12 +1126,13 @@ mod complex_demo {
                 row.reported_residual,
                 explicit_true,
                 explicit_true_rel,
+                x_error_rel,
                 row.reason,
                 dof
             )
         } else {
             format!(
-                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>14} {:>26?}",
+                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?}",
                 row.method,
                 row.requested_policy,
                 row.effective_policy,
@@ -1114,6 +1144,7 @@ mod complex_demo {
                 row.reported_residual,
                 explicit_true,
                 explicit_true_rel,
+                x_error_rel,
                 row.reason
             )
         }
@@ -1140,13 +1171,13 @@ mod complex_demo {
         let dist_plan_diagnostics = op.plan_diagnostics().clone();
         let op_arc: Arc<dyn KLinOp<Scalar = S>> = Arc::new(op);
 
-        let rhs_global = match try_load_rhs_s(mat_path, nrows) {
-            Some(vec) => vec,
+        let (rhs_global, rhs_source) = match try_load_rhs_s(mat_path, nrows) {
+            Some(vec) => (vec, RhsSource::LoadedFromFile),
             None => {
                 let ones = vec![S::one(); ncols];
                 let mut b = vec![S::zero(); nrows];
                 csr_sparse.spmv(&ones, &mut b);
-                b
+                (b, RhsSource::GeneratedAOnes)
             }
         };
         let rhs = rhs_global[row_start..row_end].to_vec();
@@ -1159,6 +1190,7 @@ mod complex_demo {
             op: op_arc,
             dist_plan_diagnostics,
             rhs,
+            rhs_source,
             csr_for_pc: Arc::new(local_pc_block),
             local_n,
             global_n,
@@ -1317,6 +1349,7 @@ mod complex_demo {
                 expected_computation_fraction: 1.0,
             },
             rhs: vec![S::one(), S::one()],
+            rhs_source: RhsSource::GeneratedAOnes,
             csr_for_pc: Arc::new(rectangular_pc),
             local_n: 2,
             global_n: 2,
@@ -1376,6 +1409,7 @@ mod complex_demo {
                 expected_computation_fraction: 0.5,
             },
             rhs: vec![S::one(), S::one()],
+            rhs_source: RhsSource::GeneratedAOnes,
             csr_for_pc: Arc::new(op_local),
             local_n: 2,
             global_n: 2,
