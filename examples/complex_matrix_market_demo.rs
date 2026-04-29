@@ -38,7 +38,8 @@ mod complex_demo {
     use kryst::preconditioner::jacobi::Jacobi;
     use kryst::solver::{LinearSolver, MonitorAction, MonitorCallback};
     use kryst::solver::fgmres::{
-        FgmresSolver, FgmresVariant, OrthogMethod, PipelinePolicy, ResidualCheckPolicy,
+        FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, PipelinePolicy,
+        ResidualCheckPolicy,
     };
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
@@ -1148,7 +1149,10 @@ mod complex_demo {
         solver.atol = bench_cfg.atol;
         solver.dtol = 1e6;
         if bench_cfg.disable_stagnation_restart {
-            solver.pipeline_policy = PipelinePolicy::Strict;
+            solver.stagnation_policy = match spec.variant {
+                FgmresVariant::Classical => FgmresStagnationPolicy::Disabled,
+                FgmresVariant::Pipelined => FgmresStagnationPolicy::PipelineFallbackOnly,
+            };
         }
         solver
     }
