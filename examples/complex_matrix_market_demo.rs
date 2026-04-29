@@ -36,11 +36,11 @@ mod complex_demo {
     use kryst::preconditioner::Preconditioner;
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::jacobi::Jacobi;
-    use kryst::solver::{LinearSolver, MonitorAction, MonitorCallback};
     use kryst::solver::fgmres::{
         FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, PipelinePolicy,
         ResidualCheckPolicy,
     };
+    use kryst::solver::{LinearSolver, MonitorAction, MonitorCallback};
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
 
@@ -103,8 +103,14 @@ mod complex_demo {
                 );
             }
             if config.residual_history {
-                println!("Residual history: enabled{}",
-                    config.residual_history_file.as_ref().map(|p| format!(", output={}", p.display())).unwrap_or_default());
+                println!(
+                    "Residual history: enabled{}",
+                    config
+                        .residual_history_file
+                        .as_ref()
+                        .map(|p| format!(", output={}", p.display()))
+                        .unwrap_or_default()
+                );
             }
             println!("===============================================================");
             println!();
@@ -198,20 +204,23 @@ mod complex_demo {
                 );
                 if config.run_mode == RunMode::Scalability {
                     println!(
-                        "{:<36} {:<34} {:>9} {:>9} {:>7} {:>6} {:>14} {:>12}",
+                        "{:<36} {:<34} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>12}",
                         "Method",
                         "Effective policy",
                         "Med(s)",
                         "Min(s)",
                         "Iters",
+                        "Rst",
+                        "Inn",
+                        "Pfb",
                         "Reds",
                         "Rec/Reported",
                         "DOF/s"
                     );
-                    println!("{}", "-".repeat(140));
+                    println!("{}", "-".repeat(158));
                 } else if include_dof_col {
                     println!(
-                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
                         "Method",
                         "Requested policy",
                         "Effective policy",
@@ -219,6 +228,9 @@ mod complex_demo {
                         "Med(s)",
                         "Min(s)",
                         "Iters",
+                        "Rst",
+                        "Inn",
+                        "Pfb",
                         "Reds",
                         "Rec/Reported",
                         "True(explicit)",
@@ -227,10 +239,10 @@ mod complex_demo {
                         "Reason",
                         "DOF/s"
                     );
-                    println!("{}", "-".repeat(268));
+                    println!("{}", "-".repeat(286));
                 } else {
                     println!(
-                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26}",
+                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26}",
                         "Method",
                         "Requested policy",
                         "Effective policy",
@@ -238,6 +250,9 @@ mod complex_demo {
                         "Med(s)",
                         "Min(s)",
                         "Iters",
+                        "Rst",
+                        "Inn",
+                        "Pfb",
                         "Reds",
                         "Rec/Reported",
                         "True(explicit)",
@@ -245,7 +260,7 @@ mod complex_demo {
                         "x_err(rel)",
                         "Reason"
                     );
-                    println!("{}", "-".repeat(252));
+                    println!("{}", "-".repeat(270));
                 }
             }
 
@@ -380,6 +395,9 @@ mod complex_demo {
         min_solve_secs: f64,
         iterations: usize,
         reductions: usize,
+        restart_count: Option<usize>,
+        inner_iterations_last_cycle: Option<usize>,
+        pipeline_fallbacks: Option<usize>,
         reported_residual: R,
         explicit_true_residual: Option<R>,
         explicit_true_residual_rel: Option<R>,
@@ -616,7 +634,10 @@ mod complex_demo {
             if cfg.run_mode == RunMode::Scalability {
                 cfg.correctness_replicated_check = false;
             }
-            if cfg.residual_history && cfg.run_mode != RunMode::Correctness && !cfg.residual_history_force {
+            if cfg.residual_history
+                && cfg.run_mode != RunMode::Correctness
+                && !cfg.residual_history_force
+            {
                 cfg.residual_history = false;
             }
             Ok(cfg)
@@ -1009,12 +1030,24 @@ mod complex_demo {
                 &mut x,
                 effective_pc_side,
                 &problem.comm,
-                if monitors.is_empty() { None } else { Some(&monitors) },
+                if monitors.is_empty() {
+                    None
+                } else {
+                    Some(&monitors)
+                },
                 Some(&mut workspace),
             )?;
             if bench_cfg.residual_history {
                 if let Ok(h) = history_ref.lock() {
-                    run_history.entries = h.iter().map(|(it,res)| ResidualHistoryEntry{iter:*it, recurrence_residual:*res, true_residual:None, checkpoint:false}).collect();
+                    run_history.entries = h
+                        .iter()
+                        .map(|(it, res)| ResidualHistoryEntry {
+                            iter: *it,
+                            recurrence_residual: *res,
+                            true_residual: None,
+                            checkpoint: false,
+                        })
+                        .collect();
                 }
                 residual_history_last = run_history;
             }
@@ -1054,7 +1087,13 @@ mod complex_demo {
             for e in &mut residual_history_last.entries {
                 if e.iter > 0 && e.iter % restart == 0 {
                     e.checkpoint = true;
-                    if matches!(spec.residual_check_policy, ResidualCheckPolicy::RestartOnly | ResidualCheckPolicy::OnConvergence | ResidualCheckPolicy::EveryIteration | ResidualCheckPolicy::Debug) {
+                    if matches!(
+                        spec.residual_check_policy,
+                        ResidualCheckPolicy::RestartOnly
+                            | ResidualCheckPolicy::OnConvergence
+                            | ResidualCheckPolicy::EveryIteration
+                            | ResidualCheckPolicy::Debug
+                    ) {
                         e.true_residual = explicit_true_residual;
                     }
                     checkpoint_count += 1;
@@ -1075,10 +1114,7 @@ mod complex_demo {
         let x_error_rel = if bench_cfg.run_mode == RunMode::Correctness
             && problem.rhs_source == RhsSource::GeneratedAOnes
         {
-            let err2_local = x_last
-                .iter()
-                .map(|xi| (*xi - S::one()).abs2())
-                .sum::<f64>();
+            let err2_local = x_last.iter().map(|xi| (*xi - S::one()).abs2()).sum::<f64>();
             let one2_local = x_last.iter().map(|_| S::one().abs2()).sum::<f64>();
             let err = problem.comm.all_reduce_f64(err2_local).sqrt();
             let one_norm = problem.comm.all_reduce_f64(one2_local).sqrt();
@@ -1122,6 +1158,12 @@ mod complex_demo {
             min_solve_secs,
             iterations: stats.iterations,
             reductions,
+            restart_count: stats.fgmres_counters.as_ref().map(|c| c.restart_count),
+            inner_iterations_last_cycle: stats
+                .fgmres_counters
+                .as_ref()
+                .map(|c| c.inner_iterations_last_cycle),
+            pipeline_fallbacks: stats.fgmres_counters.as_ref().map(|c| c.pipeline_fallbacks),
             reported_residual: stats.final_residual,
             explicit_true_residual,
             explicit_true_residual_rel,
@@ -1175,8 +1217,15 @@ mod complex_demo {
             writeln!(f, "iter,recurrence_residual,true_residual,checkpoint")
                 .map_err(|e| KError::InvalidInput(format!("write failed: {e}")))?;
             for e in &history.entries {
-                writeln!(f, "{},{},{},{}", e.iter, e.recurrence_residual, e.true_residual.map(|v| v.to_string()).unwrap_or_default(), e.checkpoint)
-                    .map_err(|e| KError::InvalidInput(format!("write failed: {e}")))?;
+                writeln!(
+                    f,
+                    "{},{},{},{}",
+                    e.iter,
+                    e.recurrence_residual,
+                    e.true_residual.map(|v| v.to_string()).unwrap_or_default(),
+                    e.checkpoint
+                )
+                .map_err(|e| KError::InvalidInput(format!("write failed: {e}")))?;
             }
         }
         Ok(())
@@ -1193,6 +1242,18 @@ mod complex_demo {
     }
 
     fn render_result_row(row: &ResultRow, mode: RunMode, problem: &Problem) -> String {
+        let rst = row
+            .restart_count
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let inn = row
+            .inner_iterations_last_cycle
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let pfb = row
+            .pipeline_fallbacks
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
         let include_dof_col = matches!(
             problem.backend,
             CsrBackend::Serial | CsrBackend::Distributed
@@ -1203,12 +1264,15 @@ mod complex_demo {
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             return format!(
-                "{:<36} {:<34} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>12}",
+                "{:<36} {:<34} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>12}",
                 row.method,
                 row.effective_policy,
                 row.median_solve_secs,
                 row.min_solve_secs,
                 row.iterations,
+                rst,
+                inn,
+                pfb,
                 row.reductions,
                 row.reported_residual,
                 dof
@@ -1232,7 +1296,7 @@ mod complex_demo {
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             format!(
-                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?} {:>12}",
+                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?} {:>12}",
                 row.method,
                 row.requested_policy,
                 row.effective_policy,
@@ -1240,6 +1304,9 @@ mod complex_demo {
                 row.median_solve_secs,
                 row.min_solve_secs,
                 row.iterations,
+                rst,
+                inn,
+                pfb,
                 row.reductions,
                 row.reported_residual,
                 explicit_true,
@@ -1250,7 +1317,7 @@ mod complex_demo {
             )
         } else {
             format!(
-                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?}",
+                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?}",
                 row.method,
                 row.requested_policy,
                 row.effective_policy,
@@ -1258,6 +1325,9 @@ mod complex_demo {
                 row.median_solve_secs,
                 row.min_solve_secs,
                 row.iterations,
+                rst,
+                inn,
+                pfb,
                 row.reductions,
                 row.reported_residual,
                 explicit_true,
