@@ -204,7 +204,7 @@ mod complex_demo {
                     println!("{}", "-".repeat(140));
                 } else if include_dof_col {
                     println!(
-                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26} {:>12}",
+                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>14} {:>26} {:>12}",
                         "Method",
                         "Requested policy",
                         "Effective policy",
@@ -215,13 +215,14 @@ mod complex_demo {
                         "Reds",
                         "Rec/Reported",
                         "True(explicit)",
+                        "True(rel)",
                         "Reason",
                         "DOF/s"
                     );
-                    println!("{}", "-".repeat(236));
+                    println!("{}", "-".repeat(252));
                 } else {
                     println!(
-                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
+                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>14} {:>26}",
                         "Method",
                         "Requested policy",
                         "Effective policy",
@@ -232,9 +233,10 @@ mod complex_demo {
                         "Reds",
                         "Rec/Reported",
                         "True(explicit)",
+                        "True(rel)",
                         "Reason"
                     );
-                    println!("{}", "-".repeat(222));
+                    println!("{}", "-".repeat(238));
                 }
             }
 
@@ -263,13 +265,14 @@ mod complex_demo {
                                 );
                             } else {
                                 println!(
-                                    "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>26}",
+                                    "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>14} {:>26}",
                                     spec.method_label(),
                                     spec.requested_policy_label(),
                                     "N/A",
                                     "FAIL",
                                     "FAIL",
                                     "FAIL",
+                                    "N/A",
                                     "N/A",
                                     "N/A",
                                     "N/A",
@@ -363,6 +366,7 @@ mod complex_demo {
         reductions: usize,
         reported_residual: R,
         explicit_true_residual: Option<R>,
+        explicit_true_residual_rel: Option<R>,
         reason: ConvergedReason,
         dof_per_sec: Option<f64>,
     }
@@ -521,9 +525,7 @@ mod complex_demo {
                     }
                     "--maxits" => {
                         let Some(v) = args.next() else {
-                            return Err(KError::InvalidInput(
-                                "missing value for --maxits".into(),
-                            ));
+                            return Err(KError::InvalidInput("missing value for --maxits".into()));
                         };
                         cfg.maxits = parse_positive_usize("--maxits", &v)?;
                     }
@@ -720,7 +722,8 @@ mod complex_demo {
                     for &orthog in &cfg.orthogs {
                         for &reorth in &cfg.reorths {
                             for &pc in &pcs {
-                                if pc == PcKind::MpiBlockJacobiIlu0Local && problem.comm.size() <= 1 {
+                                if pc == PcKind::MpiBlockJacobiIlu0Local && problem.comm.size() <= 1
+                                {
                                     continue;
                                 }
                                 runs.push(Self {
@@ -948,18 +951,23 @@ mod complex_demo {
         let median_solve_secs = median(&mut solve_times);
 
         let reductions = stats.counters.num_global_reductions;
-        let explicit_true_residual = if bench_cfg.run_mode == RunMode::Correctness {
-            let mut ax = vec![S::zero(); b.len()];
-            let mut scratch = BridgeScratch::default();
-            problem.op.matvec_s(&x_last, &mut ax, &mut scratch);
-            for (ri, bi) in ax.iter_mut().zip(b.iter().copied()) {
-                *ri = bi - *ri;
-            }
-            let r2_local = ax.iter().map(|v| v.abs2()).sum::<f64>();
-            Some(problem.comm.all_reduce_f64(r2_local).sqrt())
-        } else {
-            None
-        };
+        let (explicit_true_residual, explicit_true_residual_rel) =
+            if bench_cfg.run_mode == RunMode::Correctness {
+                let mut ax = vec![S::zero(); b.len()];
+                let mut scratch = BridgeScratch::default();
+                problem.op.matvec_s(&x_last, &mut ax, &mut scratch);
+                for (ri, bi) in ax.iter_mut().zip(b.iter().copied()) {
+                    *ri = bi - *ri;
+                }
+                let r2_local = ax.iter().map(|v| v.abs2()).sum::<f64>();
+                let true_res = problem.comm.all_reduce_f64(r2_local).sqrt();
+                let rhs_norm2_local = b.iter().map(|v| v.abs2()).sum::<f64>();
+                let rhs_norm = problem.comm.all_reduce_f64(rhs_norm2_local).sqrt();
+                let rel_true = true_res / rhs_norm.max(f64::MIN_POSITIVE);
+                (Some(true_res), Some(rel_true))
+            } else {
+                (None, None)
+            };
         let dof_per_sec = if matches!(
             problem.backend,
             CsrBackend::Serial | CsrBackend::Distributed
@@ -998,6 +1006,7 @@ mod complex_demo {
             reductions,
             reported_residual: stats.final_residual,
             explicit_true_residual,
+            explicit_true_residual_rel,
             reason: stats.reason,
             dof_per_sec,
         })
@@ -1066,13 +1075,17 @@ mod complex_demo {
             .explicit_true_residual
             .map(|v| format!("{v:.2e}"))
             .unwrap_or_else(|| "N/A".to_string());
+        let explicit_true_rel = row
+            .explicit_true_residual_rel
+            .map(|v| format!("{v:.2e}"))
+            .unwrap_or_else(|| "N/A".to_string());
         if include_dof_col {
             let dof = row
                 .dof_per_sec
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             format!(
-                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?} {:>12}",
+                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>14} {:>26?} {:>12}",
                 row.method,
                 row.requested_policy,
                 row.effective_policy,
@@ -1083,12 +1096,13 @@ mod complex_demo {
                 row.reductions,
                 row.reported_residual,
                 explicit_true,
+                explicit_true_rel,
                 row.reason,
                 dof
             )
         } else {
             format!(
-                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>26?}",
+                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>6} {:>14.2e} {:>14} {:>14} {:>26?}",
                 row.method,
                 row.requested_policy,
                 row.effective_policy,
@@ -1099,6 +1113,7 @@ mod complex_demo {
                 row.reductions,
                 row.reported_residual,
                 explicit_true,
+                explicit_true_rel,
                 row.reason
             )
         }
