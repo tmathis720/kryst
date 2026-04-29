@@ -816,13 +816,24 @@ mod complex_demo {
         fn build_default_matrix(cfg: &BenchmarkConfig, problem: &Problem) -> Vec<Self> {
             let pcs = if cfg.pcs.is_empty() {
                 match cfg.run_mode {
-                    RunMode::Correctness => vec![
-                        PcKind::Ilu0Local,
-                        PcKind::MpiBlockJacobiIlu0Local,
-                        PcKind::JacobiWeak,
-                        PcKind::None,
-                    ],
-                    RunMode::Scalability => vec![PcKind::Ilu0Local],
+                    RunMode::Correctness => {
+                        if problem.comm.size() > 1 {
+                            vec![
+                                PcKind::MpiBlockJacobiIlu0Local,
+                                PcKind::JacobiWeak,
+                                PcKind::None,
+                            ]
+                        } else {
+                            vec![PcKind::Ilu0Local, PcKind::JacobiWeak, PcKind::None]
+                        }
+                    }
+                    RunMode::Scalability => {
+                        if problem.comm.size() > 1 {
+                            vec![PcKind::MpiBlockJacobiIlu0Local]
+                        } else {
+                            vec![PcKind::Ilu0Local]
+                        }
+                    }
                 }
             } else {
                 cfg.pcs.clone()
@@ -896,15 +907,11 @@ mod complex_demo {
             match self {
                 Self::None => "none (unpreconditioned reference)",
                 Self::JacobiWeak => "jacobi (weak baseline)",
-                Self::Ilu0Local => {
-                    "local ILU(0) (block-Jacobi ILU(0), zero overlap/local owned block)"
-                }
+                Self::Ilu0Local => "block-jacobi-ilu0-overlap0",
                 Self::IlutLocal => {
                     "local ILUT [degraded/provisional complex path: real-projection fallback; not trusted for complex robustness benchmarking]"
                 }
-                Self::MpiBlockJacobiIlu0Local => {
-                    "MPI block-Jacobi + local ILU(0) [block-Jacobi ILU(0), zero overlap/local owned block]"
-                }
+                Self::MpiBlockJacobiIlu0Local => "block-jacobi-ilu0-overlap0 [mpi spelling alias]",
                 Self::LocalIluk { .. } => {
                     "local ILU(k) (block-Jacobi ILU(k), zero overlap/local owned block)"
                 }
@@ -943,6 +950,21 @@ mod complex_demo {
             }
         }
 
+        fn semantic_experiment_key(self, mpi_mode: bool) -> String {
+            match self {
+                Self::MpiBlockJacobiIlu0Local | Self::Ilu0Local if mpi_mode => {
+                    "block-jacobi-ilu0-overlap0".to_string()
+                }
+                Self::MpiBlockJacobiIlu0Local => "mpi-block-jacobi-ilu0-local".to_string(),
+                Self::Ilu0Local => "local-ilu0".to_string(),
+                Self::None => "none".to_string(),
+                Self::JacobiWeak => "jacobi-weak".to_string(),
+                Self::IlutLocal => "local-ilut".to_string(),
+                Self::LocalIluk { k } => format!("local-iluk:{k}"),
+                Self::ReplicatedFullIlu0 => "replicated-ilu0".to_string(),
+                Self::ReplicatedFullIluk { k } => format!("replicated-iluk:{k}"),
+            }
+        }
         fn is_ilut(self) -> bool {
             matches!(self, Self::IlutLocal)
         }
@@ -1976,6 +1998,44 @@ mod complex_demo {
         assert!(rendered.contains(&row.effective_policy));
     }
 
+    #[test]
+    fn mpi_mode_run_matrix_has_no_duplicate_semantic_pc_experiments() {
+        let cfg = BenchmarkConfig::default();
+        let mpi_mode = true;
+        let pcs = if cfg.pcs.is_empty() {
+            match cfg.run_mode {
+                RunMode::Correctness => {
+                    if mpi_mode {
+                        vec![
+                            PcKind::MpiBlockJacobiIlu0Local,
+                            PcKind::JacobiWeak,
+                            PcKind::None,
+                        ]
+                    } else {
+                        vec![PcKind::Ilu0Local, PcKind::JacobiWeak, PcKind::None]
+                    }
+                }
+                RunMode::Scalability => {
+                    if mpi_mode {
+                        vec![PcKind::MpiBlockJacobiIlu0Local]
+                    } else {
+                        vec![PcKind::Ilu0Local]
+                    }
+                }
+            }
+        } else {
+            cfg.pcs.clone()
+        };
+
+        let mut seen = std::collections::BTreeSet::new();
+        for pc in pcs {
+            let key = pc.semantic_experiment_key(mpi_mode);
+            assert!(
+                seen.insert(key.clone()),
+                "duplicate semantic PC experiment: {key}"
+            );
+        }
+    }
     #[test]
     fn preconditioner_dispatch_variants_are_distinct_or_explicit_aliases() {
         let variants = [
