@@ -37,8 +37,7 @@ mod complex_demo {
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::jacobi::Jacobi;
     use kryst::solver::fgmres::{
-        FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod,
-        ResidualCheckPolicy,
+        FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, ResidualCheckPolicy,
     };
     use kryst::solver::{LinearSolver, MonitorAction, MonitorCallback};
     use kryst::utils::convergence::ConvergedReason;
@@ -466,6 +465,8 @@ mod complex_demo {
         residual_history: bool,
         residual_history_file: Option<PathBuf>,
         residual_history_force: bool,
+        row_scale: bool,
+        row_scale_tiny: f64,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -513,6 +514,8 @@ mod complex_demo {
                 residual_history: false,
                 residual_history_file: None,
                 residual_history_force: false,
+                row_scale: false,
+                row_scale_tiny: 1e-15,
             }
         }
     }
@@ -520,7 +523,7 @@ mod complex_demo {
     impl BenchmarkConfig {
         fn from_env_args() -> Result<Self, KError> {
             let mut cfg = Self::default();
-            let mut args = env::args().skip(1);
+            let mut args = env::args().skip(1).peekable();
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--warmup-runs" => {
@@ -542,11 +545,11 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force]"
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force]"
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
                             );
                         }
                         std::process::exit(0);
@@ -627,6 +630,19 @@ mod complex_demo {
                     }
                     "--residual-history-force" => {
                         cfg.residual_history_force = true;
+                    }
+                    "--row-scale" => {
+                        cfg.row_scale = true;
+                        if let Some(next) = args.peek() {
+                            if !next.starts_with("--") {
+                                let tiny = args.next().ok_or_else(|| {
+                                    KError::InvalidInput(
+                                        "failed to read --row-scale optional tiny".into(),
+                                    )
+                                })?;
+                                cfg.row_scale_tiny = parse_positive_f64("--row-scale", &tiny)?;
+                            }
+                        }
                     }
                     "--fgmres-reorth" => {
                         let Some(v) = args.next() else {
@@ -991,12 +1007,77 @@ mod complex_demo {
         entries: Vec<ResidualHistoryEntry>,
     }
 
+    struct RowScaledOp {
+        base: Arc<dyn KLinOp<Scalar = S>>,
+        d: Vec<R>,
+    }
+
+    impl KLinOp for RowScaledOp {
+        type Scalar = S;
+
+        fn dims(&self) -> (usize, usize) {
+            self.base.dims()
+        }
+
+        fn matvec_s(&self, x: &[S], y: &mut [S], scratch: &mut BridgeScratch) {
+            self.base.matvec_s(x, y, scratch);
+            for (yi, di) in y.iter_mut().zip(self.d.iter().copied()) {
+                *yi *= S::from_real(di);
+            }
+        }
+
+        fn supports_t_matvec_s(&self) -> bool {
+            self.base.supports_t_matvec_s()
+        }
+
+        fn t_matvec_s(&self, x: &[S], y: &mut [S], scratch: &mut BridgeScratch) {
+            self.base.t_matvec_s(x, y, scratch);
+        }
+    }
+
+    fn compute_row_scaling(matrix: &SparseCsrMatrix<S>, tiny: f64) -> Vec<R> {
+        let row_ptr = matrix.row_ptr();
+        let vals = matrix.values();
+        (0..matrix.nrows())
+            .map(|r| {
+                let mut row_inf = 0.0f64;
+                for nz in row_ptr[r]..row_ptr[r + 1] {
+                    row_inf = row_inf.max(vals[nz].abs());
+                }
+                if row_inf > tiny { 1.0 / row_inf } else { 1.0 }
+            })
+            .collect()
+    }
+
     fn run_once(
         problem: &Problem,
         spec: &RunSpec,
         bench_cfg: &BenchmarkConfig,
     ) -> Result<ResultRow, KError> {
-        let b = &problem.rhs;
+        let b_unscaled = &problem.rhs;
+        let (row_scaling, op_scaled): (Option<Vec<R>>, Arc<dyn KLinOp<Scalar = S>>) =
+            if bench_cfg.row_scale {
+                let d = compute_row_scaling(problem.csr_for_pc.as_ref(), bench_cfg.row_scale_tiny);
+                (
+                    Some(d.clone()),
+                    Arc::new(RowScaledOp {
+                        base: problem.op.clone(),
+                        d,
+                    }),
+                )
+            } else {
+                (None, problem.op.clone())
+            };
+        let b_scaled: Vec<S> = if let Some(d) = &row_scaling {
+            b_unscaled
+                .iter()
+                .zip(d.iter())
+                .map(|(bi, di)| *bi * S::from_real(*di))
+                .collect()
+        } else {
+            b_unscaled.clone()
+        };
+        let b = &b_scaled;
         let effective_pc_side = normalized_fgmres_side(spec.pc_side);
         let csr_pc_diag =
             csr_for_pc_diagnostics(problem.csr_for_pc.as_ref(), problem.local_rows_nnz);
@@ -1156,7 +1237,7 @@ mod complex_demo {
             let mut workspace = Workspace::new(problem.local_n);
             solver.setup_workspace(&mut workspace);
             let _ = solver.solve_k(
-                problem.op.as_ref(),
+                op_scaled.as_ref(),
                 pc.as_mut().map(PcHandle::as_kpc_mut),
                 b,
                 &mut x,
@@ -1199,7 +1280,7 @@ mod complex_demo {
                 }));
             }
             let stats = solver.solve_k(
-                problem.op.as_ref(),
+                op_scaled.as_ref(),
                 pc.as_mut().map(PcHandle::as_kpc_mut),
                 b,
                 &mut x,
@@ -1234,6 +1315,9 @@ mod complex_demo {
         }
         let stats = final_stats
             .ok_or_else(|| KError::InvalidInput("no measured solve run executed".into()))?;
+        // Row scaling changes only equations (D_r A x = D_r b), so x is unchanged.
+        // Keep an explicit "map-back" step so optional future column scaling can hook here.
+        let x_unscaled = x_last;
         let min_solve_secs = solve_times.iter().copied().fold(f64::INFINITY, f64::min);
         let median_solve_secs = median(&mut solve_times);
 
@@ -1242,8 +1326,8 @@ mod complex_demo {
             if bench_cfg.run_mode == RunMode::Correctness {
                 let mut ax = vec![S::zero(); b.len()];
                 let mut scratch = BridgeScratch::default();
-                problem.op.matvec_s(&x_last, &mut ax, &mut scratch);
-                for (ri, bi) in ax.iter_mut().zip(b.iter().copied()) {
+                problem.op.matvec_s(&x_unscaled, &mut ax, &mut scratch);
+                for (ri, bi) in ax.iter_mut().zip(b_unscaled.iter().copied()) {
                     *ri = bi - *ri;
                 }
                 let r2_local = ax.iter().map(|v| v.abs2()).sum::<f64>();
@@ -1276,7 +1360,11 @@ mod complex_demo {
             }
             println!(
                 "[history][rank0] {}: {} points, {} restart checkpoints",
-                spec.method_label(),
+                format!(
+                    "{} [row-scale={}]",
+                    spec.method_label(),
+                    if bench_cfg.row_scale { "on" } else { "off" }
+                ),
                 residual_history_last.entries.len(),
                 checkpoint_count
             );
@@ -1289,8 +1377,11 @@ mod complex_demo {
         let x_error_rel = if bench_cfg.run_mode == RunMode::Correctness
             && problem.rhs_source == RhsSource::GeneratedAOnes
         {
-            let err2_local = x_last.iter().map(|xi| (*xi - S::one()).abs2()).sum::<f64>();
-            let one2_local = x_last.iter().map(|_| S::one().abs2()).sum::<f64>();
+            let err2_local = x_unscaled
+                .iter()
+                .map(|xi| (*xi - S::one()).abs2())
+                .sum::<f64>();
+            let one2_local = x_unscaled.iter().map(|_| S::one().abs2()).sum::<f64>();
             let err = problem.comm.all_reduce_f64(err2_local).sqrt();
             let one_norm = problem.comm.all_reduce_f64(one2_local).sqrt();
             Some(err / one_norm.max(f64::MIN_POSITIVE))
@@ -1308,7 +1399,11 @@ mod complex_demo {
         };
 
         Ok(ResultRow {
-            method: spec.method_label(),
+            method: format!(
+                "{} [row-scale={}]",
+                spec.method_label(),
+                if bench_cfg.row_scale { "on" } else { "off" }
+            ),
             requested_policy: spec.requested_policy_label(),
             effective_policy: format!(
                 "variant={}, restart={}, residual-check={}",
