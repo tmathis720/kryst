@@ -503,6 +503,9 @@ impl IluCsr {
 
     #[cfg(feature = "complex")]
     fn factor_ilut_complex(&mut self, a: &CsrMatrix<S>, params: &IlutParams) -> Result<(), KError> {
+        // NOTE: ILUT currently reuses the real-valued kernel by projecting A to Re(A).
+        // This is a degraded/provisional complex path and is intentionally *not* suitable
+        // for complex-robustness benchmarking. It exists for functional continuity only.
         let a_real = CsrMatrix::from_csr(
             a.nrows(),
             a.ncols(),
@@ -1700,6 +1703,11 @@ impl KPreconditioner for IluCsr {
 
 impl IluCsr {
     #[cfg(feature = "complex")]
+    /// Reports which kernel family backed the most recent complex factorization.
+    ///
+    /// `DegradedRealProjection` means the factorization path projected the complex system
+    /// to a real surrogate (typically Re(A)); treat this mode as provisional and do not use
+    /// it for complex robustness/performance claims.
     pub fn complex_kernel_mode(&self) -> IluComplexKernelMode {
         self.complex_kernel_mode
     }

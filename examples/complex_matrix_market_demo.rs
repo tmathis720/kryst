@@ -432,6 +432,7 @@ mod complex_demo {
         None,
         JacobiWeak,
         Ilu0Local,
+        IlutLocal,
         MpiBlockJacobiIlu0Local,
         LocalIluk { k: usize },
         ReplicatedFullIlu0,
@@ -443,6 +444,7 @@ mod complex_demo {
         None,
         JacobiWeak,
         Ilu0Local,
+        IlutLocal,
     }
 
     #[derive(Clone, Debug)]
@@ -648,6 +650,11 @@ mod complex_demo {
             if cfg.run_mode == RunMode::Scalability {
                 cfg.correctness_replicated_check = false;
             }
+            if cfg.pcs.iter().any(|pc| pc.is_ilut()) {
+                eprintln!(
+                    "⚠ --pcs includes ILUT for a complex run: current ILUT path is a degraded real projection and is not trusted for complex robustness benchmarking."
+                );
+            }
             if cfg.residual_history
                 && cfg.run_mode != RunMode::Correctness
                 && !cfg.residual_history_force
@@ -756,12 +763,13 @@ mod complex_demo {
             "none" | "off" => Ok(PcKind::None),
             "jacobi" | "jacobi-weak" | "weak-jacobi" => Ok(PcKind::JacobiWeak),
             "ilu0" | "ilu0-local" | "local-ilu0" => Ok(PcKind::Ilu0Local),
+            "ilut" | "ilut-local" | "local-ilut" => Ok(PcKind::IlutLocal),
             "replicated-ilu0" => Ok(PcKind::ReplicatedFullIlu0),
             "mpi-block-jacobi-ilu0" | "block-jacobi-ilu0" | "mpi-block-ilu0" => {
                 Ok(PcKind::MpiBlockJacobiIlu0Local)
             }
             other => Err(KError::InvalidInput(format!(
-                "invalid pc '{other}', expected none|jacobi|local-ilu0|local-iluk:<k>|replicated-ilu0|replicated-iluk:<k>|mpi-block-jacobi-ilu0"
+                "invalid pc '{other}', expected none|jacobi|local-ilu0|local-ilut|local-iluk:<k>|replicated-ilu0|replicated-iluk:<k>|mpi-block-jacobi-ilu0"
             ))),
         }
     }
@@ -875,6 +883,9 @@ mod complex_demo {
                 Self::Ilu0Local => {
                     "local ILU(0) (block-Jacobi ILU(0), zero overlap/local owned block)"
                 }
+                Self::IlutLocal => {
+                    "local ILUT [degraded/provisional complex path: real-projection fallback; not trusted for complex robustness benchmarking]"
+                }
                 Self::MpiBlockJacobiIlu0Local => {
                     "MPI block-Jacobi + local ILU(0) [block-Jacobi ILU(0), zero overlap/local owned block]"
                 }
@@ -899,6 +910,7 @@ mod complex_demo {
                 | Self::LocalIluk { .. }
                 | Self::ReplicatedFullIlu0
                 | Self::ReplicatedFullIluk { .. } => PcDispatchBranch::Ilu0Local,
+                Self::IlutLocal => PcDispatchBranch::IlutLocal,
             }
         }
 
@@ -908,10 +920,15 @@ mod complex_demo {
                 Self::None
                 | Self::JacobiWeak
                 | Self::Ilu0Local
+                | Self::IlutLocal
                 | Self::LocalIluk { .. }
                 | Self::ReplicatedFullIlu0
                 | Self::ReplicatedFullIluk { .. } => None,
             }
+        }
+
+        fn is_ilut(self) -> bool {
+            matches!(self, Self::IlutLocal)
         }
     }
 
@@ -1076,6 +1093,9 @@ mod complex_demo {
                     PcKind::Ilu0Local
                     | PcKind::MpiBlockJacobiIlu0Local
                     | PcKind::ReplicatedFullIlu0 => IluKind::Ilu0,
+                    PcKind::IlutLocal => IluKind::Ilut {
+                        params: Default::default(),
+                    },
                     PcKind::LocalIluk { k } | PcKind::ReplicatedFullIluk { k } => {
                         IluKind::Iluk { k }
                     }
@@ -1092,7 +1112,9 @@ mod complex_demo {
                     );
                 }
                 pc = Some(match spec.pc {
-                    PcKind::Ilu0Local | PcKind::LocalIluk { .. } => PcHandle::Ilu0(ilu),
+                    PcKind::Ilu0Local | PcKind::IlutLocal | PcKind::LocalIluk { .. } => {
+                        PcHandle::Ilu0(ilu)
+                    }
                     PcKind::MpiBlockJacobiIlu0Local => PcHandle::MpiBlockJacobiIlu0(ilu),
                     PcKind::ReplicatedFullIlu0 | PcKind::ReplicatedFullIluk { .. } => {
                         PcHandle::ReplicatedFull {
@@ -1106,6 +1128,24 @@ mod complex_demo {
                     }
                     PcKind::None | PcKind::JacobiWeak => unreachable!(),
                 });
+            }
+            PcDispatchBranch::IlutLocal => {
+                validate_local_ilu_owned_block(problem.csr_for_pc.as_ref())?;
+                let mut cfg = IluCsrConfig::default();
+                cfg.kind = IluKind::Ilut {
+                    params: Default::default(),
+                };
+                let mut ilu = IluCsr::new_with_config(cfg);
+                ilu.setup(problem.csr_for_pc.as_ref())?;
+                if bench_cfg.run_mode == RunMode::Correctness && problem.comm.rank() == 0 {
+                    let pivot_perturbation_count = None::<usize>;
+                    print_csr_for_pc_diagnostics(
+                        &spec.method_label(),
+                        &csr_pc_diag,
+                        pivot_perturbation_count,
+                    );
+                }
+                pc = Some(PcHandle::Ilu0(ilu));
             }
         }
         let setup_secs = setup_start.elapsed().as_secs_f64();
@@ -1847,6 +1887,7 @@ mod complex_demo {
             PcKind::None,
             PcKind::JacobiWeak,
             PcKind::Ilu0Local,
+            PcKind::IlutLocal,
             PcKind::MpiBlockJacobiIlu0Local,
         ];
 
@@ -1862,6 +1903,13 @@ mod complex_demo {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ilut_complex_label_explicitly_marks_degraded_provisional_path() {
+        let label = PcKind::IlutLocal.label();
+        assert!(label.contains("degraded/provisional"));
+        assert!(label.contains("real-projection"));
     }
 }
 
