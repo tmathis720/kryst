@@ -37,7 +37,7 @@ mod complex_demo {
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::jacobi::Jacobi;
     use kryst::solver::fgmres::{
-        FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, PipelinePolicy,
+        FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod,
         ResidualCheckPolicy,
     };
     use kryst::solver::{LinearSolver, MonitorAction, MonitorCallback};
@@ -433,6 +433,9 @@ mod complex_demo {
         JacobiWeak,
         Ilu0Local,
         MpiBlockJacobiIlu0Local,
+        LocalIluk { k: usize },
+        ReplicatedFullIlu0,
+        ReplicatedFullIluk { k: usize },
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -738,15 +741,27 @@ mod complex_demo {
     }
 
     fn parse_pc(token: &str) -> Result<PcKind, KError> {
-        match token.trim().to_ascii_lowercase().as_str() {
+        let token_norm = token.trim().to_ascii_lowercase();
+        if let Some(k_str) = token_norm.strip_prefix("local-iluk:") {
+            return Ok(PcKind::LocalIluk {
+                k: parse_positive_usize("local-iluk:k", k_str)?,
+            });
+        }
+        if let Some(k_str) = token_norm.strip_prefix("replicated-iluk:") {
+            return Ok(PcKind::ReplicatedFullIluk {
+                k: parse_positive_usize("replicated-iluk:k", k_str)?,
+            });
+        }
+        match token_norm.as_str() {
             "none" | "off" => Ok(PcKind::None),
             "jacobi" | "jacobi-weak" | "weak-jacobi" => Ok(PcKind::JacobiWeak),
             "ilu0" | "ilu0-local" | "local-ilu0" => Ok(PcKind::Ilu0Local),
+            "replicated-ilu0" => Ok(PcKind::ReplicatedFullIlu0),
             "mpi-block-jacobi-ilu0" | "block-jacobi-ilu0" | "mpi-block-ilu0" => {
                 Ok(PcKind::MpiBlockJacobiIlu0Local)
             }
             other => Err(KError::InvalidInput(format!(
-                "invalid pc '{other}', expected none|jacobi|ilu0|mpi-block-jacobi-ilu0"
+                "invalid pc '{other}', expected none|jacobi|local-ilu0|local-iluk:<k>|replicated-ilu0|replicated-iluk:<k>|mpi-block-jacobi-ilu0"
             ))),
         }
     }
@@ -863,6 +878,15 @@ mod complex_demo {
                 Self::MpiBlockJacobiIlu0Local => {
                     "MPI block-Jacobi + local ILU(0) [block-Jacobi ILU(0), zero overlap/local owned block]"
                 }
+                Self::LocalIluk { .. } => {
+                    "local ILU(k) (block-Jacobi ILU(k), zero overlap/local owned block)"
+                }
+                Self::ReplicatedFullIlu0 => {
+                    "replicated full ILU(0) [correctness only, not scalable]"
+                }
+                Self::ReplicatedFullIluk { .. } => {
+                    "replicated full ILU(k) [correctness only, not scalable]"
+                }
             }
         }
 
@@ -870,14 +894,23 @@ mod complex_demo {
             match self {
                 Self::None => PcDispatchBranch::None,
                 Self::JacobiWeak => PcDispatchBranch::JacobiWeak,
-                Self::Ilu0Local | Self::MpiBlockJacobiIlu0Local => PcDispatchBranch::Ilu0Local,
+                Self::Ilu0Local
+                | Self::MpiBlockJacobiIlu0Local
+                | Self::LocalIluk { .. }
+                | Self::ReplicatedFullIlu0
+                | Self::ReplicatedFullIluk { .. } => PcDispatchBranch::Ilu0Local,
             }
         }
 
         fn explicit_alias_of(self) -> Option<Self> {
             match self {
                 Self::MpiBlockJacobiIlu0Local => Some(Self::Ilu0Local),
-                Self::None | Self::JacobiWeak | Self::Ilu0Local => None,
+                Self::None
+                | Self::JacobiWeak
+                | Self::Ilu0Local
+                | Self::LocalIluk { .. }
+                | Self::ReplicatedFullIlu0
+                | Self::ReplicatedFullIluk { .. } => None,
             }
         }
     }
@@ -954,6 +987,14 @@ mod complex_demo {
             Jacobi(Jacobi),
             Ilu0(IluCsr),
             MpiBlockJacobiIlu0(IluCsr),
+            ReplicatedFull {
+                ilu: IluCsr,
+                global_n: usize,
+                global_row_start: usize,
+                local_n: usize,
+                scratch_in: std::sync::Mutex<Vec<S>>,
+                scratch_out: std::sync::Mutex<Vec<S>>,
+            },
         }
 
         impl PcHandle {
@@ -962,6 +1003,59 @@ mod complex_demo {
                     Self::Jacobi(pc) => pc,
                     Self::Ilu0(pc) => pc,
                     Self::MpiBlockJacobiIlu0(pc) => pc,
+                    Self::ReplicatedFull { .. } => self,
+                }
+            }
+        }
+        impl KPreconditioner for PcHandle {
+            type Scalar = S;
+            fn dims(&self) -> (usize, usize) {
+                match self {
+                    Self::Jacobi(pc) => KPreconditioner::dims(pc),
+                    Self::Ilu0(pc) => KPreconditioner::dims(pc),
+                    Self::MpiBlockJacobiIlu0(pc) => KPreconditioner::dims(pc),
+                    Self::ReplicatedFull { global_n, .. } => (*global_n, *global_n),
+                }
+            }
+            fn apply_s(
+                &self,
+                side: PcSide,
+                x: &[S],
+                y: &mut [S],
+                scratch: &mut BridgeScratch,
+            ) -> Result<(), KError> {
+                match self {
+                    Self::Jacobi(pc) => pc.apply_s(side, x, y, scratch),
+                    Self::Ilu0(pc) => pc.apply_s(side, x, y, scratch),
+                    Self::MpiBlockJacobiIlu0(pc) => pc.apply_s(side, x, y, scratch),
+                    Self::ReplicatedFull {
+                        ilu,
+                        global_n,
+                        global_row_start,
+                        local_n,
+                        scratch_in,
+                        scratch_out,
+                    } => {
+                        let mut in_full = scratch_in.lock().map_err(|_| {
+                            KError::InvalidInput(
+                                "failed to lock replicated ILU input scratch".into(),
+                            )
+                        })?;
+                        let mut out_full = scratch_out.lock().map_err(|_| {
+                            KError::InvalidInput(
+                                "failed to lock replicated ILU output scratch".into(),
+                            )
+                        })?;
+                        in_full.fill(S::zero());
+                        in_full[*global_row_start..(*global_row_start + *local_n)]
+                            .copy_from_slice(x);
+                        let _ = global_n;
+                        ilu.apply_s(side, &in_full, &mut out_full, scratch)?;
+                        y.copy_from_slice(
+                            &out_full[*global_row_start..(*global_row_start + *local_n)],
+                        );
+                        Ok(())
+                    }
                 }
             }
         }
@@ -978,7 +1072,15 @@ mod complex_demo {
             PcDispatchBranch::Ilu0Local => {
                 validate_local_ilu_owned_block(problem.csr_for_pc.as_ref())?;
                 let mut cfg = IluCsrConfig::default();
-                cfg.kind = IluKind::Ilu0;
+                cfg.kind = match spec.pc {
+                    PcKind::Ilu0Local
+                    | PcKind::MpiBlockJacobiIlu0Local
+                    | PcKind::ReplicatedFullIlu0 => IluKind::Ilu0,
+                    PcKind::LocalIluk { k } | PcKind::ReplicatedFullIluk { k } => {
+                        IluKind::Iluk { k }
+                    }
+                    PcKind::None | PcKind::JacobiWeak => IluKind::Ilu0,
+                };
                 let mut ilu = IluCsr::new_with_config(cfg);
                 ilu.setup(problem.csr_for_pc.as_ref())?;
                 if bench_cfg.run_mode == RunMode::Correctness && problem.comm.rank() == 0 {
@@ -989,10 +1091,20 @@ mod complex_demo {
                         pivot_perturbation_count,
                     );
                 }
-                pc = Some(if spec.pc == PcKind::Ilu0Local {
-                    PcHandle::Ilu0(ilu)
-                } else {
-                    PcHandle::MpiBlockJacobiIlu0(ilu)
+                pc = Some(match spec.pc {
+                    PcKind::Ilu0Local | PcKind::LocalIluk { .. } => PcHandle::Ilu0(ilu),
+                    PcKind::MpiBlockJacobiIlu0Local => PcHandle::MpiBlockJacobiIlu0(ilu),
+                    PcKind::ReplicatedFullIlu0 | PcKind::ReplicatedFullIluk { .. } => {
+                        PcHandle::ReplicatedFull {
+                            ilu,
+                            global_n: problem.global_n,
+                            global_row_start: problem.global_row_start,
+                            local_n: problem.local_n,
+                            scratch_in: std::sync::Mutex::new(vec![S::zero(); problem.global_n]),
+                            scratch_out: std::sync::Mutex::new(vec![S::zero(); problem.global_n]),
+                        }
+                    }
+                    PcKind::None | PcKind::JacobiWeak => unreachable!(),
                 });
             }
         }
