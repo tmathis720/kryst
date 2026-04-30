@@ -132,6 +132,7 @@ pub struct FgmresSolver {
     pub residual_check_policy: ResidualCheckPolicy,
     pub pipeline_policy: PipelinePolicy,
     pub stagnation_policy: FgmresStagnationPolicy,
+    pub min_inner_before_fallback: usize,
 }
 
 impl FgmresSolver {
@@ -167,6 +168,7 @@ impl FgmresSolver {
             residual_check_policy: ResidualCheckPolicy::OnConvergence,
             pipeline_policy: PipelinePolicy::FallbackToClassicalOnStagnation,
             stagnation_policy: FgmresStagnationPolicy::RestartClassicalToo,
+            min_inner_before_fallback: 4,
         }
     }
 
@@ -258,45 +260,50 @@ impl FgmresSolver {
         }
     }
 
-    pub(crate) fn stagnation_action(&mut self) -> (&'static str, bool) {
+    pub(crate) fn stagnation_action(&mut self, inner_iter: usize) -> (&'static str, bool) {
+        if inner_iter < self.min_inner_before_fallback {
+            return ("stagnation fallback gated by min-inner floor", false);
+        }
         let mut should_restart = false;
         let action = match self.stagnation_policy {
             FgmresStagnationPolicy::Disabled => "stagnation policy disabled",
-            FgmresStagnationPolicy::PipelineFallbackOnly => match (self.variant, self.pipeline_policy)
-            {
-                (FgmresVariant::Pipelined, PipelinePolicy::FallbackToClassicalOnStagnation) => {
-                    self.variant = FgmresVariant::Classical;
-                    should_restart = true;
-                    "switching to classical restart"
+            FgmresStagnationPolicy::PipelineFallbackOnly => {
+                match (self.variant, self.pipeline_policy) {
+                    (FgmresVariant::Pipelined, PipelinePolicy::FallbackToClassicalOnStagnation) => {
+                        self.variant = FgmresVariant::Classical;
+                        should_restart = true;
+                        "switching to classical restart"
+                    }
+                    (FgmresVariant::Pipelined, PipelinePolicy::PeriodicResidualReplacement) => {
+                        should_restart = true;
+                        "periodic residual replacement restart"
+                    }
+                    (FgmresVariant::Pipelined, PipelinePolicy::Strict) => {
+                        "strict pipelined policy: no fallback"
+                    }
+                    _ => "pipeline-only policy: no classical restart",
                 }
-                (FgmresVariant::Pipelined, PipelinePolicy::PeriodicResidualReplacement) => {
-                    should_restart = true;
-                    "periodic residual replacement restart"
+            }
+            FgmresStagnationPolicy::RestartClassicalToo => {
+                match (self.variant, self.pipeline_policy) {
+                    (FgmresVariant::Pipelined, PipelinePolicy::FallbackToClassicalOnStagnation) => {
+                        self.variant = FgmresVariant::Classical;
+                        should_restart = true;
+                        "switching to classical restart"
+                    }
+                    (FgmresVariant::Pipelined, PipelinePolicy::PeriodicResidualReplacement) => {
+                        should_restart = true;
+                        "periodic residual replacement restart"
+                    }
+                    (FgmresVariant::Pipelined, PipelinePolicy::Strict) => {
+                        "strict pipelined policy: no fallback"
+                    }
+                    _ => {
+                        should_restart = true;
+                        "restarting FGMRES"
+                    }
                 }
-                (FgmresVariant::Pipelined, PipelinePolicy::Strict) => {
-                    "strict pipelined policy: no fallback"
-                }
-                _ => "pipeline-only policy: no classical restart",
-            },
-            FgmresStagnationPolicy::RestartClassicalToo => match (self.variant, self.pipeline_policy)
-            {
-                (FgmresVariant::Pipelined, PipelinePolicy::FallbackToClassicalOnStagnation) => {
-                    self.variant = FgmresVariant::Classical;
-                    should_restart = true;
-                    "switching to classical restart"
-                }
-                (FgmresVariant::Pipelined, PipelinePolicy::PeriodicResidualReplacement) => {
-                    should_restart = true;
-                    "periodic residual replacement restart"
-                }
-                (FgmresVariant::Pipelined, PipelinePolicy::Strict) => {
-                    "strict pipelined policy: no fallback"
-                }
-                _ => {
-                    should_restart = true;
-                    "restarting FGMRES"
-                }
-            },
+            }
         };
         (action, should_restart)
     }
@@ -1320,7 +1327,7 @@ impl FgmresSolver {
                     stagnation_residuals.remove(0);
                 }
                 if stagnation_detected(&stagnation_residuals, stagnation_threshold) {
-                    let (action, should_restart) = self.stagnation_action();
+                    let (action, should_restart) = self.stagnation_action(j + 1);
                     log_krylov_stagnation("FGMRES", total_iters, res, action);
                     stagnation_residuals.clear();
                     if should_restart {
