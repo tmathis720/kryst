@@ -277,8 +277,64 @@ where
         Box::new(local_pc),
         dist_op.local_row_offset(),
         dist_op.local_nrows(),
+        local_apply_mode,
         native_plan,
     ))
+}
+
+#[cfg(all(feature = "mpi", feature = "backend-faer", not(feature = "complex")))]
+fn assemble_global_input(
+    comm: &UniverseComm,
+    x_local: &[f64],
+    global_len: usize,
+) -> Result<Vec<f64>, KError> {
+    use mpi::traits::*;
+    let mut out = vec![0.0; global_len];
+    match comm {
+        UniverseComm::Mpi(comm_impl) => {
+            let local_len = x_local.len() as i32;
+            let mut lengths = vec![0i32; comm_impl.size];
+            comm_impl
+                .world
+                .all_gather_into(&local_len, &mut lengths[..]);
+            let max_len = lengths.iter().copied().max().unwrap_or(0) as usize;
+            let mut padded = vec![0.0; max_len];
+            padded[..x_local.len()].copy_from_slice(x_local);
+            let mut gathered = vec![0.0; max_len * comm_impl.size];
+            if max_len > 0 {
+                comm_impl
+                    .world
+                    .all_gather_into(&padded[..], &mut gathered[..]);
+            }
+            let mut offset = 0usize;
+            for (r, &len_i32) in lengths.iter().enumerate() {
+                let len = len_i32.max(0) as usize;
+                if offset + len > global_len {
+                    return Err(KError::InvalidInput(
+                        "replicated apply allgatherv exceeded global length".into(),
+                    ));
+                }
+                let start = r * max_len;
+                out[offset..offset + len].copy_from_slice(&gathered[start..start + len]);
+                offset += len;
+            }
+            if offset != global_len {
+                return Err(KError::InvalidInput(format!(
+                    "replicated apply expected global_len={global_len}, assembled={offset}"
+                )));
+            }
+            Ok(out)
+        }
+        _ => {
+            if x_local.len() != global_len {
+                return Err(KError::InvalidInput(
+                    "replicated apply requires mpi communicator with distributed layout".into(),
+                ));
+            }
+            out.copy_from_slice(x_local);
+            Ok(out)
+        }
+    }
 }
 
 fn owner_of(gcol: usize, row_part: &[usize]) -> usize {
@@ -303,9 +359,13 @@ fn owner_of(gcol: usize, row_part: &[usize]) -> usize {
 
 /// Distributed block-Jacobi wrapper around a local ILU-like preconditioner.
 ///
-/// Each rank applies the local preconditioner to its owned slice without doing
-/// any MPI communication. The surrounding solver is responsible for distributing
-/// the vector consistently.
+/// Each rank usually applies the local preconditioner to its owned slice.
+///
+/// Optional replicated-global mode (opt-in via `pc_dist_local_apply=replicated_global`)
+/// first assembles the full input vector on every rank via Allgatherv-style communication,
+/// applies a replicated factorization, then extracts each rank's owned segment. This improves
+/// semantic correctness for replicated factors at the cost of O(N) memory/rank and O(N)
+/// communicated scalars per apply.
 pub struct BlockJacobiLocalPc<LPC>
 where
     LPC: LocalPreconditioner<f64>,
@@ -314,6 +374,7 @@ where
     local_pc: LPC,
     row_offset: usize,
     n_local: usize,
+    local_apply_mode: DistLocalApplyMode,
     #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
     native_plan: Option<NativeCouplingPlan>,
 }
@@ -327,6 +388,7 @@ where
         comm: UniverseComm,
         local_pc: LPC,
         row_offset: usize,
+        local_apply_mode: DistLocalApplyMode,
         #[cfg(all(feature = "backend-faer", not(feature = "complex")))] native_plan: Option<
             NativeCouplingPlan,
         >,
@@ -337,6 +399,7 @@ where
             local_pc,
             row_offset,
             n_local,
+            local_apply_mode,
             #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
             native_plan,
         }
@@ -373,6 +436,19 @@ where
 
         debug_assert!(matches!(side, PcSide::Left));
         x.with_scratch_input_local_output(|x_local, y_local| {
+            #[cfg(all(feature = "mpi", feature = "backend-faer", not(feature = "complex")))]
+            if self.local_apply_mode.is_replicated_global()
+                && self.native_plan.is_none()
+                && self.n_local != x.global_len()
+            {
+                let x_global = assemble_global_input(&self.comm, x_local, x.global_len())?;
+                let mut y_global = vec![0.0; x.global_len()];
+                self.local_pc.apply_local(&x_global, &mut y_global)?;
+                let start = self.row_offset;
+                let end = start + self.n_local;
+                y_local.copy_from_slice(&y_global[start..end]);
+                return Ok::<(), KError>(());
+            }
             self.local_pc.apply_local(x_local, y_local)?;
             #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
             if let Some(plan) = &self.native_plan {
@@ -390,6 +466,7 @@ pub struct BlockJacobiObjPc {
     local_pc: Box<dyn ObjPreconditioner>,
     row_offset: usize,
     n_local: usize,
+    local_apply_mode: DistLocalApplyMode,
     native_plan: Option<NativeCouplingPlan>,
 }
 
@@ -400,6 +477,7 @@ impl BlockJacobiObjPc {
         local_pc: Box<dyn ObjPreconditioner>,
         row_offset: usize,
         n_local: usize,
+        local_apply_mode: DistLocalApplyMode,
         native_plan: Option<NativeCouplingPlan>,
     ) -> Self {
         Self {
@@ -407,6 +485,7 @@ impl BlockJacobiObjPc {
             local_pc,
             row_offset,
             n_local,
+            local_apply_mode,
             native_plan,
         }
     }
@@ -424,6 +503,19 @@ impl DistributedPreconditioner for BlockJacobiObjPc {
             return Ok(());
         }
         x.with_scratch_input_local_output(|x_local, y_local| {
+            #[cfg(feature = "mpi")]
+            if self.local_apply_mode.is_replicated_global()
+                && self.native_plan.is_none()
+                && self.n_local != x.global_len()
+            {
+                let x_global = assemble_global_input(&self.comm, x_local, x.global_len())?;
+                let mut y_global = vec![0.0; x.global_len()];
+                self.local_pc.apply(side, &x_global, &mut y_global)?;
+                let start = self.row_offset;
+                let end = start + self.n_local;
+                y_local.copy_from_slice(&y_global[start..end]);
+                return Ok::<(), KError>(());
+            }
             self.local_pc.apply(side, x_local, y_local)?;
             if let Some(plan) = &self.native_plan {
                 plan.apply_remote_correction(x_local, y_local);
@@ -448,6 +540,7 @@ pub fn build_block_jacobi_ilu_pc(
         dist_op.comm(),
         ilu,
         dist_op.local_row_offset(),
+        local_apply_mode,
         maybe_native_plan(dist_op, local_apply_mode, supports_native, "ilu")?,
     ))
 }
@@ -469,6 +562,7 @@ pub fn build_block_jacobi_ilut_pc(
         dist_op.comm(),
         pc,
         dist_op.local_row_offset(),
+        local_apply_mode,
         maybe_native_plan(dist_op, local_apply_mode, supports_native, "ilut")?,
     ))
 }
@@ -491,6 +585,7 @@ pub fn build_block_jacobi_ilutp_pc(
         dist_op.comm(),
         pc,
         dist_op.local_row_offset(),
+        local_apply_mode,
         maybe_native_plan(dist_op, local_apply_mode, supports_native, "ilutp")?,
     ))
 }
@@ -552,6 +647,7 @@ pub fn build_block_jacobi_pc(
                         dist_op.comm(),
                         jacobi,
                         dist_op.local_row_offset(),
+                        opts.local_apply_mode,
                         maybe_native_plan(
                             dist_op,
                             opts.local_apply_mode,

@@ -256,6 +256,8 @@ pub enum DistLocalApplyMode {
     NativeHybrid,
     /// Require distributed-native apply, failing setup when unavailable.
     NativeStrict,
+    /// Opt-in expensive replicated-global apply for correctness checks.
+    ReplicatedGlobal,
 }
 
 impl Default for DistLocalApplyMode {
@@ -271,6 +273,7 @@ impl DistLocalApplyMode {
             Self::NativeLocalHalo => "local-halo",
             Self::NativeHybrid => "hybrid",
             Self::NativeStrict => "strict",
+            Self::ReplicatedGlobal => "replicated_global",
         }
     }
 
@@ -284,6 +287,10 @@ impl DistLocalApplyMode {
     pub fn requires_native(self) -> bool {
         matches!(self, Self::NativeStrict)
     }
+
+    pub fn is_replicated_global(self) -> bool {
+        matches!(self, Self::ReplicatedGlobal)
+    }
 }
 
 impl FromStr for DistLocalApplyMode {
@@ -296,6 +303,7 @@ impl FromStr for DistLocalApplyMode {
             | "distributed_halo" => Ok(Self::NativeLocalHalo),
             "hybrid" | "distributed_hybrid" | "native_hybrid" => Ok(Self::NativeHybrid),
             "distributed_strict" | "strict" | "native_strict" => Ok(Self::NativeStrict),
+            "replicated_global" | "replicated" => Ok(Self::ReplicatedGlobal),
             other => Err(KError::InvalidInput(format!(
                 "invalid pc_dist_local_apply mode: {other}"
             ))),
