@@ -440,6 +440,25 @@ mod complex_demo {
         diag_tiny_or_missing_count: usize,
     }
 
+    #[derive(Clone, Debug)]
+    struct RankSpread {
+        global_sum: f64,
+        rank_min: f64,
+        rank_max: f64,
+        rank0_local: f64,
+    }
+
+    #[derive(Clone, Debug)]
+    struct CsrForPcDiagnosticsGlobal {
+        nnz_local_block: RankSpread,
+        nnz_local_rows: RankSpread,
+        nnz_ratio: RankSpread,
+        diag_min_abs: RankSpread,
+        diag_max_abs: RankSpread,
+        diag_tiny_or_missing_count: RankSpread,
+        pivot_perturbation_count: Option<RankSpread>,
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum PcKind {
         None,
@@ -1273,13 +1292,16 @@ mod complex_demo {
                 };
                 let mut ilu = IluCsr::new_with_config(cfg);
                 ilu.setup(problem.csr_for_pc.as_ref())?;
-                if bench_cfg.run_mode == RunMode::Correctness && problem.comm.rank() == 0 {
+                if bench_cfg.run_mode == RunMode::Correctness {
                     let pivot_perturbation_count = None::<usize>;
-                    print_csr_for_pc_diagnostics(
-                        &spec.method_label(),
+                    let diag_global = reduce_csr_for_pc_diagnostics(
+                        &problem.comm,
                         &csr_pc_diag,
                         pivot_perturbation_count,
                     );
+                    if problem.comm.rank() == 0 {
+                        print_csr_for_pc_diagnostics(&spec.method_label(), &diag_global);
+                    }
                 }
                 pc = Some(match spec.pc {
                     PcKind::Ilu0Local | PcKind::IlutLocal | PcKind::LocalIluk { .. } => {
@@ -1307,13 +1329,16 @@ mod complex_demo {
                 };
                 let mut ilu = IluCsr::new_with_config(cfg);
                 ilu.setup(problem.csr_for_pc.as_ref())?;
-                if bench_cfg.run_mode == RunMode::Correctness && problem.comm.rank() == 0 {
+                if bench_cfg.run_mode == RunMode::Correctness {
                     let pivot_perturbation_count = None::<usize>;
-                    print_csr_for_pc_diagnostics(
-                        &spec.method_label(),
+                    let diag_global = reduce_csr_for_pc_diagnostics(
+                        &problem.comm,
                         &csr_pc_diag,
                         pivot_perturbation_count,
                     );
+                    if problem.comm.rank() == 0 {
+                        print_csr_for_pc_diagnostics(&spec.method_label(), &diag_global);
+                    }
                 }
                 pc = Some(PcHandle::Ilu0(ilu));
             }
@@ -1586,24 +1611,92 @@ mod complex_demo {
         }
     }
 
-    fn print_csr_for_pc_diagnostics(
-        method_label: &str,
-        diag: &CsrForPcDiagnostics,
+    fn rank_spread_from_locals(locals: &[f64], rank0_local: f64) -> RankSpread {
+        let global_sum = locals.iter().sum::<f64>();
+        let rank_min = locals.iter().copied().fold(f64::INFINITY, f64::min);
+        let rank_max = locals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        RankSpread {
+            global_sum,
+            rank_min: if rank_min.is_finite() { rank_min } else { 0.0 },
+            rank_max: if rank_max.is_finite() { rank_max } else { 0.0 },
+            rank0_local,
+        }
+    }
+
+    fn reduce_rank_spread<C: Comm<Vec = Vec<f64>>>(comm: &C, local: f64) -> RankSpread {
+        if comm.size() <= 1 {
+            return RankSpread {
+                global_sum: local,
+                rank_min: local,
+                rank_max: local,
+                rank0_local: local,
+            };
+        }
+        let global_sum = comm.all_reduce_f64(local);
+        let mut gathered = Vec::new();
+        comm.gather(&[local], &mut gathered, 0);
+        let (rank_min, rank_max) = if comm.rank() == 0 && !gathered.is_empty() {
+            (
+                gathered.iter().copied().fold(f64::INFINITY, f64::min),
+                gathered.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let rank0_local = if comm.rank() == 0 { local } else { 0.0 };
+        RankSpread {
+            global_sum,
+            rank_min,
+            rank_max,
+            rank0_local,
+        }
+    }
+
+    fn reduce_csr_for_pc_diagnostics<C: Comm<Vec = Vec<f64>>>(
+        comm: &C,
+        local: &CsrForPcDiagnostics,
         pivot_perturbation_count: Option<usize>,
-    ) {
-        let pivot_text = pivot_perturbation_count
-            .map(|v| v.to_string())
+    ) -> CsrForPcDiagnosticsGlobal {
+        CsrForPcDiagnosticsGlobal {
+            nnz_local_block: reduce_rank_spread(comm, local.nnz_local_block as f64),
+            nnz_local_rows: reduce_rank_spread(comm, local.nnz_local_rows as f64),
+            nnz_ratio: reduce_rank_spread(comm, local.nnz_ratio),
+            diag_min_abs: reduce_rank_spread(comm, local.diag_min_abs),
+            diag_max_abs: reduce_rank_spread(comm, local.diag_max_abs),
+            diag_tiny_or_missing_count: reduce_rank_spread(
+                comm,
+                local.diag_tiny_or_missing_count as f64,
+            ),
+            pivot_perturbation_count: pivot_perturbation_count
+                .map(|v| reduce_rank_spread(comm, v as f64)),
+        }
+    }
+
+    fn format_csr_for_pc_diagnostics(method_label: &str, diag: &CsrForPcDiagnosticsGlobal) -> String {
+        let pivot_text = diag
+            .pivot_perturbation_count
+            .as_ref()
+            .map(|v| {
+                format!(
+                    "global_sum={:.0}, rank_min={:.0}, rank_max={:.0}, rank0_local={:.0}",
+                    v.global_sum, v.rank_min, v.rank_max, v.rank0_local
+                )
+            })
             .unwrap_or_else(|| "N/A".to_string());
-        println!(
-            "[diag][rank0] {method_label}: nnz(A_ii)/nnz(local rows)={}/{}={:.3e}, |diag|min={:.3e}, |diag|max={:.3e}, tiny/missing diag={}, pivot perturbations={}",
-            diag.nnz_local_block,
-            diag.nnz_local_rows,
-            diag.nnz_ratio,
-            diag.diag_min_abs,
-            diag.diag_max_abs,
-            diag.diag_tiny_or_missing_count,
+        format!(
+            "[diag][rank0] {method_label}: nnz(A_ii):global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; nnz(local rows):global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; nnz_ratio:global_sum={:.3e},rank_min={:.3e},rank_max={:.3e},rank0_local={:.3e}; |diag|min:global_sum={:.3e},rank_min={:.3e},rank_max={:.3e},rank0_local={:.3e}; |diag|max:global_sum={:.3e},rank_min={:.3e},rank_max={:.3e},rank0_local={:.3e}; tiny/missing diag:global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; pivot perturbations={}",
+            diag.nnz_local_block.global_sum, diag.nnz_local_block.rank_min, diag.nnz_local_block.rank_max, diag.nnz_local_block.rank0_local,
+            diag.nnz_local_rows.global_sum, diag.nnz_local_rows.rank_min, diag.nnz_local_rows.rank_max, diag.nnz_local_rows.rank0_local,
+            diag.nnz_ratio.global_sum, diag.nnz_ratio.rank_min, diag.nnz_ratio.rank_max, diag.nnz_ratio.rank0_local,
+            diag.diag_min_abs.global_sum, diag.diag_min_abs.rank_min, diag.diag_min_abs.rank_max, diag.diag_min_abs.rank0_local,
+            diag.diag_max_abs.global_sum, diag.diag_max_abs.rank_min, diag.diag_max_abs.rank_max, diag.diag_max_abs.rank0_local,
+            diag.diag_tiny_or_missing_count.global_sum, diag.diag_tiny_or_missing_count.rank_min, diag.diag_tiny_or_missing_count.rank_max, diag.diag_tiny_or_missing_count.rank0_local,
             pivot_text
-        );
+        )
+    }
+
+    fn print_csr_for_pc_diagnostics(method_label: &str, diag: &CsrForPcDiagnosticsGlobal) {
+        println!("{}", format_csr_for_pc_diagnostics(method_label, diag));
     }
 
     fn configured_solver(spec: &RunSpec, bench_cfg: &BenchmarkConfig) -> FgmresSolver {
@@ -2198,6 +2291,33 @@ mod complex_demo {
                 other => panic!("unexpected error variant: {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn diagnostics_format_includes_global_and_rank_spread_fields() {
+        let diag = CsrForPcDiagnosticsGlobal {
+            nnz_local_block: rank_spread_from_locals(&[12.0, 30.0], 12.0),
+            nnz_local_rows: rank_spread_from_locals(&[10.0, 20.0], 10.0),
+            nnz_ratio: rank_spread_from_locals(&[1.2, 1.5], 1.2),
+            diag_min_abs: rank_spread_from_locals(&[1e-8, 1e-10], 1e-8),
+            diag_max_abs: rank_spread_from_locals(&[9.0, 11.0], 9.0),
+            diag_tiny_or_missing_count: rank_spread_from_locals(&[1.0, 4.0], 1.0),
+            pivot_perturbation_count: Some(rank_spread_from_locals(&[0.0, 3.0], 0.0)),
+        };
+        let text = format_csr_for_pc_diagnostics("ilu0-local", &diag);
+        assert!(text.contains("global_sum="));
+        assert!(text.contains("rank_min="));
+        assert!(text.contains("rank_max="));
+        assert!(text.contains("rank0_local="));
+    }
+
+    #[test]
+    fn diagnostics_capture_nonzero_off_rank_contribution() {
+        let spread = rank_spread_from_locals(&[5.0, 0.0, 7.0], 5.0);
+        assert_eq!(spread.rank0_local, 5.0);
+        assert_eq!(spread.global_sum, 12.0);
+        assert!(spread.global_sum > spread.rank0_local);
+        assert_eq!(spread.rank_max, 7.0);
     }
 }
 
