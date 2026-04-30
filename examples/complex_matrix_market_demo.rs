@@ -106,9 +106,9 @@ mod complex_demo {
             println!("FGMRES haptol: {:.3e}", config.fgmres_haptol);
             if config.run_mode == RunMode::Correctness {
                 println!(
-                    "Replicated operator checks: {}",
-                    if config.correctness_replicated_check {
-                        "enabled (metadata/checkpoint reporting)"
+                "Replicated check marker: {}",
+                    if config.mark_replicated_check {
+                        "enabled (metadata-only)"
                     } else {
                         "disabled"
                     }
@@ -153,7 +153,7 @@ mod complex_demo {
                 &mat_path,
                 &comm,
                 config.run_mode,
-                config.correctness_replicated_check,
+                config.mark_replicated_check,
             ) {
                 Ok(p) => p,
                 Err(err) => {
@@ -206,9 +206,9 @@ mod complex_demo {
                 println!(
                     "FGMRES side policy: requested left/symmetric are normalized to effective right preconditioning."
                 );
-                if config.run_mode == RunMode::Correctness && config.correctness_replicated_check {
+                if config.run_mode == RunMode::Correctness && config.mark_replicated_check {
                     println!(
-                        "Replicated check marker: ENABLED (log-only marker for cross-run comparison)."
+                        "Replicated check marker: ENABLED (metadata-only marker for cross-run comparison)."
                     );
                 }
                 let include_dof_col = matches!(
@@ -495,7 +495,7 @@ mod complex_demo {
         reorths: Vec<ReorthPolicy>,
         allow_stagnation_fallback: bool,
         min_inner_before_fallback: usize,
-        correctness_replicated_check: bool,
+        mark_replicated_check: bool,
         residual_history: bool,
         residual_history_file: Option<PathBuf>,
         residual_history_force: bool,
@@ -549,7 +549,7 @@ mod complex_demo {
                 reorths: vec![ReorthPolicy::IfNeeded],
                 allow_stagnation_fallback: false,
                 min_inner_before_fallback: 8,
-                correctness_replicated_check: false,
+                mark_replicated_check: false,
                 residual_history: false,
                 residual_history_file: None,
                 residual_history_force: false,
@@ -592,11 +592,11 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
                             );
                         }
                         std::process::exit(0);
@@ -607,8 +607,13 @@ mod complex_demo {
                         };
                         cfg.run_mode = RunMode::parse(&v)?;
                     }
+                    "--mark-replicated-check" => {
+                        cfg.mark_replicated_check = true;
+                    }
                     "--correctness-replicated-check" => {
-                        cfg.correctness_replicated_check = true;
+                        return Err(KError::InvalidInput(
+                            "--correctness-replicated-check is metadata-only and has been renamed to --mark-replicated-check".into(),
+                        ));
                     }
                     "--restarts" => {
                         let Some(v) = args.next() else {
@@ -716,7 +721,9 @@ mod complex_demo {
                         };
                         cfg.fgmres_haptol = parse_positive_finite_f64("--fgmres-haptol", &v)?;
                     }
-                    _ => {}
+                    _ => {
+                        return Err(KError::InvalidInput(format!("unknown argument: {arg}")));
+                    }
                 }
             }
             if cfg.measured_runs == 0 {
@@ -728,7 +735,7 @@ mod complex_demo {
                 cfg.restarts.push(200);
             }
             if cfg.run_mode == RunMode::Scalability {
-                cfg.correctness_replicated_check = false;
+                cfg.mark_replicated_check = false;
             }
             if cfg.pcs.iter().any(|pc| pc.is_ilut()) {
                 eprintln!(
@@ -1531,7 +1538,7 @@ mod complex_demo {
                     .as_deref()
                     .unwrap_or(residual_check_policy_label(spec.residual_check_policy))
             ) + if bench_cfg.run_mode == RunMode::Correctness
-                && bench_cfg.correctness_replicated_check
+                && bench_cfg.mark_replicated_check
             {
                 " [replicated-check=enabled]"
             } else {
@@ -1864,7 +1871,7 @@ mod complex_demo {
         mat_path: &Path,
         comm: &UniverseComm,
         _run_mode: RunMode,
-        _correctness_replicated_check: bool,
+        _mark_replicated_check: bool,
     ) -> Result<Problem, KError> {
         let mm = read_matrix_market(mat_path)?;
         let csr_sparse: SparseCsrMatrix<S> = mm.to_csr_matrix_scalar()?;
@@ -2290,6 +2297,25 @@ mod complex_demo {
                 KError::InvalidInput(msg) => assert!(msg.contains("--fgmres-haptol")),
                 other => panic!("unexpected error variant: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn benchmark_config_accepts_mark_replicated_check_flag() {
+        let cfg = BenchmarkConfig::from_args(vec!["--mark-replicated-check".to_string()])
+            .expect("parse args");
+        assert!(cfg.mark_replicated_check);
+    }
+
+    #[test]
+    fn benchmark_config_rejects_deprecated_correctness_replicated_check_flag() {
+        let err = BenchmarkConfig::from_args(vec!["--correctness-replicated-check".to_string()])
+            .expect_err("deprecated flag should be rejected");
+        match err {
+            KError::InvalidInput(msg) => {
+                assert!(msg.contains("renamed to --mark-replicated-check"))
+            }
+            other => panic!("unexpected error variant: {other:?}"),
         }
     }
 
