@@ -224,3 +224,34 @@ fn fgmres_reports_singular_reduced_system_on_zero_operator() {
 
     assert_eq!(stats.reason, ConvergedReason::DivergedReducedSystemSingular);
 }
+
+
+#[test]
+fn fgmres_happy_breakdown_candidate_validated_transition() {
+    let a = faer::Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 0.0 });
+    let mut solver = FgmresSolver::new(1e-12, 10, 4);
+    solver.set_happy_breakdown(true);
+    let mut pc = ScalePc { scale: 0.5 };
+    let b = [2.0f64, 4.0];
+    let mut x = [0.0f64; 2];
+    let mut work = Workspace::new(2);
+
+    let stats = solver
+        .solve_f64(
+            &a,
+            Some(&mut pc),
+            &b,
+            &mut x,
+            PcSide::Right,
+            &UniverseComm::NoComm(kryst::parallel::NoComm),
+            None,
+            Some(&mut work),
+        )
+        .expect("FGMRES happy-breakdown candidate should validate on true residual");
+
+    assert_eq!(stats.reason, ConvergedReason::ConvergedHappyBreakdown);
+    assert_eq!(
+        stats.residual_override_note.as_deref(),
+        Some("happy_breakdown_candidate_validated")
+    );
+}

@@ -1096,6 +1096,7 @@ impl FgmresSolver {
             let mut converged = false;
             let mut converged_reason: Option<ConvergedReason> = None;
             let mut hapend = false;
+            let mut happy_breakdown_candidate = false;
 
             for j in 0..m_this {
                 let arnoldi_norm_scale = match self.variant {
@@ -1155,7 +1156,7 @@ impl FgmresSolver {
                     hapend = true;
                     if self.happy_breakdown {
                         happy_breakdowns += 1;
-                        converged = true;
+                        happy_breakdown_candidate = true;
                         converged_reason = Some(ConvergedReason::ConvergedHappyBreakdown);
                     } else {
                         orthogonalization_rank_loss = true;
@@ -1515,7 +1516,8 @@ impl FgmresSolver {
                 stats.reason = reason;
             }
             if true_res <= thr {
-                stats.reason = if matches!(stats.reason, ConvergedReason::ConvergedHappyBreakdown) {
+                stats.reason = if happy_breakdown_candidate {
+                    stats.residual_override_note = Some("happy_breakdown_candidate_validated".into());
                     ConvergedReason::ConvergedHappyBreakdown
                 } else if true_res <= self.atol {
                     ConvergedReason::ConvergedAtol
@@ -1540,6 +1542,10 @@ impl FgmresSolver {
                 }
                 .unwrap_or(ConvergedReason::DivergedBreakdown);
                 break;
+            }
+
+            if happy_breakdown_candidate {
+                stats.residual_override_note = Some("false_happy_breakdown_rejected".into());
             }
 
             if total_iters >= self.maxits {
