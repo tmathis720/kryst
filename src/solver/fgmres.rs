@@ -156,7 +156,7 @@ impl FgmresSolver {
             restart: restart.max(1),
             orthog: OrthogMethod::ClassicalGS,
             cgs_refinement: CgsRefinement::IfNeeded,
-            haptol: 1e-12,
+            haptol: 1e-30,
             preallocate: false,
             on_restart: None,
             modify_pc_policy: ModifyPcPolicy::OnRestart,
