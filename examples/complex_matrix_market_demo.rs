@@ -89,7 +89,19 @@ mod complex_demo {
                     RunMode::Scalability => {
                         "distributed operator + local-block PC only, global norms only, lightweight reporting"
                     }
+                    RunMode::Robustness => {
+                        "robustness stress: fallback-enabled stagnation handling and restart-heavy behavior"
+                    }
                 }
+            );
+            println!(
+                "Stagnation fallback: {} (min_inner_before_fallback={})",
+                if config.run_mode == RunMode::Correctness || !config.allow_stagnation_fallback {
+                    "disabled"
+                } else {
+                    "enabled"
+                },
+                config.min_inner_before_fallback
             );
             if config.run_mode == RunMode::Correctness {
                 println!(
@@ -123,6 +135,7 @@ mod complex_demo {
         let cases: Vec<(&str, &str)> = match config.run_mode {
             RunMode::Correctness => all_cases.to_vec(),
             RunMode::Scalability => all_cases.to_vec(),
+            RunMode::Robustness => all_cases.to_vec(),
         };
 
         for (mat_name, descr) in cases {
@@ -460,7 +473,8 @@ mod complex_demo {
         variants: Vec<FgmresVariant>,
         orthogs: Vec<OrthogMethod>,
         reorths: Vec<ReorthPolicy>,
-        disable_stagnation_restart: bool,
+        allow_stagnation_fallback: bool,
+        min_inner_before_fallback: usize,
         correctness_replicated_check: bool,
         residual_history: bool,
         residual_history_file: Option<PathBuf>,
@@ -473,6 +487,7 @@ mod complex_demo {
     enum RunMode {
         Correctness,
         Scalability,
+        Robustness,
     }
 
     impl RunMode {
@@ -480,6 +495,7 @@ mod complex_demo {
             match self {
                 Self::Correctness => "correctness",
                 Self::Scalability => "scalability",
+                Self::Robustness => "robustness",
             }
         }
 
@@ -487,8 +503,9 @@ mod complex_demo {
             match token.trim().to_ascii_lowercase().as_str() {
                 "correctness" => Ok(Self::Correctness),
                 "scalability" => Ok(Self::Scalability),
+                "robustness" => Ok(Self::Robustness),
                 other => Err(KError::InvalidInput(format!(
-                    "invalid run mode '{other}', expected correctness|scalability"
+                    "invalid run mode '{other}', expected correctness|scalability|robustness"
                 ))),
             }
         }
@@ -509,7 +526,8 @@ mod complex_demo {
                 variants: vec![FgmresVariant::Classical],
                 orthogs: vec![OrthogMethod::ClassicalGS],
                 reorths: vec![ReorthPolicy::IfNeeded],
-                disable_stagnation_restart: false,
+                allow_stagnation_fallback: false,
+                min_inner_before_fallback: 8,
                 correctness_replicated_check: false,
                 residual_history: false,
                 residual_history_file: None,
@@ -545,11 +563,11 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--disable-stagnation-restart] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
                             );
                         }
                         std::process::exit(0);
@@ -598,8 +616,17 @@ mod complex_demo {
                     "--include-restart-200" => {
                         cfg.include_restart_200 = true;
                     }
-                    "--disable-stagnation-restart" => {
-                        cfg.disable_stagnation_restart = true;
+                    "--allow-stagnation-fallback" => {
+                        cfg.allow_stagnation_fallback = true;
+                    }
+                    "--min-inner-before-fallback" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --min-inner-before-fallback".into(),
+                            ));
+                        };
+                        cfg.min_inner_before_fallback =
+                            parse_positive_usize("--min-inner-before-fallback", &v)?;
                     }
                     "--fgmres-variant" => {
                         let Some(v) = args.next() else {
@@ -834,6 +861,13 @@ mod complex_demo {
                             vec![PcKind::Ilu0Local]
                         }
                     }
+                    RunMode::Robustness => {
+                        if problem.comm.size() > 1 {
+                            vec![PcKind::MpiBlockJacobiIlu0Local, PcKind::JacobiWeak]
+                        } else {
+                            vec![PcKind::Ilu0Local, PcKind::JacobiWeak]
+                        }
+                    }
                 }
             } else {
                 cfg.pcs.clone()
@@ -854,6 +888,7 @@ mod complex_demo {
                                     residual_check_policy: match cfg.run_mode {
                                         RunMode::Correctness => ResidualCheckPolicy::OnConvergence,
                                         RunMode::Scalability => ResidualCheckPolicy::RestartOnly,
+                                        RunMode::Robustness => ResidualCheckPolicy::RestartOnly,
                                     },
                                     orthog,
                                     reorth,
@@ -1547,12 +1582,16 @@ mod complex_demo {
         solver.reorth = spec.reorth;
         solver.atol = bench_cfg.atol;
         solver.dtol = 1e6;
-        if bench_cfg.disable_stagnation_restart {
-            solver.stagnation_policy = match spec.variant {
-                FgmresVariant::Classical => FgmresStagnationPolicy::Disabled,
-                FgmresVariant::Pipelined => FgmresStagnationPolicy::PipelineFallbackOnly,
+        solver.min_inner_before_fallback = bench_cfg.min_inner_before_fallback.max(1);
+        solver.stagnation_policy =
+            if bench_cfg.run_mode == RunMode::Correctness || !bench_cfg.allow_stagnation_fallback {
+                FgmresStagnationPolicy::Disabled
+            } else {
+                match spec.variant {
+                    FgmresVariant::Classical => FgmresStagnationPolicy::RestartClassicalToo,
+                    FgmresVariant::Pipelined => FgmresStagnationPolicy::PipelineFallbackOnly,
+                }
             };
-        }
         solver
     }
 
@@ -2022,6 +2061,13 @@ mod complex_demo {
                         vec![PcKind::Ilu0Local]
                     }
                 }
+                RunMode::Robustness => {
+                    if mpi_mode {
+                        vec![PcKind::MpiBlockJacobiIlu0Local, PcKind::JacobiWeak]
+                    } else {
+                        vec![PcKind::Ilu0Local, PcKind::JacobiWeak]
+                    }
+                }
             }
         } else {
             cfg.pcs.clone()
@@ -2065,6 +2111,29 @@ mod complex_demo {
         let label = PcKind::IlutLocal.label();
         assert!(label.contains("degraded/provisional"));
         assert!(label.contains("real-projection"));
+    }
+
+    #[test]
+    fn correctness_mode_disables_stagnation_fallback_and_keeps_restart_target() {
+        let spec = RunSpec {
+            restart: 50,
+            variant: FgmresVariant::Classical,
+            residual_check_policy: ResidualCheckPolicy::OnConvergence,
+            orthog: OrthogMethod::ClassicalGS,
+            reorth: ReorthPolicy::IfNeeded,
+            pc_side: PcSide::Right,
+            pc: PcKind::None,
+        };
+        let cfg = BenchmarkConfig {
+            run_mode: RunMode::Correctness,
+            allow_stagnation_fallback: true,
+            min_inner_before_fallback: 12,
+            ..BenchmarkConfig::default()
+        };
+        let solver = configured_solver(&spec, &cfg);
+        assert_eq!(solver.restart, 50);
+        assert_eq!(solver.stagnation_policy, FgmresStagnationPolicy::Disabled);
+        assert_eq!(solver.min_inner_before_fallback, 12);
     }
 }
 
