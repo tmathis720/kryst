@@ -103,6 +103,7 @@ mod complex_demo {
                 },
                 config.min_inner_before_fallback
             );
+            println!("FGMRES haptol: {:.3e}", config.fgmres_haptol);
             if config.run_mode == RunMode::Correctness {
                 println!(
                     "Replicated operator checks: {}",
@@ -479,6 +480,7 @@ mod complex_demo {
         residual_history: bool,
         residual_history_file: Option<PathBuf>,
         residual_history_force: bool,
+        fgmres_haptol: f64,
         row_scale: bool,
         row_scale_tiny: f64,
     }
@@ -532,6 +534,7 @@ mod complex_demo {
                 residual_history: false,
                 residual_history_file: None,
                 residual_history_force: false,
+                fgmres_haptol: 1e-30,
                 row_scale: false,
                 row_scale_tiny: 1e-15,
             }
@@ -540,8 +543,15 @@ mod complex_demo {
 
     impl BenchmarkConfig {
         fn from_env_args() -> Result<Self, KError> {
+            Self::from_args(env::args().skip(1))
+        }
+
+        fn from_args<I>(args: I) -> Result<Self, KError>
+        where
+            I: IntoIterator<Item = String>,
+        {
             let mut cfg = Self::default();
-            let mut args = env::args().skip(1).peekable();
+            let mut args = args.into_iter().peekable();
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--warmup-runs" => {
@@ -563,11 +573,11 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--correctness-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
                             );
                         }
                         std::process::exit(0);
@@ -679,6 +689,14 @@ mod complex_demo {
                         };
                         cfg.reorths = parse_reorth_csv("--fgmres-reorth", &v)?;
                     }
+                    "--fgmres-haptol" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --fgmres-haptol".into(),
+                            ));
+                        };
+                        cfg.fgmres_haptol = parse_positive_finite_f64("--fgmres-haptol", &v)?;
+                    }
                     _ => {}
                 }
             }
@@ -725,6 +743,20 @@ mod complex_demo {
         if val < 0.0 {
             return Err(KError::InvalidInput(format!(
                 "invalid value '{value}' for {flag}, expected non-negative float"
+            )));
+        }
+        Ok(val)
+    }
+
+    fn parse_positive_finite_f64(flag: &str, value: &str) -> Result<f64, KError> {
+        let val = value.parse::<f64>().map_err(|_| {
+            KError::InvalidInput(format!(
+                "invalid value '{value}' for {flag}, expected positive finite float"
+            ))
+        })?;
+        if !val.is_finite() || val <= 0.0 {
+            return Err(KError::InvalidInput(format!(
+                "invalid value '{value}' for {flag}, expected positive finite float"
             )));
         }
         Ok(val)
@@ -1582,6 +1614,7 @@ mod complex_demo {
         solver.reorth = spec.reorth;
         solver.atol = bench_cfg.atol;
         solver.dtol = 1e6;
+        solver.haptol = bench_cfg.fgmres_haptol;
         solver.min_inner_before_fallback = bench_cfg.min_inner_before_fallback.max(1);
         solver.stagnation_policy =
             if bench_cfg.run_mode == RunMode::Correctness || !bench_cfg.allow_stagnation_fallback {
@@ -2134,6 +2167,37 @@ mod complex_demo {
         assert_eq!(solver.restart, 50);
         assert_eq!(solver.stagnation_policy, FgmresStagnationPolicy::Disabled);
         assert_eq!(solver.min_inner_before_fallback, 12);
+    }
+
+    #[test]
+    fn benchmark_config_uses_conservative_default_fgmres_haptol() {
+        let cfg = BenchmarkConfig::default();
+        assert_eq!(cfg.fgmres_haptol, 1e-30);
+    }
+
+    #[test]
+    fn benchmark_config_parses_fgmres_haptol_override() {
+        let cfg = BenchmarkConfig::from_args(vec![
+            "--fgmres-haptol".to_string(),
+            "1e-22".to_string(),
+        ])
+        .expect("parse args");
+        assert_eq!(cfg.fgmres_haptol, 1e-22);
+    }
+
+    #[test]
+    fn benchmark_config_rejects_non_positive_or_non_finite_fgmres_haptol() {
+        for bad in ["0", "-1", "NaN", "inf"] {
+            let err = BenchmarkConfig::from_args(vec![
+                "--fgmres-haptol".to_string(),
+                bad.to_string(),
+            ])
+            .expect_err("invalid --fgmres-haptol should be rejected");
+            match err {
+                KError::InvalidInput(msg) => assert!(msg.contains("--fgmres-haptol")),
+                other => panic!("unexpected error variant: {other:?}"),
+            }
+        }
     }
 }
 
