@@ -435,14 +435,15 @@ where
         }
 
         debug_assert!(matches!(side, PcSide::Left));
+        let x_global_len = x.global_len();
         x.with_scratch_input_local_output(|x_local, y_local| {
             #[cfg(all(feature = "mpi", feature = "backend-faer", not(feature = "complex")))]
             if self.local_apply_mode.is_replicated_global()
                 && self.native_plan.is_none()
-                && self.n_local != x.global_len()
+                && self.n_local != x_global_len
             {
-                let x_global = assemble_global_input(&self.comm, x_local, x.global_len())?;
-                let mut y_global = vec![0.0; x.global_len()];
+                let x_global = assemble_global_input(&self.comm, x_local, x_global_len)?;
+                let mut y_global = vec![0.0; x_global_len];
                 self.local_pc.apply_local(&x_global, &mut y_global)?;
                 let start = self.row_offset;
                 let end = start + self.n_local;
@@ -502,14 +503,15 @@ impl DistributedPreconditioner for BlockJacobiObjPc {
         if self.n_local == 0 {
             return Ok(());
         }
+        let x_global_len = x.global_len();
         x.with_scratch_input_local_output(|x_local, y_local| {
             #[cfg(feature = "mpi")]
             if self.local_apply_mode.is_replicated_global()
                 && self.native_plan.is_none()
-                && self.n_local != x.global_len()
+                && self.n_local != x_global_len
             {
-                let x_global = assemble_global_input(&self.comm, x_local, x.global_len())?;
-                let mut y_global = vec![0.0; x.global_len()];
+                let x_global = assemble_global_input(&self.comm, x_local, x_global_len)?;
+                let mut y_global = vec![0.0; x_global_len];
                 self.local_pc.apply(side, &x_global, &mut y_global)?;
                 let start = self.row_offset;
                 let end = start + self.n_local;
