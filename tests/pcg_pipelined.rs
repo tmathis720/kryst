@@ -151,4 +151,52 @@ fn pipelined_reports_reduction_counts() -> Result<(), KError> {
     Ok(())
 }
 
+#[test]
+fn pipelined_reductions_scale_with_iteration_count() -> Result<(), KError> {
+    let n = 64;
+    let a = csr_poisson_1d(n);
+    let b: Vec<R> = vec![R::from(1.0); n];
+    let comm = UniverseComm::NoComm(NoComm);
+    let op: &dyn LinOp<S = f64> = &a;
+
+    let mut run = |tol: f64, maxits: usize| -> Result<_, KError> {
+        let mut solver =
+            PcgSolver::new(tol, maxits).with_variant(PcgVariant::Pipelined { replace_every: 0 });
+        let mut wk = Workspace::default();
+        solver.setup_workspace(&mut wk);
+        let mut x: Vec<R> = vec![R::default(); n];
+        let mut pc = Jacobi::new();
+        pc.setup(op)?;
+        solver.solve_with_comm(
+            op,
+            Some(&mut pc),
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut wk),
+        )
+    };
+
+    let short = run(1e-2, 4)?;
+    let long = run(1e-12, 150)?;
+    assert!(long.iterations > short.iterations);
+    assert!(long.counters.num_global_reductions > short.counters.num_global_reductions);
+
+    // Pipelined PCG executes ~2 iterative reductions/iteration plus startup overhead.
+    let delta_iter = long.iterations - short.iterations;
+    let delta_red = long
+        .counters
+        .num_global_reductions
+        .saturating_sub(short.counters.num_global_reductions);
+    assert!(
+        delta_red >= delta_iter,
+        "expected reductions to grow at least linearly with iterations (Δred={}, Δiter={})",
+        delta_red,
+        delta_iter
+    );
+    Ok(())
+}
+
 mod fixtures;
