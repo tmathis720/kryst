@@ -217,7 +217,10 @@ mod complex_demo {
                 );
                 if config.run_mode == RunMode::Scalability {
                     println!(
-                        "{:<36} {:<34} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>12}",
+                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>12}",
+                        "Op",
+                        "Exec",
+                        "PCdom",
                         "Method",
                         "Effective policy",
                         "Med(s)",
@@ -230,10 +233,13 @@ mod complex_demo {
                         "Rec/Reported",
                         "DOF/s"
                     );
-                    println!("{}", "-".repeat(158));
+                    println!("{}", "-".repeat(184));
                 } else if include_dof_col {
                     println!(
-                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                        "Op",
+                        "Exec",
+                        "PCdom",
                         "Method",
                         "Requested policy",
                         "Effective policy",
@@ -252,10 +258,13 @@ mod complex_demo {
                         "Reason",
                         "DOF/s"
                     );
-                    println!("{}", "-".repeat(286));
+                    println!("{}", "-".repeat(312));
                 } else {
                     println!(
-                        "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26}",
+                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26}",
+                        "Op",
+                        "Exec",
+                        "PCdom",
                         "Method",
                         "Requested policy",
                         "Effective policy",
@@ -273,8 +282,9 @@ mod complex_demo {
                         "x_err(rel)",
                         "Reason"
                     );
-                    println!("{}", "-".repeat(270));
+                    println!("{}", "-".repeat(296));
                 }
+                println!("Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global matrix ILU, own0=owned-block overlap=0 local ILU/ASM, n/a=no ILU domain).");
             }
 
             let runs = RunSpec::build_default_matrix(&config, &problem);
@@ -401,6 +411,9 @@ mod complex_demo {
     }
 
     struct ResultRow {
+        operator_storage: &'static str,
+        execution_backend: &'static str,
+        pc_domain: &'static str,
         method: String,
         requested_policy: String,
         effective_policy: String,
@@ -995,6 +1008,26 @@ mod complex_demo {
         }
     }
 
+    fn operator_storage_label(_problem: &Problem) -> &'static str {
+        "csr-cx"
+    }
+
+    fn execution_backend_label(problem: &Problem) -> &'static str {
+        match problem.backend {
+            CsrBackend::Serial => "ser",
+            CsrBackend::Replicated => "mpi-repl",
+            CsrBackend::Distributed => "mpi-row",
+        }
+    }
+
+    fn pc_domain_label(pc: PcKind) -> &'static str {
+        match pc {
+            PcKind::ReplicatedFullIlu0 | PcKind::ReplicatedFullIluk { .. } => "full",
+            PcKind::Ilu0Local | PcKind::IlutLocal | PcKind::MpiBlockJacobiIlu0Local | PcKind::LocalIluk { .. } => "own0",
+            PcKind::None | PcKind::JacobiWeak => "n/a",
+        }
+    }
+
     impl PcKind {
         fn label(&self) -> &'static str {
             match self {
@@ -1520,6 +1553,9 @@ mod complex_demo {
         };
 
         Ok(ResultRow {
+            operator_storage: operator_storage_label(problem),
+            execution_backend: execution_backend_label(problem),
+            pc_domain: pc_domain_label(spec.pc),
             method: format!(
                 "{} [row-scale={}]",
                 spec.method_label(),
@@ -1793,7 +1829,10 @@ mod complex_demo {
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             return format!(
-                "{:<36} {:<34} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>12}",
+                "{:<7} {:<8} {:<6} {:<36} {:<34} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>12}",
+                row.operator_storage,
+                row.execution_backend,
+                row.pc_domain,
                 row.method,
                 row.effective_policy,
                 row.median_solve_secs,
@@ -1825,7 +1864,10 @@ mod complex_demo {
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             format!(
-                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?} {:>12}",
+                "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?} {:>12}",
+                row.operator_storage,
+                row.execution_backend,
+                row.pc_domain,
                 row.method,
                 row.requested_policy,
                 row.effective_policy,
@@ -1846,7 +1888,10 @@ mod complex_demo {
             )
         } else {
             format!(
-                "{:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?}",
+                "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?}",
+                row.operator_storage,
+                row.execution_backend,
+                row.pc_domain,
                 row.method,
                 row.requested_policy,
                 row.effective_policy,
@@ -2168,6 +2213,15 @@ mod complex_demo {
         let rendered = render_result_row(&row, RunMode::Correctness, &problem);
         assert!(rendered.contains(&row.requested_policy));
         assert!(rendered.contains(&row.effective_policy));
+        assert!(rendered.contains("csr-cx"));
+        assert!(rendered.contains("ser"));
+    }
+
+    #[test]
+    fn metadata_labels_snapshot() {
+        assert_eq!(pc_domain_label(PcKind::ReplicatedFullIlu0), "full");
+        assert_eq!(pc_domain_label(PcKind::Ilu0Local), "own0");
+        assert_eq!(pc_domain_label(PcKind::None), "n/a");
     }
 
     #[test]
