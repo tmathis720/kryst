@@ -35,8 +35,8 @@ use std::sync::Arc;
 use crate::matrix::op::CsrOp;
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use super::{DistLocalApplyMode, GlobalPcKind, LocalPcKind, MpiPcOptions};
-use super::{DistVecS, DistributedPreconditioner};
+use super::{GlobalPcKind, LocalPcKind, MpiPcOptions};
+use super::{DistLocalApplyMode, DistVecS, DistributedPreconditioner};
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
 #[derive(Clone)]
