@@ -217,7 +217,7 @@ mod complex_demo {
                 );
                 if config.run_mode == RunMode::Scalability {
                     println!(
-                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>12}",
+                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>17} {:>14} {:>12}",
                         "Op",
                         "Exec",
                         "PCdom",
@@ -229,14 +229,14 @@ mod complex_demo {
                         "Rst",
                         "Inn",
                         "Pfb",
-                        "Reds",
+                        "Reds(obs/wait/model)",
                         "Rec/Reported",
                         "DOF/s"
                     );
-                    println!("{}", "-".repeat(184));
+                    println!("{}", "-".repeat(196));
                 } else if include_dof_col {
                     println!(
-                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
                         "Op",
                         "Exec",
                         "PCdom",
@@ -250,7 +250,6 @@ mod complex_demo {
                         "Rst",
                         "Inn",
                         "Pfb",
-                        "Reds",
                         "Rec/Reported",
                         "True(explicit)",
                         "True(rel)",
@@ -258,10 +257,10 @@ mod complex_demo {
                         "Reason",
                         "DOF/s"
                     );
-                    println!("{}", "-".repeat(312));
+                    println!("{}", "-".repeat(304));
                 } else {
                     println!(
-                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14} {:>14} {:>14} {:>14} {:>26}",
+                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26}",
                         "Op",
                         "Exec",
                         "PCdom",
@@ -275,14 +274,13 @@ mod complex_demo {
                         "Rst",
                         "Inn",
                         "Pfb",
-                        "Reds",
                         "Rec/Reported",
                         "True(explicit)",
                         "True(rel)",
                         "x_err(rel)",
                         "Reason"
                     );
-                    println!("{}", "-".repeat(296));
+                    println!("{}", "-".repeat(288));
                 }
                 println!("Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global matrix ILU, own0=owned-block overlap=0 local ILU/ASM, n/a=no ILU domain).");
             }
@@ -422,6 +420,8 @@ mod complex_demo {
         min_solve_secs: f64,
         iterations: usize,
         reductions: usize,
+        overlapped_reduction_waits: usize,
+        model_predicted_reductions: Option<usize>,
         restart_count: Option<usize>,
         inner_iterations_last_cycle: Option<usize>,
         pipeline_fallbacks: Option<usize>,
@@ -1476,6 +1476,11 @@ mod complex_demo {
         let median_solve_secs = median(&mut solve_times);
 
         let reductions = stats.counters.num_global_reductions;
+        let overlapped_reduction_waits = stats.counters.overlap_global_reductions;
+        let model_predicted_reductions = stats
+            .reduction_model
+            .as_ref()
+            .map(|model| model.total_for(stats.iterations));
         let (explicit_true_residual, explicit_true_residual_rel) =
             if bench_cfg.run_mode == RunMode::Correctness {
                 let mut ax = vec![S::zero(); b.len()];
@@ -1585,6 +1590,8 @@ mod complex_demo {
             min_solve_secs,
             iterations: stats.iterations,
             reductions,
+            overlapped_reduction_waits,
+            model_predicted_reductions,
             restart_count: stats.fgmres_counters.as_ref().map(|c| c.restart_count),
             inner_iterations_last_cycle: stats
                 .fgmres_counters
@@ -1829,7 +1836,7 @@ mod complex_demo {
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             return format!(
-                "{:<7} {:<8} {:<6} {:<36} {:<34} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>12}",
+                "{:<7} {:<8} {:<6} {:<36} {:<34} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>17} {:>14.2e} {:>12}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
@@ -1841,7 +1848,14 @@ mod complex_demo {
                 rst,
                 inn,
                 pfb,
-                row.reductions,
+                format!(
+                    "{}/{}/{}",
+                    row.reductions,
+                    row.overlapped_reduction_waits,
+                    row.model_predicted_reductions
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "n/a".to_string())
+                ),
                 row.reported_residual,
                 dof
             );
@@ -1864,7 +1878,7 @@ mod complex_demo {
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             format!(
-                "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?} {:>12}",
+                "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>26?} {:>12}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
@@ -1878,7 +1892,6 @@ mod complex_demo {
                 rst,
                 inn,
                 pfb,
-                row.reductions,
                 row.reported_residual,
                 explicit_true,
                 explicit_true_rel,
@@ -1888,7 +1901,7 @@ mod complex_demo {
             )
         } else {
             format!(
-                "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>6} {:>14.2e} {:>14} {:>14} {:>14} {:>26?}",
+                "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>26?}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
@@ -1902,7 +1915,6 @@ mod complex_demo {
                 rst,
                 inn,
                 pfb,
-                row.reductions,
                 row.reported_residual,
                 explicit_true,
                 explicit_true_rel,
