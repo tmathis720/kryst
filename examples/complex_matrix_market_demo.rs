@@ -1480,7 +1480,7 @@ mod complex_demo {
         let model_predicted_reductions = stats
             .reduction_model
             .as_ref()
-            .map(|model| model.total_for(stats.iterations));
+            .map(|model| model.estimate_total(stats.iterations));
         let (explicit_true_residual, explicit_true_residual_rel) =
             if bench_cfg.run_mode == RunMode::Correctness {
                 let mut ax = vec![S::zero(); b.len()];
