@@ -1197,6 +1197,20 @@ mod complex_demo {
             .collect()
     }
 
+    fn scale_csr_rows(matrix: &SparseCsrMatrix<S>, row_scale: &[R]) -> SparseCsrMatrix<S> {
+        debug_assert_eq!(matrix.nrows(), row_scale.len());
+        let row_ptr = matrix.row_ptr().to_vec();
+        let col_idx = matrix.col_idx().to_vec();
+        let mut values = matrix.values().to_vec();
+        for r in 0..matrix.nrows() {
+            let d = S::from_real(row_scale[r]);
+            for nz in row_ptr[r]..row_ptr[r + 1] {
+                values[nz] *= d;
+            }
+        }
+        SparseCsrMatrix::from_csr(matrix.nrows(), matrix.ncols(), row_ptr, col_idx, values)
+    }
+
     fn run_once(
         problem: &Problem,
         spec: &RunSpec,
@@ -1216,6 +1230,14 @@ mod complex_demo {
             } else {
                 (None, problem.op.clone())
             };
+        let pc_csr: Arc<SparseCsrMatrix<S>> = if bench_cfg.row_scale {
+            let row_scale = row_scaling.as_ref().ok_or_else(|| {
+                KError::InvalidInput("row scaling requested but factors were not computed".into())
+            })?;
+            Arc::new(scale_csr_rows(problem.csr_for_pc.as_ref(), row_scale))
+        } else {
+            problem.csr_for_pc.clone()
+        };
         let b_scaled: Vec<S> = if let Some(d) = &row_scaling {
             b_unscaled
                 .iter()
@@ -1227,8 +1249,7 @@ mod complex_demo {
         };
         let b = &b_scaled;
         let effective_pc_side = normalized_fgmres_side(spec.pc_side);
-        let csr_pc_diag =
-            csr_for_pc_diagnostics(problem.csr_for_pc.as_ref(), problem.local_rows_nnz);
+        let csr_pc_diag = csr_for_pc_diagnostics(pc_csr.as_ref(), problem.local_rows_nnz);
         enum PcHandle {
             Jacobi(Jacobi),
             Ilu0(IluCsr),
@@ -1312,11 +1333,11 @@ mod complex_demo {
             PcDispatchBranch::None => {}
             PcDispatchBranch::JacobiWeak => {
                 let mut jacobi = Jacobi::new();
-                jacobi.setup(problem.csr_for_pc.as_ref())?;
+                jacobi.setup(pc_csr.as_ref())?;
                 pc = Some(PcHandle::Jacobi(jacobi));
             }
             PcDispatchBranch::Ilu0Local => {
-                validate_local_ilu_owned_block(problem.csr_for_pc.as_ref())?;
+                validate_local_ilu_owned_block(pc_csr.as_ref())?;
                 let mut cfg = IluCsrConfig::default();
                 cfg.kind = match spec.pc {
                     PcKind::Ilu0Local
@@ -1331,7 +1352,7 @@ mod complex_demo {
                     PcKind::None | PcKind::JacobiWeak => IluKind::Ilu0,
                 };
                 let mut ilu = IluCsr::new_with_config(cfg);
-                ilu.setup(problem.csr_for_pc.as_ref())?;
+                ilu.setup(pc_csr.as_ref())?;
                 if bench_cfg.run_mode == RunMode::Correctness {
                     let pivot_perturbation_count = None::<usize>;
                     let diag_global = reduce_csr_for_pc_diagnostics(
@@ -1362,13 +1383,13 @@ mod complex_demo {
                 });
             }
             PcDispatchBranch::IlutLocal => {
-                validate_local_ilu_owned_block(problem.csr_for_pc.as_ref())?;
+                validate_local_ilu_owned_block(pc_csr.as_ref())?;
                 let mut cfg = IluCsrConfig::default();
                 cfg.kind = IluKind::Ilut {
                     params: Default::default(),
                 };
                 let mut ilu = IluCsr::new_with_config(cfg);
-                ilu.setup(problem.csr_for_pc.as_ref())?;
+                ilu.setup(pc_csr.as_ref())?;
                 if bench_cfg.run_mode == RunMode::Correctness {
                     let pivot_perturbation_count = None::<usize>;
                     let diag_global = reduce_csr_for_pc_diagnostics(
@@ -2234,6 +2255,29 @@ mod complex_demo {
         assert_eq!(pc_domain_label(PcKind::ReplicatedFullIlu0), "full");
         assert_eq!(pc_domain_label(PcKind::Ilu0Local), "own0");
         assert_eq!(pc_domain_label(PcKind::None), "n/a");
+    }
+
+    #[test]
+    fn row_scaled_mode_scales_pc_setup_matrix_rows() {
+        let pc = SparseCsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![
+                S::new(2.0, 0.0),
+                S::new(0.0, 0.0),
+                S::new(0.0, 0.0),
+                S::new(4.0, 0.0),
+            ],
+        );
+        let row_scale = compute_row_scaling(&pc, 1e-15);
+        let pc_scaled = scale_csr_rows(&pc, &row_scale);
+
+        assert_eq!(row_scale, vec![0.5, 0.25]);
+        assert_eq!(pc_scaled.values()[0], S::one());
+        assert_eq!(pc_scaled.values()[3], S::one());
+        assert_ne!(pc_scaled.values(), pc.values());
     }
 
     #[test]
