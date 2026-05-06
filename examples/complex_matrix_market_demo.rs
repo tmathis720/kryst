@@ -990,12 +990,12 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             "jacobi" | "jacobi-weak" | "weak-jacobi" => Ok(PcKind::JacobiWeak),
             "ilu0" | "ilu0-local" | "local-ilu0" => Ok(PcKind::Ilu0Local),
             "ilut" | "ilut-local" | "local-ilut" => Ok(PcKind::IlutLocal),
-            "replicated-ilu0" => Ok(PcKind::ReplicatedFullIlu0),
+            "replicated-ilu0" | "replicated-full-ilu0" => Ok(PcKind::ReplicatedFullIlu0),
             "mpi-block-jacobi-ilu0" | "block-jacobi-ilu0" | "mpi-block-ilu0" => {
                 Ok(PcKind::MpiBlockJacobiIlu0Local)
             }
             other => Err(KError::InvalidInput(format!(
-                "invalid pc '{other}', expected none|jacobi|local-ilu0|local-ilut|local-iluk:<k>|replicated-ilu0|replicated-iluk:<k>|mpi-block-jacobi-ilu0"
+                "invalid pc '{other}', expected none|jacobi|local-ilu0|local-ilut|local-iluk:<k>|replicated-ilu0|replicated-full-ilu0|replicated-iluk:<k>|mpi-block-jacobi-ilu0"
             ))),
         }
     }
@@ -1029,9 +1029,10 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                     RunMode::Correctness => {
                         if problem.comm.size() > 1 {
                             vec![
-                                PcKind::MpiBlockJacobiIlu0Local,
-                                PcKind::JacobiWeak,
+                                PcKind::ReplicatedFullIlu0,
                                 PcKind::None,
+                                PcKind::JacobiWeak,
+                                PcKind::MpiBlockJacobiIlu0Local,
                             ]
                         } else {
                             vec![PcKind::Ilu0Local, PcKind::JacobiWeak, PcKind::None]
@@ -2795,9 +2796,10 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 RunMode::Correctness => {
                     if mpi_mode {
                         vec![
-                            PcKind::MpiBlockJacobiIlu0Local,
-                            PcKind::JacobiWeak,
+                            PcKind::ReplicatedFullIlu0,
                             PcKind::None,
+                            PcKind::JacobiWeak,
+                            PcKind::MpiBlockJacobiIlu0Local,
                         ]
                     } else {
                         vec![PcKind::Ilu0Local, PcKind::JacobiWeak, PcKind::None]
@@ -2822,15 +2824,52 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             cfg.pcs.clone()
         };
 
+        assert_eq!(
+            pcs,
+            vec![
+                PcKind::ReplicatedFullIlu0,
+                PcKind::None,
+                PcKind::JacobiWeak,
+                PcKind::MpiBlockJacobiIlu0Local,
+            ]
+        );
+
         let mut seen = std::collections::BTreeSet::new();
-        for pc in pcs {
-            let key = pc.semantic_experiment_key(mpi_mode);
-            assert!(
-                seen.insert(key.clone()),
-                "duplicate semantic PC experiment: {key}"
-            );
+        for &restart in &cfg.restarts {
+            for &variant in &cfg.variants {
+                for &orthog in &cfg.orthogs {
+                    for &reorth in &cfg.reorths {
+                        for &pc in &pcs {
+                            let key = format!(
+                                "restart={restart}|variant={}|orthog={}|reorth={}|pc={}",
+                                variant_label(variant),
+                                orthog_label(orthog),
+                                reorth_label(reorth),
+                                pc.semantic_experiment_key(mpi_mode)
+                            );
+                            assert!(
+                                seen.insert(key.clone()),
+                                "duplicate semantic benchmark row: {key}"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
+
+    #[test]
+    fn parse_pc_accepts_replicated_full_ilu0_alias() {
+        assert_eq!(
+            parse_pc("replicated-full-ilu0").expect("parse replicated-full-ilu0"),
+            PcKind::ReplicatedFullIlu0
+        );
+        assert_eq!(
+            parse_pc("replicated-ilu0").expect("parse replicated-ilu0"),
+            PcKind::ReplicatedFullIlu0
+        );
+    }
+
     #[test]
     fn preconditioner_dispatch_variants_are_distinct_or_explicit_aliases() {
         let variants = [
