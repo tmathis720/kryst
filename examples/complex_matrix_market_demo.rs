@@ -26,18 +26,18 @@ mod complex_demo {
     use kryst::algebra::bridge::BridgeScratch;
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
-    use kryst::matrix::DistCsrOp;
     use kryst::matrix::dist_csr::DistributedPlanDiagnostics;
     use kryst::matrix::sparse::CsrMatrix as SparseCsrMatrix;
+    use kryst::matrix::DistCsrOp;
     use kryst::ops::klinop::KLinOp;
     use kryst::ops::kpc::KPreconditioner;
     use kryst::parallel::{Comm, UniverseComm};
-    use kryst::preconditioner::PcSide;
-    use kryst::preconditioner::Preconditioner;
     use kryst::preconditioner::ilu_csr::{
         IluCsr, IluCsrConfig, IluKind, ReorderingKind, ReorderingOptions,
     };
     use kryst::preconditioner::jacobi::Jacobi;
+    use kryst::preconditioner::PcSide;
+    use kryst::preconditioner::Preconditioner;
     use kryst::solver::fgmres::{
         FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, ResidualCheckPolicy,
     };
@@ -172,6 +172,7 @@ mod complex_demo {
 
             let rhs_norm2_local: f64 = problem.rhs.iter().map(|v| v.abs2()).sum();
             let rhs_norm = problem.comm.all_reduce_f64(rhs_norm2_local).sqrt();
+            let runs = RunSpec::build_default_matrix(&config, &problem);
             if rank == 0 {
                 println!(
                     "=== [{} mode] {descr} — {} ===",
@@ -203,6 +204,10 @@ mod complex_demo {
                     );
                 }
                 println!("‖b_unscaled‖₂ = {:.3e}", rhs_norm);
+                println!(
+                    "{}",
+                    format_dist_policy_report(&config, runs.first(), &problem)
+                );
                 println!("Residual semantics: rec/reported = solver recurrence/monitor residual.");
                 if config.run_mode == RunMode::Correctness {
                     println!(
@@ -295,8 +300,6 @@ mod complex_demo {
                     "Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global matrix ILU, own0=owned-block overlap=0 local ILU/ASM, n/a=no ILU domain)."
                 );
             }
-
-            let runs = RunSpec::build_default_matrix(&config, &problem);
 
             for spec in runs {
                 match run_once(&problem, &spec, &config) {
@@ -518,6 +521,7 @@ mod complex_demo {
         variants: Vec<FgmresVariant>,
         orthogs: Vec<OrthogMethod>,
         reorths: Vec<ReorthPolicy>,
+        dist_policy: DistPolicyMode,
         allow_stagnation_fallback: bool,
         min_inner_before_fallback: usize,
         mark_replicated_check: bool,
@@ -538,6 +542,15 @@ mod complex_demo {
     }
 
     impl RunMode {
+        fn default_dist_policy(self) -> DistPolicyMode {
+            match self {
+                Self::Correctness => DistPolicyMode::Off,
+                Self::Scalability => DistPolicyMode::Auto,
+                // Robustness keeps the requested restart/variant unless explicitly opted in.
+                Self::Robustness => DistPolicyMode::Off,
+            }
+        }
+
         fn label(self) -> &'static str {
             match self {
                 Self::Correctness => "correctness",
@@ -553,6 +566,31 @@ mod complex_demo {
                 "robustness" => Ok(Self::Robustness),
                 other => Err(KError::InvalidInput(format!(
                     "invalid run mode '{other}', expected correctness|scalability|robustness"
+                ))),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum DistPolicyMode {
+        Off,
+        Auto,
+    }
+
+    impl DistPolicyMode {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Off => "off",
+                Self::Auto => "auto",
+            }
+        }
+
+        fn parse(token: &str) -> Result<Self, KError> {
+            match token.trim().to_ascii_lowercase().as_str() {
+                "off" => Ok(Self::Off),
+                "auto" => Ok(Self::Auto),
+                other => Err(KError::InvalidInput(format!(
+                    "invalid DistCSR policy '{other}', expected off|auto"
                 ))),
             }
         }
@@ -574,6 +612,7 @@ mod complex_demo {
                 variants: vec![FgmresVariant::Classical],
                 orthogs: vec![OrthogMethod::ClassicalGS],
                 reorths: vec![ReorthPolicy::IfNeeded],
+                dist_policy: RunMode::Correctness.default_dist_policy(),
                 allow_stagnation_fallback: false,
                 min_inner_before_fallback: 8,
                 mark_replicated_check: false,
@@ -598,6 +637,7 @@ mod complex_demo {
             I: IntoIterator<Item = String>,
         {
             let mut cfg = Self::default();
+            let mut dist_policy_explicit = false;
             let mut args = args.into_iter().peekable();
             while let Some(arg) = args.next() {
                 match arg.as_str() {
@@ -620,11 +660,13 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]"
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]
+Defaults: --dist-policy is off for correctness and robustness, auto for scalability."
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]"
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]
+Defaults: --dist-policy is off for correctness and robustness, auto for scalability."
                             );
                         }
                         std::process::exit(0);
@@ -634,6 +676,15 @@ mod complex_demo {
                             return Err(KError::InvalidInput("missing value for --mode".into()));
                         };
                         cfg.run_mode = RunMode::parse(&v)?;
+                    }
+                    "--dist-policy" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --dist-policy".into(),
+                            ));
+                        };
+                        cfg.dist_policy = DistPolicyMode::parse(&v)?;
+                        dist_policy_explicit = true;
                     }
                     "--mark-replicated-check" => {
                         cfg.mark_replicated_check = true;
@@ -769,6 +820,9 @@ mod complex_demo {
                 return Err(KError::InvalidInput(
                     "--measured-runs must be at least 1".into(),
                 ));
+            }
+            if !dist_policy_explicit {
+                cfg.dist_policy = cfg.run_mode.default_dist_policy();
             }
             if cfg.include_restart_200 && !cfg.restarts.contains(&200) {
                 cfg.restarts.push(200);
@@ -1169,6 +1223,44 @@ mod complex_demo {
         }
     }
 
+    fn dist_policy_reason(diag: &DistributedPlanDiagnostics, comm_size: usize) -> &'static str {
+        let halo_volume = (diag.halo_recv_volume + diag.halo_send_volume) as f64;
+        let overlap_enabled =
+            diag.overlap_mode == kryst::matrix::dist_csr::HaloOverlapMode::Interior;
+        let communication_heavy = comm_size > 1
+            && (overlap_enabled
+                || diag.expected_communication_fraction >= 0.55
+                || halo_volume >= 4096.0);
+
+        if communication_heavy {
+            "high halo/communication pressure detected"
+        } else {
+            "low halo pressure and compute-dominant local work"
+        }
+    }
+
+    fn format_dist_policy_report(
+        cfg: &BenchmarkConfig,
+        sample_spec: Option<&RunSpec>,
+        problem: &Problem,
+    ) -> String {
+        match cfg.dist_policy {
+            DistPolicyMode::Off => format!("DistCSR policy: {}", cfg.dist_policy.label()),
+            DistPolicyMode::Auto => {
+                let mut solver = sample_spec
+                    .map(|spec| configured_solver(spec, cfg))
+                    .unwrap_or_else(|| FgmresSolver::new(cfg.rtol, cfg.maxits, 1));
+                apply_dist_plan_policy(&mut solver, problem);
+                format!(
+                    "DistCSR policy: auto, selected restart={}, variant={}, reason={}",
+                    solver.restart,
+                    variant_label(solver.variant),
+                    dist_policy_reason(&problem.dist_plan_diagnostics, problem.comm.size())
+                )
+            }
+        }
+    }
+
     fn orthog_label(orthog: OrthogMethod) -> &'static str {
         match orthog {
             OrthogMethod::ClassicalGS => "classical-gs",
@@ -1258,7 +1350,11 @@ mod complex_demo {
                 for nz in row_ptr[r]..row_ptr[r + 1] {
                     row_inf = row_inf.max(vals[nz].abs());
                 }
-                if row_inf > tiny { 1.0 / row_inf } else { 1.0 }
+                if row_inf > tiny {
+                    1.0 / row_inf
+                } else {
+                    1.0
+                }
             })
             .collect()
     }
@@ -1659,7 +1755,9 @@ mod complex_demo {
         for _ in 0..bench_cfg.warmup_runs {
             let mut x = vec![S::zero(); problem.local_n];
             let mut solver = configured_solver(spec, bench_cfg);
-            apply_dist_plan_policy(&mut solver, problem);
+            if bench_cfg.dist_policy == DistPolicyMode::Auto {
+                apply_dist_plan_policy(&mut solver, problem);
+            }
             let mut workspace = Workspace::new(problem.local_n);
             solver.setup_workspace(&mut workspace);
             let _ = solver.solve_k(
@@ -1683,7 +1781,9 @@ mod complex_demo {
             problem.comm.barrier();
             let start = Instant::now();
             let mut solver = configured_solver(spec, bench_cfg);
-            apply_dist_plan_policy(&mut solver, problem);
+            if bench_cfg.dist_policy == DistPolicyMode::Auto {
+                apply_dist_plan_policy(&mut solver, problem);
+            }
             let mut workspace = Workspace::new(problem.local_n);
             solver.setup_workspace(&mut workspace);
             let mut run_history = RunResidualHistory::default();
@@ -2573,26 +2673,87 @@ mod complex_demo {
         let bench_cfg = BenchmarkConfig {
             warmup_runs: 0,
             measured_runs: 1,
+            dist_policy: DistPolicyMode::Auto,
             ..BenchmarkConfig::default()
         };
 
         let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
         assert!(row.requested_policy.contains("restart=5"));
-        assert!(
-            row.requested_policy
-                .contains("residual-check=on-convergence")
-        );
+        assert!(row
+            .requested_policy
+            .contains("residual-check=on-convergence"));
         assert!(row.effective_policy.contains("restart=16"));
-        assert!(
-            row.effective_policy
-                .contains("residual-check=every-iteration")
-        );
+        assert!(row
+            .effective_policy
+            .contains("residual-check=every-iteration"));
 
         let rendered = render_result_row(&row, RunMode::Correctness, &problem);
         assert!(rendered.contains(&row.requested_policy));
         assert!(rendered.contains(&row.effective_policy));
         assert!(rendered.contains("csr-cx"));
         assert!(rendered.contains("ser"));
+    }
+
+    #[test]
+    fn correctness_default_dist_policy_off_preserves_requested_restart() {
+        #[cfg(feature = "mpi")]
+        let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+        #[cfg(not(feature = "mpi"))]
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let op_local =
+            SparseCsrMatrix::from_csr(2, 2, vec![0, 1, 2], vec![0, 1], vec![S::one(), S::one()]);
+        let row_part = vec![0, 2];
+        let op = DistCsrOp::from_local_rows(2, 0, &op_local, &row_part, comm.clone())
+            .expect("build local dist op");
+
+        let problem = Problem {
+            op: Arc::new(op),
+            dist_plan_diagnostics: DistributedPlanDiagnostics {
+                overlap_mode: kryst::matrix::dist_csr::HaloOverlapMode::Disabled,
+                kernel_strategy: kryst::matrix::dist_csr::DistLocalKernelStrategy::RowSplitScalar,
+                local_spmv_kernel: None,
+                row_locality_ratio: 1.0,
+                border_ratio: 0.0,
+                halo_recv_volume: 0,
+                halo_send_volume: 0,
+                expected_communication_fraction: 0.1,
+                expected_computation_fraction: 0.5,
+            },
+            rhs: vec![S::one(), S::one()],
+            rhs_source: RhsSource::GeneratedAOnes,
+            csr_for_pc: Arc::new(op_local),
+            local_rows_nnz: 2,
+            local_n: 2,
+            global_n: 2,
+            global_row_start: 0,
+            comm,
+            backend: CsrBackend::Serial,
+            backend_descr: "unit-test".to_string(),
+        };
+        let spec = RunSpec {
+            restart: 5,
+            variant: FgmresVariant::Classical,
+            residual_check_policy: ResidualCheckPolicy::OnConvergence,
+            orthog: OrthogMethod::ClassicalGS,
+            reorth: ReorthPolicy::IfNeeded,
+            pc_side: PcSide::Right,
+            pc: PcKind::None,
+        };
+        let bench_cfg = BenchmarkConfig {
+            run_mode: RunMode::Correctness,
+            warmup_runs: 0,
+            measured_runs: 1,
+            ..BenchmarkConfig::default()
+        };
+
+        assert_eq!(bench_cfg.dist_policy, DistPolicyMode::Off);
+        let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
+        assert!(row.requested_policy.contains("restart=5"));
+        assert!(row.effective_policy.contains("restart=5"));
+        assert!(row
+            .effective_policy
+            .contains("residual-check=on-convergence"));
     }
 
     #[test]
@@ -2714,15 +2875,12 @@ mod complex_demo {
             pc: PcKind::IlutLocal,
         };
 
-        assert!(
-            spec.method_label()
-                .contains(ILUT_REAL_PROJECTION_FALLBACK_LABEL)
-        );
-        assert!(
-            PcKind::IlutLocal
-                .semantic_experiment_key(false)
-                .contains("real-projection-fallback")
-        );
+        assert!(spec
+            .method_label()
+            .contains(ILUT_REAL_PROJECTION_FALLBACK_LABEL));
+        assert!(PcKind::IlutLocal
+            .semantic_experiment_key(false)
+            .contains("real-projection-fallback"));
     }
 
     #[test]
@@ -2746,6 +2904,34 @@ mod complex_demo {
         assert_eq!(solver.restart, 50);
         assert_eq!(solver.stagnation_policy, FgmresStagnationPolicy::Disabled);
         assert_eq!(solver.min_inner_before_fallback, 12);
+    }
+
+    #[test]
+    fn benchmark_config_defaults_dist_policy_from_run_mode() {
+        let default_cfg = BenchmarkConfig::default();
+        assert_eq!(default_cfg.dist_policy, DistPolicyMode::Off);
+
+        let scalability_cfg =
+            BenchmarkConfig::from_args(vec!["--mode".to_string(), "scalability".to_string()])
+                .expect("parse scalability mode");
+        assert_eq!(scalability_cfg.dist_policy, DistPolicyMode::Auto);
+
+        let robustness_cfg =
+            BenchmarkConfig::from_args(vec!["--mode".to_string(), "robustness".to_string()])
+                .expect("parse robustness mode");
+        assert_eq!(robustness_cfg.dist_policy, DistPolicyMode::Off);
+    }
+
+    #[test]
+    fn benchmark_config_parses_explicit_dist_policy_override() {
+        let cfg = BenchmarkConfig::from_args(vec![
+            "--mode".to_string(),
+            "scalability".to_string(),
+            "--dist-policy".to_string(),
+            "off".to_string(),
+        ])
+        .expect("parse explicit dist policy");
+        assert_eq!(cfg.dist_policy, DistPolicyMode::Off);
     }
 
     #[test]
