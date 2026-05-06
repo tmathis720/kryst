@@ -300,7 +300,7 @@ mod complex_demo {
                     println!("{}", "-".repeat(332));
                 }
                 println!(
-                    "Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global matrix ILU, own0=owned-block overlap=0 local ILU/ASM, n/a=no ILU domain), PC apply=how the preconditioner is applied."
+                    "Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global/full serial matrix ILU, own0=MPI owned block, overlap=0 local ILU/ASM, n/a=no ILU domain), PC apply=how the preconditioner is applied."
                 );
             }
 
@@ -1115,13 +1115,21 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         }
     }
 
-    fn pc_domain_label(pc: PcKind) -> &'static str {
+    fn pc_domain_label(pc: PcKind, problem: &Problem) -> &'static str {
+        pc_domain_label_for_size(pc, problem.comm.size())
+    }
+
+    fn pc_domain_label_for_size(pc: PcKind, comm_size: usize) -> &'static str {
         match pc {
             PcKind::ReplicatedFullIlu0 | PcKind::ReplicatedFullIluk { .. } => "full",
-            PcKind::Ilu0Local
-            | PcKind::IlutLocal
-            | PcKind::MpiBlockJacobiIlu0Local
-            | PcKind::LocalIluk { .. } => "own0",
+            PcKind::Ilu0Local | PcKind::IlutLocal | PcKind::LocalIluk { .. } => {
+                if comm_size <= 1 {
+                    "full"
+                } else {
+                    "own0"
+                }
+            }
+            PcKind::MpiBlockJacobiIlu0Local => "own0",
             PcKind::None | PcKind::JacobiWeak => "n/a",
         }
     }
@@ -1930,7 +1938,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         Ok(ResultRow {
             operator_storage: operator_storage_label(problem),
             execution_backend: execution_backend_label(problem),
-            pc_domain: pc_domain_label(spec.pc),
+            pc_domain: pc_domain_label(spec.pc, problem),
             pc_apply: pc_apply_label(spec.pc, problem),
             method: format!(
                 "{} [row-scale={}]",
@@ -2329,7 +2337,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>17} {:>14} {:>12}",
                 operator_storage_label(problem),
                 execution_backend_label(problem),
-                pc_domain_label(spec.pc),
+                pc_domain_label(spec.pc, problem),
                 pc_apply_label(spec.pc, problem),
                 spec.method_label(),
                 "N/A",
@@ -2349,7 +2357,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
                 operator_storage_label(problem),
                 execution_backend_label(problem),
-                pc_domain_label(spec.pc),
+                pc_domain_label(spec.pc, problem),
                 pc_apply_label(spec.pc, problem),
                 spec.method_label(),
                 spec.requested_policy_label(),
@@ -2373,7 +2381,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26}",
                 operator_storage_label(problem),
                 execution_backend_label(problem),
-                pc_domain_label(spec.pc),
+                pc_domain_label(spec.pc, problem),
                 pc_apply_label(spec.pc, problem),
                 spec.method_label(),
                 spec.requested_policy_label(),
@@ -2839,27 +2847,66 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
     }
 
     #[test]
-    fn metadata_labels_snapshot() {
-        assert_eq!(pc_domain_label(PcKind::ReplicatedFullIlu0), "full");
+    fn metadata_labels_snapshot_serial() {
+        assert_eq!(
+            pc_domain_label_for_size(PcKind::ReplicatedFullIlu0, 1),
+            "full"
+        );
+        assert_eq!(
+            pc_domain_label_for_size(PcKind::ReplicatedFullIluk { k: 1 }, 1),
+            "full"
+        );
+        assert_eq!(pc_domain_label_for_size(PcKind::Ilu0Local, 1), "full");
+        assert_eq!(pc_domain_label_for_size(PcKind::IlutLocal, 1), "full");
+        assert_eq!(
+            pc_domain_label_for_size(PcKind::LocalIluk { k: 1 }, 1),
+            "full"
+        );
+        assert_eq!(
+            pc_domain_label_for_size(PcKind::MpiBlockJacobiIlu0Local, 1),
+            "own0"
+        );
+        assert_eq!(pc_domain_label_for_size(PcKind::None, 1), "n/a");
+        assert_eq!(pc_domain_label_for_size(PcKind::JacobiWeak, 1), "n/a");
+        assert_eq!(
+            pc_apply_label_for_size(PcKind::ReplicatedFullIlu0, 1),
+            "replicated/full"
+        );
+    }
+
+    #[test]
+    fn metadata_labels_snapshot_mpi() {
+        assert_eq!(
+            pc_domain_label_for_size(PcKind::ReplicatedFullIlu0, 2),
+            "full"
+        );
         assert_eq!(
             pc_apply_label_for_size(PcKind::ReplicatedFullIlu0, 2),
             "replicated/full/allgather, not scalable"
         );
         assert_eq!(
-            pc_apply_label_for_size(PcKind::ReplicatedFullIlu0, 1),
-            "replicated/full"
+            pc_domain_label_for_size(PcKind::ReplicatedFullIluk { k: 1 }, 2),
+            "full"
         );
-        assert_eq!(pc_domain_label(PcKind::ReplicatedFullIluk { k: 1 }), "full");
         assert_eq!(
             pc_apply_label_for_size(PcKind::ReplicatedFullIluk { k: 1 }, 2),
             "replicated/full/allgather, not scalable"
         );
-        assert_eq!(pc_domain_label(PcKind::Ilu0Local), "own0");
+        assert_eq!(pc_domain_label_for_size(PcKind::Ilu0Local, 2), "own0");
+        assert_eq!(pc_domain_label_for_size(PcKind::IlutLocal, 2), "own0");
+        assert_eq!(
+            pc_domain_label_for_size(PcKind::LocalIluk { k: 1 }, 2),
+            "own0"
+        );
+        assert_eq!(
+            pc_domain_label_for_size(PcKind::MpiBlockJacobiIlu0Local, 2),
+            "own0"
+        );
         assert_eq!(
             pc_apply_label_for_size(PcKind::Ilu0Local, 2),
             "owned-block/overlap0"
         );
-        assert_eq!(pc_domain_label(PcKind::None), "n/a");
+        assert_eq!(pc_domain_label_for_size(PcKind::None, 2), "n/a");
         assert_eq!(pc_apply_label_for_size(PcKind::None, 2), "none");
         assert_eq!(
             pc_apply_label_for_size(PcKind::JacobiWeak, 2),
