@@ -26,16 +26,18 @@ mod complex_demo {
     use kryst::algebra::bridge::BridgeScratch;
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
+    use kryst::matrix::DistCsrOp;
     use kryst::matrix::dist_csr::DistributedPlanDiagnostics;
     use kryst::matrix::sparse::CsrMatrix as SparseCsrMatrix;
-    use kryst::matrix::DistCsrOp;
     use kryst::ops::klinop::KLinOp;
     use kryst::ops::kpc::KPreconditioner;
     use kryst::parallel::{Comm, UniverseComm};
-    use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
-    use kryst::preconditioner::jacobi::Jacobi;
     use kryst::preconditioner::PcSide;
     use kryst::preconditioner::Preconditioner;
+    use kryst::preconditioner::ilu_csr::{
+        IluCsr, IluCsrConfig, IluKind, ReorderingKind, ReorderingOptions,
+    };
+    use kryst::preconditioner::jacobi::Jacobi;
     use kryst::solver::fgmres::{
         FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, ResidualCheckPolicy,
     };
@@ -104,6 +106,10 @@ mod complex_demo {
                 config.min_inner_before_fallback
             );
             println!("FGMRES haptol: {:.3e}", config.fgmres_haptol);
+            println!(
+                "Complex ILU reordering: kind={:?}, symmetric={}",
+                config.ilu_reordering.kind, config.ilu_reordering.symmetric
+            );
             if config.run_mode == RunMode::Correctness {
                 println!(
                     "Replicated check marker: {}",
@@ -520,6 +526,7 @@ mod complex_demo {
         fgmres_haptol: f64,
         row_scale: bool,
         row_scale_tiny: f64,
+        ilu_reordering: ReorderingOptions,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -574,6 +581,7 @@ mod complex_demo {
                 fgmres_haptol: 1e-30,
                 row_scale: false,
                 row_scale_tiny: 1e-15,
+                ilu_reordering: ReorderingOptions::default(),
             }
         }
     }
@@ -610,11 +618,11 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]"
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]]"
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]"
                             );
                         }
                         std::process::exit(0);
@@ -667,6 +675,14 @@ mod complex_demo {
                     }
                     "--include-restart-200" => {
                         cfg.include_restart_200 = true;
+                    }
+                    "--ilu-reordering" | "--pc-ilu-reordering-type" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --ilu-reordering".into(),
+                            ));
+                        };
+                        cfg.ilu_reordering = parse_ilu_reordering(&v)?;
                     }
                     "--allow-stagnation-fallback" => {
                         cfg.allow_stagnation_fallback = true;
@@ -864,6 +880,32 @@ mod complex_demo {
 
     fn parse_reorth_csv(flag: &str, value: &str) -> Result<Vec<ReorthPolicy>, KError> {
         parse_csv(flag, value, parse_reorth)
+    }
+
+    fn parse_ilu_reordering(value: &str) -> Result<ReorderingOptions, KError> {
+        let normalized = value.trim().to_ascii_lowercase();
+        let (base, nonsym) = if let Some(base) = normalized.strip_suffix(":nonsym") {
+            (base, true)
+        } else if let Some(base) = normalized.strip_suffix("_nonsym") {
+            (base, true)
+        } else {
+            (normalized.as_str(), false)
+        };
+        let kind = match base {
+            "none" | "natural" => ReorderingKind::None,
+            "rcm" => ReorderingKind::Rcm,
+            "amd" => ReorderingKind::Amd,
+            other => {
+                return Err(KError::InvalidInput(format!(
+                    "invalid ILU reordering '{other}', expected none|rcm|amd with optional :nonsym suffix"
+                )));
+            }
+        };
+        Ok(ReorderingOptions {
+            kind,
+            symmetric: !nonsym,
+            deterministic: true,
+        })
     }
 
     fn parse_pc(token: &str) -> Result<PcKind, KError> {
@@ -1200,11 +1242,7 @@ mod complex_demo {
                 for nz in row_ptr[r]..row_ptr[r + 1] {
                     row_inf = row_inf.max(vals[nz].abs());
                 }
-                if row_inf > tiny {
-                    1.0 / row_inf
-                } else {
-                    1.0
-                }
+                if row_inf > tiny { 1.0 / row_inf } else { 1.0 }
             })
             .collect()
     }
@@ -1545,6 +1583,7 @@ mod complex_demo {
                     }
                     PcKind::None | PcKind::JacobiWeak => IluKind::Ilu0,
                 };
+                cfg.reordering = bench_cfg.ilu_reordering.clone();
                 let mut ilu = IluCsr::new_with_config(cfg);
                 ilu.setup(pc_csr.as_ref())?;
                 if bench_cfg.run_mode == RunMode::Correctness {
@@ -1583,6 +1622,7 @@ mod complex_demo {
                 cfg.kind = IluKind::Ilut {
                     params: Default::default(),
                 };
+                cfg.reordering = bench_cfg.ilu_reordering.clone();
                 let mut ilu = IluCsr::new_with_config(cfg);
                 ilu.setup(pc_csr.as_ref())?;
                 if bench_cfg.run_mode == RunMode::Correctness {
@@ -2522,13 +2562,15 @@ mod complex_demo {
 
         let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
         assert!(row.requested_policy.contains("restart=5"));
-        assert!(row
-            .requested_policy
-            .contains("residual-check=on-convergence"));
+        assert!(
+            row.requested_policy
+                .contains("residual-check=on-convergence")
+        );
         assert!(row.effective_policy.contains("restart=16"));
-        assert!(row
-            .effective_policy
-            .contains("residual-check=every-iteration"));
+        assert!(
+            row.effective_policy
+                .contains("residual-check=every-iteration")
+        );
 
         let rendered = render_result_row(&row, RunMode::Correctness, &problem);
         assert!(rendered.contains(&row.requested_policy));

@@ -1529,7 +1529,9 @@ impl Preconditioner for IluCsr {
         }
 
         if self.native_complex_active {
-            let mut w = x.to_vec();
+            let mut w = vec![S::zero(); n];
+            let mut y_perm = vec![S::zero(); n];
+            self.pipeline_meta.left_perm.apply_vec(x, &mut w);
             for i in 0..n {
                 let mut s = w[i];
                 for p in self.l_row[i]..self.l_row[i + 1] {
@@ -1547,7 +1549,8 @@ impl Preconditioner for IluCsr {
                 }
                 w[i] = s / self.c_u_val[self.u_diag_ix[i]];
             }
-            y.copy_from_slice(&w);
+            self.pipeline_meta.right_perm.apply_vec_t(&w, &mut y_perm);
+            y.copy_from_slice(&y_perm);
             Ok(())
         } else {
             let mut xr = vec![Real::zero(); n];
