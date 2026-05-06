@@ -26,18 +26,18 @@ mod complex_demo {
     use kryst::algebra::bridge::BridgeScratch;
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
-    use kryst::matrix::DistCsrOp;
     use kryst::matrix::dist_csr::DistributedPlanDiagnostics;
     use kryst::matrix::sparse::CsrMatrix as SparseCsrMatrix;
+    use kryst::matrix::DistCsrOp;
     use kryst::ops::klinop::KLinOp;
     use kryst::ops::kpc::KPreconditioner;
     use kryst::parallel::{Comm, UniverseComm};
-    use kryst::preconditioner::PcSide;
-    use kryst::preconditioner::Preconditioner;
     use kryst::preconditioner::ilu_csr::{
         IluCsr, IluCsrConfig, IluKind, ReorderingKind, ReorderingOptions,
     };
     use kryst::preconditioner::jacobi::Jacobi;
+    use kryst::preconditioner::PcSide;
+    use kryst::preconditioner::Preconditioner;
     use kryst::solver::fgmres::{
         FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, ResidualCheckPolicy,
     };
@@ -136,16 +136,26 @@ mod complex_demo {
 
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/mtx");
         let all_cases = [
-            ("qc324.mtx", "qc324 (complex, general)"),
-            ("dwg961a.mtx", "dwg961a (complex, general)"),
+            MatrixCase {
+                file_name: "qc324.mtx",
+                description: "qc324 (complex, general)",
+                classification: "reference complex general case",
+            },
+            MatrixCase {
+                file_name: "dwg961a.mtx",
+                description: "dwg961a (complex, general)",
+                classification: "stress/singular-or-bad-diagonal case",
+            },
         ];
-        let cases: Vec<(&str, &str)> = match config.run_mode {
+        let cases: Vec<MatrixCase> = match config.run_mode {
             RunMode::Correctness => all_cases.to_vec(),
             RunMode::Scalability => all_cases.to_vec(),
             RunMode::Robustness => all_cases.to_vec(),
         };
 
-        for (mat_name, descr) in cases {
+        for case in cases {
+            let mat_name = case.file_name;
+            let descr = case.description;
             let mat_path = base.join(mat_name);
             let available = mat_path.exists();
             if !available {
@@ -179,6 +189,7 @@ mod complex_demo {
                     config.run_mode.label(),
                     problem.backend_descr
                 );
+                println!("Classification: {}", case.classification);
                 println!(
                     "Run backend: {} ({})",
                     problem.backend.run_label(),
@@ -220,6 +231,19 @@ mod complex_demo {
                 println!(
                     "FGMRES side policy: requested left/symmetric are normalized to effective right preconditioning."
                 );
+                if problem.rhs_source == RhsSource::GeneratedAOnes {
+                    println!(
+                        "Generated A*ones reference: {}",
+                        if problem.solution_reference.valid_for_x_error() {
+                            "valid for x_err(rel) reporting"
+                        } else {
+                            "x_err(rel) suppressed; matrix has zero/missing rows or singularity indicators, so the solution may be nonunique"
+                        }
+                    );
+                    if !problem.solution_reference.valid_for_x_error() {
+                        println!("    → {}", problem.solution_reference.suppression_reason());
+                    }
+                }
                 if config.run_mode == RunMode::Correctness && config.mark_replicated_check {
                     println!(
                         "Replicated check marker: ENABLED (metadata-only marker for cross-run comparison)."
@@ -346,11 +370,19 @@ mod complex_demo {
         Ok(())
     }
 
+    #[derive(Clone, Copy, Debug)]
+    struct MatrixCase {
+        file_name: &'static str,
+        description: &'static str,
+        classification: &'static str,
+    }
+
     struct Problem {
         op: Arc<dyn KLinOp<Scalar = S>>,
         dist_plan_diagnostics: DistributedPlanDiagnostics,
         rhs: Vec<S>,
         rhs_source: RhsSource,
+        solution_reference: SolutionReferenceDiagnostics,
         csr_for_pc: Arc<SparseCsrMatrix<S>>,
         local_rows_nnz: usize,
         local_n: usize,
@@ -365,6 +397,54 @@ mod complex_demo {
     enum RhsSource {
         LoadedFromFile,
         GeneratedAOnes,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    struct SolutionReferenceDiagnostics {
+        global_rows: usize,
+        global_cols: usize,
+        zero_row_count: usize,
+        missing_diagonal_count: usize,
+        tiny_diagonal_count: usize,
+    }
+
+    impl SolutionReferenceDiagnostics {
+        fn valid_for_x_error(self) -> bool {
+            self.global_rows == self.global_cols
+                && self.zero_row_count == 0
+                && self.missing_diagonal_count == 0
+                && self.tiny_diagonal_count == 0
+        }
+
+        fn suppression_reason(self) -> String {
+            let mut reasons = Vec::new();
+            if self.global_rows != self.global_cols {
+                reasons.push(format!(
+                    "matrix is rectangular ({}x{})",
+                    self.global_rows, self.global_cols
+                ));
+            }
+            if self.zero_row_count > 0 {
+                reasons.push(format!("{} zero/missing rows", self.zero_row_count));
+            }
+            if self.missing_diagonal_count > 0 {
+                reasons.push(format!(
+                    "{} structurally missing diagonals",
+                    self.missing_diagonal_count
+                ));
+            }
+            if self.tiny_diagonal_count > 0 {
+                reasons.push(format!("{} tiny diagonals", self.tiny_diagonal_count));
+            }
+            if reasons.is_empty() {
+                "generated A*ones reference is structurally valid".to_string()
+            } else {
+                format!(
+                    "N/A (generated A*ones but matrix has {}; solution may be nonunique)",
+                    reasons.join(", ")
+                )
+            }
+        }
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1360,7 +1440,11 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 for nz in row_ptr[r]..row_ptr[r + 1] {
                     row_inf = row_inf.max(vals[nz].abs());
                 }
-                if row_inf > tiny { 1.0 / row_inf } else { 1.0 }
+                if row_inf > tiny {
+                    1.0 / row_inf
+                } else {
+                    1.0
+                }
             })
             .collect()
     }
@@ -1913,6 +1997,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
 
         let x_error_rel = if bench_cfg.run_mode == RunMode::Correctness
             && problem.rhs_source == RhsSource::GeneratedAOnes
+            && problem.solution_reference.valid_for_x_error()
         {
             let err2_local = x_unscaled
                 .iter()
@@ -2402,6 +2487,44 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         }
     }
 
+    fn solution_reference_diagnostics(matrix: &SparseCsrMatrix<S>) -> SolutionReferenceDiagnostics {
+        let tiny_diag_threshold = 1e-14f64;
+        let row_ptr = matrix.row_ptr();
+        let col_idx = matrix.col_idx();
+        let values = matrix.values();
+        let mut zero_row_count = 0usize;
+        let mut missing_diagonal_count = 0usize;
+        let mut tiny_diagonal_count = 0usize;
+
+        for row in 0..matrix.nrows() {
+            let start = row_ptr[row];
+            let end = row_ptr[row + 1];
+            if start == end {
+                zero_row_count += 1;
+            }
+            let mut diag = None;
+            for nz in start..end {
+                if col_idx[nz] == row {
+                    diag = Some(values[nz].abs());
+                    break;
+                }
+            }
+            match diag {
+                Some(v) if v <= tiny_diag_threshold => tiny_diagonal_count += 1,
+                Some(_) => {}
+                None => missing_diagonal_count += 1,
+            }
+        }
+
+        SolutionReferenceDiagnostics {
+            global_rows: matrix.nrows(),
+            global_cols: matrix.ncols(),
+            zero_row_count,
+            missing_diagonal_count,
+            tiny_diagonal_count,
+        }
+    }
+
     fn load_problem_complex(
         mat_path: &Path,
         comm: &UniverseComm,
@@ -2412,6 +2535,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         let csr_sparse: SparseCsrMatrix<S> = mm.to_csr_matrix_scalar()?;
         let nrows = csr_sparse.nrows();
         let ncols = csr_sparse.ncols();
+        let solution_reference = solution_reference_diagnostics(&csr_sparse);
 
         let row_part = DistCsrOp::partition_rows_balanced(nrows, comm);
         let row_start = row_part[comm.rank()];
@@ -2443,6 +2567,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             dist_plan_diagnostics,
             rhs,
             rhs_source,
+            solution_reference,
             csr_for_pc: Arc::new(local_pc_block),
             local_rows_nnz: local_csr.values().len(),
             local_n,
@@ -2676,6 +2801,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             },
             rhs: vec![S::one(), S::one()],
             rhs_source: RhsSource::GeneratedAOnes,
+            solution_reference: solution_reference_diagnostics(&rectangular_pc),
             csr_for_pc: Arc::new(rectangular_pc),
             local_rows_nnz: op_local.values().len(),
             local_n: 2,
@@ -2737,6 +2863,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             },
             rhs: vec![S::one(), S::one()],
             rhs_source: RhsSource::GeneratedAOnes,
+            solution_reference: solution_reference_diagnostics(&op_local),
             csr_for_pc: Arc::new(op_local),
             local_rows_nnz: 2,
             local_n: 2,
@@ -2764,15 +2891,13 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
 
         let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
         assert!(row.requested_policy.contains("restart=5"));
-        assert!(
-            row.requested_policy
-                .contains("residual-check=on-convergence")
-        );
+        assert!(row
+            .requested_policy
+            .contains("residual-check=on-convergence"));
         assert!(row.effective_policy.contains("restart=16"));
-        assert!(
-            row.effective_policy
-                .contains("residual-check=every-iteration")
-        );
+        assert!(row
+            .effective_policy
+            .contains("residual-check=every-iteration"));
 
         let rendered = render_result_row(&row, RunMode::Correctness, &problem);
         assert!(rendered.contains(&row.requested_policy));
@@ -2781,6 +2906,70 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         assert!(rendered.contains("csr-cx"));
         assert!(rendered.contains("ser"));
         assert!(rendered.contains("none"));
+    }
+
+    #[test]
+    fn generated_aones_empty_row_suppresses_x_error_rel() {
+        #[cfg(feature = "mpi")]
+        let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+        #[cfg(not(feature = "mpi"))]
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let op_local = SparseCsrMatrix::from_csr(2, 2, vec![0, 1, 1], vec![0], vec![S::one()]);
+        let row_part = vec![0, 2];
+        let op = DistCsrOp::from_local_rows(2, 0, &op_local, &row_part, comm.clone())
+            .expect("build local dist op");
+        let diagnostics = solution_reference_diagnostics(&op_local);
+        assert_eq!(diagnostics.zero_row_count, 1);
+        assert_eq!(diagnostics.missing_diagonal_count, 1);
+        assert!(!diagnostics.valid_for_x_error());
+
+        let problem = Problem {
+            op: Arc::new(op),
+            dist_plan_diagnostics: DistributedPlanDiagnostics {
+                overlap_mode: kryst::matrix::dist_csr::HaloOverlapMode::Disabled,
+                kernel_strategy: kryst::matrix::dist_csr::DistLocalKernelStrategy::RowSplitScalar,
+                local_spmv_kernel: None,
+                row_locality_ratio: 1.0,
+                border_ratio: 0.0,
+                halo_recv_volume: 0,
+                halo_send_volume: 0,
+                expected_communication_fraction: 0.0,
+                expected_computation_fraction: 1.0,
+            },
+            rhs: vec![S::one(), S::zero()],
+            rhs_source: RhsSource::GeneratedAOnes,
+            solution_reference: diagnostics,
+            csr_for_pc: Arc::new(op_local),
+            local_rows_nnz: 1,
+            local_n: 2,
+            global_n: 2,
+            global_row_start: 0,
+            comm,
+            backend: CsrBackend::Serial,
+            backend_descr: "unit-test".to_string(),
+        };
+        let spec = RunSpec {
+            restart: 5,
+            variant: FgmresVariant::Classical,
+            residual_check_policy: ResidualCheckPolicy::OnConvergence,
+            orthog: OrthogMethod::ClassicalGS,
+            reorth: ReorthPolicy::IfNeeded,
+            pc_side: PcSide::Right,
+            pc: PcKind::None,
+        };
+        let bench_cfg = BenchmarkConfig {
+            run_mode: RunMode::Correctness,
+            warmup_runs: 0,
+            measured_runs: 1,
+            ..BenchmarkConfig::default()
+        };
+
+        let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
+        assert_eq!(problem.rhs_source, RhsSource::GeneratedAOnes);
+        assert_eq!(row.x_error_rel, None);
+        let rendered = render_result_row(&row, RunMode::Correctness, &problem);
+        assert!(rendered.contains("N/A"));
     }
 
     #[test]
@@ -2811,6 +3000,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             },
             rhs: vec![S::one(), S::one()],
             rhs_source: RhsSource::GeneratedAOnes,
+            solution_reference: solution_reference_diagnostics(&op_local),
             csr_for_pc: Arc::new(op_local),
             local_rows_nnz: 2,
             local_n: 2,
@@ -2840,10 +3030,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
         assert!(row.requested_policy.contains("restart=5"));
         assert!(row.effective_policy.contains("restart=5"));
-        assert!(
-            row.effective_policy
-                .contains("residual-check=on-convergence")
-        );
+        assert!(row
+            .effective_policy
+            .contains("residual-check=on-convergence"));
     }
 
     #[test]
@@ -3064,15 +3253,12 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             pc: PcKind::IlutLocal,
         };
 
-        assert!(
-            spec.method_label()
-                .contains(ILUT_REAL_PROJECTION_FALLBACK_LABEL)
-        );
-        assert!(
-            PcKind::IlutLocal
-                .semantic_experiment_key(false)
-                .contains("real-projection-fallback")
-        );
+        assert!(spec
+            .method_label()
+            .contains(ILUT_REAL_PROJECTION_FALLBACK_LABEL));
+        assert!(PcKind::IlutLocal
+            .semantic_experiment_key(false)
+            .contains("real-projection-fallback"));
     }
 
     #[test]
