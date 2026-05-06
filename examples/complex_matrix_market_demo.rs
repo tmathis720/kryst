@@ -153,6 +153,23 @@ mod complex_demo {
             RunMode::Robustness => all_cases.to_vec(),
         };
 
+        if matches!(config.run_mode, RunMode::Correctness | RunMode::Scalability) {
+            let (nx, ny) = config.poisson_grid;
+            match build_shifted_poisson_case(&comm, nx, ny, 1.0, 0.25) {
+                Ok(problem) => execute_problem(
+                    "generated shifted Poisson (-Δ + (1.0 + 0.25i)I)",
+                    "generated complex shifted Poisson case",
+                    problem,
+                    &config,
+                    rank,
+                ),
+                Err(err) if rank == 0 => {
+                    println!("❌ Failed to build generated shifted Poisson case: {err}\n");
+                }
+                Err(_) => {}
+            }
+        }
+
         for case in cases {
             let mat_name = case.file_name;
             let descr = case.description;
@@ -180,179 +197,7 @@ mod complex_demo {
                 }
             };
 
-            let rhs_norm2_local: f64 = problem.rhs.iter().map(|v| v.abs2()).sum();
-            let rhs_norm = problem.comm.all_reduce_f64(rhs_norm2_local).sqrt();
-            let runs = RunSpec::build_default_matrix(&config, &problem);
-            if rank == 0 {
-                println!(
-                    "=== [{} mode] {descr} — {} ===",
-                    config.run_mode.label(),
-                    problem.backend_descr
-                );
-                println!("Classification: {}", case.classification);
-                println!(
-                    "Run backend: {} ({})",
-                    problem.backend.run_label(),
-                    problem.backend.details()
-                );
-                println!(
-                    "Benchmark/export label: {}",
-                    problem.backend.benchmark_export_label()
-                );
-                println!("Global DOFs: {}", problem.global_n);
-                println!("Local DOFs (rank {rank}): {}", problem.local_n);
-                println!(
-                    "Local row range (rank {rank}): [{}..{})",
-                    problem.global_row_start,
-                    problem.global_row_start + problem.local_n
-                );
-                if problem.comm.size() > 1 && problem.local_n == problem.global_n {
-                    println!("Note: replicated execution: MPI ranks are not sharing SpMV rows.");
-                }
-                if config.run_mode == RunMode::Correctness {
-                    println!(
-                        "MPI scalability note: use distributed mode for scaling claims; correctness mode emphasizes solver validation."
-                    );
-                }
-                println!("‖b_unscaled‖₂ = {:.3e}", rhs_norm);
-                println!(
-                    "{}",
-                    format_dist_policy_report(&config, runs.first(), &problem)
-                );
-                println!("Residual semantics: rec/reported = solver recurrence/monitor residual.");
-                if config.run_mode == RunMode::Correctness {
-                    println!(
-                        "                    true(explicit) = ||b_unscaled - A_unscaled x_unscaled||₂ recomputed after solve."
-                    );
-                    println!(
-                        "                    True(rel) = true(explicit) / ||b_unscaled||₂ (stable under --row-scale)."
-                    );
-                }
-                println!(
-                    "FGMRES side policy: requested left/symmetric are normalized to effective right preconditioning."
-                );
-                if problem.rhs_source == RhsSource::GeneratedAOnes {
-                    println!(
-                        "Generated A*ones reference: {}",
-                        if problem.solution_reference.valid_for_x_error() {
-                            "valid for x_err(rel) reporting"
-                        } else {
-                            "x_err(rel) suppressed; matrix has zero/missing rows or singularity indicators, so the solution may be nonunique"
-                        }
-                    );
-                    if !problem.solution_reference.valid_for_x_error() {
-                        println!("    → {}", problem.solution_reference.suppression_reason());
-                    }
-                }
-                if config.run_mode == RunMode::Correctness && config.mark_replicated_check {
-                    println!(
-                        "Replicated check marker: ENABLED (metadata-only marker for cross-run comparison)."
-                    );
-                }
-                let include_dof_col = matches!(
-                    problem.backend,
-                    CsrBackend::Serial | CsrBackend::Distributed
-                );
-                if config.run_mode == RunMode::Scalability {
-                    println!(
-                        "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>17} {:>14} {:>12}",
-                        "Op",
-                        "Exec",
-                        "PCdom",
-                        "PC apply",
-                        "Method",
-                        "Effective policy",
-                        "Med(s)",
-                        "Min(s)",
-                        "Iters",
-                        "Rst",
-                        "Inn",
-                        "Pfb",
-                        "Reds(obs/wait/model)",
-                        "Rec/Reported",
-                        "DOF/s"
-                    );
-                    println!("{}", "-".repeat(240));
-                } else if include_dof_col {
-                    println!(
-                        "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
-                        "Op",
-                        "Exec",
-                        "PCdom",
-                        "PC apply",
-                        "Method",
-                        "Requested policy",
-                        "Effective policy",
-                        "Setup(s)",
-                        "Med(s)",
-                        "Min(s)",
-                        "Iters",
-                        "Rst",
-                        "Inn",
-                        "Pfb",
-                        "Rec/Reported",
-                        "True(explicit)",
-                        "True(rel)",
-                        "x_err(rel)",
-                        "Reason",
-                        "DOF/s"
-                    );
-                    println!("{}", "-".repeat(348));
-                } else {
-                    println!(
-                        "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26}",
-                        "Op",
-                        "Exec",
-                        "PCdom",
-                        "PC apply",
-                        "Method",
-                        "Requested policy",
-                        "Effective policy",
-                        "Setup(s)",
-                        "Med(s)",
-                        "Min(s)",
-                        "Iters",
-                        "Rst",
-                        "Inn",
-                        "Pfb",
-                        "Rec/Reported",
-                        "True(explicit)",
-                        "True(rel)",
-                        "x_err(rel)",
-                        "Reason"
-                    );
-                    println!("{}", "-".repeat(332));
-                }
-                println!(
-                    "Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global/full serial matrix ILU, own0=MPI owned block, overlap=0 local ILU/ASM, n/a=no ILU domain), PC apply=how the preconditioner is applied."
-                );
-            }
-
-            for spec in runs {
-                match run_once(&problem, &spec, &config) {
-                    Ok(row) => {
-                        if rank == 0 {
-                            println!("{}", render_result_row(&row, config.run_mode, &problem));
-                        }
-                    }
-                    Err(err) => {
-                        if rank == 0 {
-                            println!(
-                                "{}",
-                                render_failure_result_row(&spec, config.run_mode, &problem)
-                            );
-                            println!("    → {err}");
-                        }
-                    }
-                }
-                problem.comm.barrier();
-            }
-
-            if rank == 0 {
-                println!("{}", "=".repeat(96));
-                println!();
-            }
-            problem.comm.barrier();
+            execute_problem(descr, case.classification, problem, &config, rank);
         }
 
         if rank == 0 {
@@ -368,6 +213,188 @@ mod complex_demo {
         }
 
         Ok(())
+    }
+
+    fn execute_problem(
+        descr: &str,
+        classification: &str,
+        problem: Problem,
+        config: &BenchmarkConfig,
+        rank: usize,
+    ) {
+        let rhs_norm2_local: f64 = problem.rhs.iter().map(|v| v.abs2()).sum();
+        let rhs_norm = problem.comm.all_reduce_f64(rhs_norm2_local).sqrt();
+        let runs = RunSpec::build_default_matrix(config, &problem);
+        if rank == 0 {
+            println!(
+                "=== [{} mode] {descr} — {} ===",
+                config.run_mode.label(),
+                problem.backend_descr
+            );
+            println!("Classification: {classification}");
+            println!(
+                "Run backend: {} ({})",
+                problem.backend.run_label(),
+                problem.backend.details()
+            );
+            println!(
+                "Benchmark/export label: {}",
+                problem.backend.benchmark_export_label()
+            );
+            println!("Global DOFs: {}", problem.global_n);
+            println!("Local DOFs (rank {rank}): {}", problem.local_n);
+            println!(
+                "Local row range (rank {rank}): [{}..{})",
+                problem.global_row_start,
+                problem.global_row_start + problem.local_n
+            );
+            if problem.comm.size() > 1 && problem.local_n == problem.global_n {
+                println!("Note: replicated execution: MPI ranks are not sharing SpMV rows.");
+            }
+            if config.run_mode == RunMode::Correctness {
+                println!(
+                    "MPI scalability note: use distributed mode for scaling claims; correctness mode emphasizes solver validation."
+                );
+            }
+            println!("‖b_unscaled‖₂ = {:.3e}", rhs_norm);
+            println!(
+                "{}",
+                format_dist_policy_report(config, runs.first(), &problem)
+            );
+            println!("Residual semantics: rec/reported = solver recurrence/monitor residual.");
+            if config.run_mode == RunMode::Correctness {
+                println!(
+                    "                    true(explicit) = ||b_unscaled - A_unscaled x_unscaled||₂ recomputed after solve."
+                );
+                println!(
+                    "                    True(rel) = true(explicit) / ||b_unscaled||₂ (stable under --row-scale)."
+                );
+            }
+            println!(
+                "FGMRES side policy: requested left/symmetric are normalized to effective right preconditioning."
+            );
+            if problem.rhs_source == RhsSource::GeneratedAOnes {
+                println!(
+                    "Generated A*ones reference: {}",
+                    if problem.solution_reference.valid_for_x_error() {
+                        "valid for x_err(rel) reporting"
+                    } else {
+                        "x_err(rel) suppressed; matrix has zero/missing rows or singularity indicators, so the solution may be nonunique"
+                    }
+                );
+                if !problem.solution_reference.valid_for_x_error() {
+                    println!("    → {}", problem.solution_reference.suppression_reason());
+                }
+            }
+            if config.run_mode == RunMode::Correctness && config.mark_replicated_check {
+                println!(
+                    "Replicated check marker: ENABLED (metadata-only marker for cross-run comparison)."
+                );
+            }
+            let include_dof_col = matches!(
+                problem.backend,
+                CsrBackend::Serial | CsrBackend::Distributed
+            );
+            if config.run_mode == RunMode::Scalability {
+                println!(
+                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>17} {:>14} {:>12}",
+                    "Op",
+                    "Exec",
+                    "PCdom",
+                    "PC apply",
+                    "Method",
+                    "Effective policy",
+                    "Med(s)",
+                    "Min(s)",
+                    "Iters",
+                    "Rst",
+                    "Inn",
+                    "Pfb",
+                    "Reds(obs/wait/model)",
+                    "Rec/Reported",
+                    "DOF/s"
+                );
+                println!("{}", "-".repeat(240));
+            } else if include_dof_col {
+                println!(
+                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                    "Op",
+                    "Exec",
+                    "PCdom",
+                    "PC apply",
+                    "Method",
+                    "Requested policy",
+                    "Effective policy",
+                    "Setup(s)",
+                    "Med(s)",
+                    "Min(s)",
+                    "Iters",
+                    "Rst",
+                    "Inn",
+                    "Pfb",
+                    "Rec/Reported",
+                    "True(explicit)",
+                    "True(rel)",
+                    "x_err(rel)",
+                    "Reason",
+                    "DOF/s"
+                );
+                println!("{}", "-".repeat(348));
+            } else {
+                println!(
+                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26}",
+                    "Op",
+                    "Exec",
+                    "PCdom",
+                    "PC apply",
+                    "Method",
+                    "Requested policy",
+                    "Effective policy",
+                    "Setup(s)",
+                    "Med(s)",
+                    "Min(s)",
+                    "Iters",
+                    "Rst",
+                    "Inn",
+                    "Pfb",
+                    "Rec/Reported",
+                    "True(explicit)",
+                    "True(rel)",
+                    "x_err(rel)",
+                    "Reason"
+                );
+                println!("{}", "-".repeat(332));
+            }
+            println!(
+                "Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global/full serial matrix ILU, own0=MPI owned block, overlap=0 local ILU/ASM, n/a=no ILU domain), PC apply=how the preconditioner is applied."
+            );
+        }
+
+        for spec in runs {
+            match run_once(&problem, &spec, config) {
+                Ok(row) => {
+                    if rank == 0 {
+                        println!("{}", render_result_row(&row, config.run_mode, &problem));
+                    }
+                }
+                Err(err) => {
+                    if rank == 0 {
+                        println!(
+                            "{}",
+                            render_failure_result_row(&spec, config.run_mode, &problem)
+                        );
+                        println!("    → {err}");
+                    }
+                }
+            }
+            problem.comm.barrier();
+        }
+
+        if rank == 0 {
+            println!("{}", "=".repeat(96));
+            println!();
+        }
+        problem.comm.barrier();
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -392,6 +419,7 @@ mod complex_demo {
         comm: UniverseComm,
         backend: CsrBackend,
         backend_descr: String,
+        generated_case: bool,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -598,6 +626,7 @@ mod complex_demo {
         row_scale: bool,
         row_scale_tiny: f64,
         ilu_reordering: ReorderingOptions,
+        poisson_grid: (usize, usize),
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -689,6 +718,7 @@ mod complex_demo {
                 row_scale: false,
                 row_scale_tiny: 1e-15,
                 ilu_reordering: ReorderingOptions::default(),
+                poisson_grid: (16, 16),
             }
         }
     }
@@ -726,12 +756,12 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY]
 Defaults: --dist-policy is off for correctness and robustness, auto for scalability."
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY]
 Defaults: --dist-policy is off for correctness and robustness, auto for scalability."
                             );
                         }
@@ -751,6 +781,14 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                         };
                         cfg.dist_policy = DistPolicyMode::parse(&v)?;
                         dist_policy_explicit = true;
+                    }
+                    "--poisson-grid" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --poisson-grid".into(),
+                            ));
+                        };
+                        cfg.poisson_grid = parse_grid_dims("--poisson-grid", &v)?;
                     }
                     "--mark-replicated-check" => {
                         cfg.mark_replicated_check = true;
@@ -917,6 +955,22 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         }
     }
 
+    fn parse_grid_dims(flag: &str, value: &str) -> Result<(usize, usize), KError> {
+        let Some((nx, ny)) = value.split_once(['x', 'X']) else {
+            return Err(KError::InvalidInput(format!(
+                "invalid value '{value}' for {flag}, expected NXxNY"
+            )));
+        };
+        let nx = parse_positive_usize(flag, nx)?;
+        let ny = parse_positive_usize(flag, ny)?;
+        if nx == 0 || ny == 0 {
+            return Err(KError::InvalidInput(format!(
+                "invalid value '{value}' for {flag}, dimensions must be positive"
+            )));
+        }
+        Ok((nx, ny))
+    }
+
     fn parse_positive_usize(flag: &str, value: &str) -> Result<usize, KError> {
         value.parse::<usize>().map_err(|_| {
             KError::InvalidInput(format!(
@@ -1046,6 +1100,17 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 k: parse_positive_usize("local-iluk:k", k_str)?,
             });
         }
+        if token_norm == "block-jacobi-iluk1-overlap0" {
+            return Ok(PcKind::LocalIluk { k: 1 });
+        }
+        if let Some(k_str) = token_norm
+            .strip_prefix("block-jacobi-iluk")
+            .and_then(|rest| rest.strip_suffix("-overlap0"))
+        {
+            return Ok(PcKind::LocalIluk {
+                k: parse_positive_usize("block-jacobi-iluk:k", k_str)?,
+            });
+        }
         if let Some(k_str) = token_norm.strip_prefix("replicated-iluk:") {
             return Ok(PcKind::ReplicatedFullIluk {
                 k: parse_positive_usize("replicated-iluk:k", k_str)?,
@@ -1057,11 +1122,12 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             "ilu0" | "ilu0-local" | "local-ilu0" => Ok(PcKind::Ilu0Local),
             "ilut" | "ilut-local" | "local-ilut" => Ok(PcKind::IlutLocal),
             "replicated-ilu0" | "replicated-full-ilu0" => Ok(PcKind::ReplicatedFullIlu0),
-            "mpi-block-jacobi-ilu0" | "block-jacobi-ilu0" | "mpi-block-ilu0" => {
-                Ok(PcKind::MpiBlockJacobiIlu0Local)
-            }
+            "mpi-block-jacobi-ilu0"
+            | "block-jacobi-ilu0"
+            | "block-jacobi-ilu0-overlap0"
+            | "mpi-block-ilu0" => Ok(PcKind::MpiBlockJacobiIlu0Local),
             other => Err(KError::InvalidInput(format!(
-                "invalid pc '{other}', expected none|jacobi|local-ilu0|local-ilut|local-iluk:<k>|replicated-ilu0|replicated-full-ilu0|replicated-iluk:<k>|mpi-block-jacobi-ilu0"
+                "invalid pc '{other}', expected none|jacobi|local-ilu0|local-ilut|local-iluk:<k>|block-jacobi-ilu0-overlap0|block-jacobi-iluk<K>-overlap0|replicated-ilu0|replicated-full-ilu0|replicated-iluk:<k>|mpi-block-jacobi-ilu0"
             ))),
         }
     }
@@ -1090,7 +1156,18 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
 
     impl RunSpec {
         fn build_default_matrix(cfg: &BenchmarkConfig, problem: &Problem) -> Vec<Self> {
-            let mut pcs = if cfg.pcs.is_empty() {
+            let mut pcs = if cfg.pcs.is_empty() && problem.generated_case {
+                vec![
+                    PcKind::None,
+                    PcKind::JacobiWeak,
+                    if problem.comm.size() > 1 {
+                        PcKind::MpiBlockJacobiIlu0Local
+                    } else {
+                        PcKind::Ilu0Local
+                    },
+                    PcKind::LocalIluk { k: 1 },
+                ]
+            } else if cfg.pcs.is_empty() {
                 match cfg.run_mode {
                     RunMode::Correctness => {
                         if problem.comm.size() > 1 {
@@ -1255,6 +1332,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                     "local ILUT(real-projection fallback) [degraded/provisional complex path: real-projection fallback; not trusted for complex robustness benchmarking]"
                 }
                 Self::MpiBlockJacobiIlu0Local => "block-jacobi-ilu0-overlap0 [mpi spelling alias]",
+                Self::LocalIluk { k: 1 } => "block-jacobi-iluk1-overlap0",
                 Self::LocalIluk { .. } => {
                     "local ILU(k) (block-Jacobi ILU(k), zero overlap/local owned block)"
                 }
@@ -2560,6 +2638,112 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         }
     }
 
+    fn build_shifted_poisson_case(
+        comm: &UniverseComm,
+        nx: usize,
+        ny: usize,
+        alpha: f64,
+        beta: f64,
+    ) -> Result<Problem, KError> {
+        if nx == 0 || ny == 0 {
+            return Err(KError::InvalidInput(
+                "shifted Poisson grid dimensions must be positive".into(),
+            ));
+        }
+        let n = nx.checked_mul(ny).ok_or_else(|| {
+            KError::InvalidInput(format!("shifted Poisson grid {nx}x{ny} overflows usize"))
+        })?;
+        if n < comm.size() {
+            return Err(KError::InvalidInput(format!(
+                "shifted Poisson grid {nx}x{ny} has {n} rows, fewer than {} MPI ranks",
+                comm.size()
+            )));
+        }
+
+        let csr_sparse = build_shifted_poisson_csr(nx, ny, alpha, beta);
+        let solution_reference = solution_reference_diagnostics(&csr_sparse);
+        let row_part = DistCsrOp::partition_rows_balanced(n, comm);
+        let row_start = row_part[comm.rank()];
+        let row_end = row_part[comm.rank() + 1];
+        let local_csr = slice_csr_rows(&csr_sparse, row_start, row_end);
+        let local_pc_block = slice_csr_rows_owned_cols(&csr_sparse, row_start, row_end);
+
+        let op = DistCsrOp::from_local_rows(n, row_start, &local_csr, &row_part, comm.clone())?;
+        let dist_plan_diagnostics = op.plan_diagnostics().clone();
+        let op_arc: Arc<dyn KLinOp<Scalar = S>> = Arc::new(op);
+
+        let ones = vec![S::one(); n];
+        let mut rhs_global = vec![S::zero(); n];
+        csr_sparse.spmv(&ones, &mut rhs_global);
+        let rhs = rhs_global[row_start..row_end].to_vec();
+
+        let local_n = row_end - row_start;
+        let backend = classify_backend(comm.size(), local_n, n);
+
+        Ok(Problem {
+            op: op_arc,
+            dist_plan_diagnostics,
+            rhs,
+            rhs_source: RhsSource::GeneratedAOnes,
+            solution_reference,
+            csr_for_pc: Arc::new(local_pc_block),
+            local_rows_nnz: local_csr.values().len(),
+            zero_global_rows_local: count_zero_rows(&local_csr),
+            local_n,
+            global_n: n,
+            global_row_start: row_start,
+            comm: comm.clone(),
+            backend,
+            backend_descr: format!(
+                "Generated shifted Poisson CSR ({}x{} grid, shift={alpha:.3}+{beta:.3}i)",
+                nx, ny
+            ),
+            generated_case: true,
+        })
+    }
+
+    fn build_shifted_poisson_csr(
+        nx: usize,
+        ny: usize,
+        alpha: f64,
+        beta: f64,
+    ) -> SparseCsrMatrix<S> {
+        let n = nx * ny;
+        let shift = S::from_parts(alpha, beta);
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        let mut col_idx = Vec::with_capacity(n * 5);
+        let mut values = Vec::with_capacity(n * 5);
+        row_ptr.push(0);
+
+        for iy in 0..ny {
+            for ix in 0..nx {
+                let row = iy * nx + ix;
+                let mut entries = Vec::with_capacity(5);
+                if iy > 0 {
+                    entries.push((row - nx, S::from_real(-1.0)));
+                }
+                if ix > 0 {
+                    entries.push((row - 1, S::from_real(-1.0)));
+                }
+                entries.push((row, S::from_real(4.0) + shift));
+                if ix + 1 < nx {
+                    entries.push((row + 1, S::from_real(-1.0)));
+                }
+                if iy + 1 < ny {
+                    entries.push((row + nx, S::from_real(-1.0)));
+                }
+                entries.sort_by_key(|&(col, _)| col);
+                for (col, val) in entries {
+                    col_idx.push(col);
+                    values.push(val);
+                }
+                row_ptr.push(col_idx.len());
+            }
+        }
+
+        SparseCsrMatrix::from_csr(n, n, row_ptr, col_idx, values)
+    }
+
     fn load_problem_complex(
         mat_path: &Path,
         comm: &UniverseComm,
@@ -2612,6 +2796,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             comm: comm.clone(),
             backend,
             backend_descr: "Distributed CSR (complex)".to_string(),
+            generated_case: false,
         })
     }
 
@@ -2707,6 +2892,103 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             }
         }
         None
+    }
+
+    #[test]
+    fn shifted_poisson_generated_matrix_dimensions_and_diagonal_are_valid() {
+        let matrix = build_shifted_poisson_csr(4, 3, 1.0, 0.25);
+        assert_eq!(matrix.nrows(), 12);
+        assert_eq!(matrix.ncols(), 12);
+        assert_eq!(matrix.row_ptr().len(), 13);
+        assert!(matrix.values().len() >= 12);
+
+        for row in 0..matrix.nrows() {
+            let start = matrix.row_ptr()[row];
+            let end = matrix.row_ptr()[row + 1];
+            let diag = (start..end)
+                .find(|&nz| matrix.col_idx()[nz] == row)
+                .map(|nz| matrix.values()[nz]);
+            assert!(
+                diag.is_some_and(|v| v.abs() > 0.0),
+                "row {row} must have a nonzero diagonal"
+            );
+        }
+    }
+
+    #[test]
+    fn shifted_poisson_partition_has_nonzero_local_rows_for_typical_rank_counts() {
+        let matrix = build_shifted_poisson_csr(4, 4, 1.0, 0.25);
+        for size in [1usize, 2, 3, 4, 8] {
+            let part = partition_rows_balanced_for_size(matrix.nrows(), size);
+            for rank in 0..size {
+                let row_start = part[rank];
+                let row_end = part[rank + 1];
+                let local = slice_csr_rows(&matrix, row_start, row_end);
+                assert!(
+                    local.nrows() > 0,
+                    "rank {rank}/{size} should own at least one generated Poisson row"
+                );
+                assert!(
+                    local.values().len() > 0,
+                    "rank {rank}/{size} should own generated Poisson nonzeros"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shifted_poisson_problem_rhs_matches_a_times_ones() {
+        #[cfg(feature = "mpi")]
+        let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+        #[cfg(not(feature = "mpi"))]
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let nx = 5usize;
+        let ny = 4usize;
+        let alpha = 1.0;
+        let beta = 0.25;
+        let problem = build_shifted_poisson_case(&comm, nx, ny, alpha, beta)
+            .expect("build generated shifted Poisson problem");
+        let matrix = build_shifted_poisson_csr(nx, ny, alpha, beta);
+        let ones = vec![S::one(); matrix.ncols()];
+        let mut expected_global = vec![S::zero(); matrix.nrows()];
+        matrix.spmv(&ones, &mut expected_global);
+        let expected =
+            &expected_global[problem.global_row_start..problem.global_row_start + problem.local_n];
+
+        assert_eq!(problem.global_n, nx * ny);
+        assert_eq!(problem.local_n, problem.rhs.len());
+        assert_eq!(problem.rhs_source, RhsSource::GeneratedAOnes);
+        assert!(problem.generated_case);
+        assert_eq!(problem.rhs, expected);
+    }
+
+    #[test]
+    fn shifted_poisson_default_pcs_include_requested_generated_set() {
+        #[cfg(feature = "mpi")]
+        let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+        #[cfg(not(feature = "mpi"))]
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let problem = build_shifted_poisson_case(&comm, 4, 4, 1.0, 0.25)
+            .expect("build generated shifted Poisson problem");
+        let cfg = BenchmarkConfig {
+            restarts: vec![20],
+            ..BenchmarkConfig::default()
+        };
+        let pcs = RunSpec::build_default_matrix(&cfg, &problem)
+            .into_iter()
+            .map(|spec| spec.pc)
+            .collect::<Vec<_>>();
+
+        assert!(pcs.contains(&PcKind::None));
+        assert!(pcs.contains(&PcKind::JacobiWeak));
+        assert!(pcs.contains(&PcKind::LocalIluk { k: 1 }));
+        if problem.comm.size() > 1 {
+            assert!(pcs.contains(&PcKind::MpiBlockJacobiIlu0Local));
+        } else {
+            assert!(pcs.contains(&PcKind::Ilu0Local));
+        }
     }
 
     #[test]
@@ -2854,6 +3136,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             comm,
             backend: CsrBackend::Serial,
             backend_descr: "unit-test".to_string(),
+            generated_case: false,
         };
         let spec = RunSpec {
             restart: 10,
@@ -2917,6 +3200,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             comm,
             backend: CsrBackend::Serial,
             backend_descr: "unit-test".to_string(),
+            generated_case: false,
         };
         let spec = RunSpec {
             restart: 5,
@@ -2996,6 +3280,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             comm,
             backend: CsrBackend::Serial,
             backend_descr: "unit-test".to_string(),
+            generated_case: false,
         };
         let spec = RunSpec {
             restart: 5,
@@ -3058,6 +3343,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             comm,
             backend: CsrBackend::Serial,
             backend_descr: "unit-test".to_string(),
+            generated_case: false,
         };
         let spec = RunSpec {
             restart: 5,
