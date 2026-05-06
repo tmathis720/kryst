@@ -26,18 +26,18 @@ mod complex_demo {
     use kryst::algebra::bridge::BridgeScratch;
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
+    use kryst::matrix::DistCsrOp;
     use kryst::matrix::dist_csr::DistributedPlanDiagnostics;
     use kryst::matrix::sparse::CsrMatrix as SparseCsrMatrix;
-    use kryst::matrix::DistCsrOp;
     use kryst::ops::klinop::KLinOp;
     use kryst::ops::kpc::KPreconditioner;
     use kryst::parallel::{Comm, UniverseComm};
+    use kryst::preconditioner::PcSide;
+    use kryst::preconditioner::Preconditioner;
     use kryst::preconditioner::ilu_csr::{
         IluCsr, IluCsrConfig, IluKind, ReorderingKind, ReorderingOptions,
     };
     use kryst::preconditioner::jacobi::Jacobi;
-    use kryst::preconditioner::PcSide;
-    use kryst::preconditioner::Preconditioner;
     use kryst::solver::fgmres::{
         FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, ResidualCheckPolicy,
     };
@@ -231,10 +231,11 @@ mod complex_demo {
                 );
                 if config.run_mode == RunMode::Scalability {
                     println!(
-                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>17} {:>14} {:>12}",
+                        "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>17} {:>14} {:>12}",
                         "Op",
                         "Exec",
                         "PCdom",
+                        "PC apply",
                         "Method",
                         "Effective policy",
                         "Med(s)",
@@ -247,13 +248,14 @@ mod complex_demo {
                         "Rec/Reported",
                         "DOF/s"
                     );
-                    println!("{}", "-".repeat(196));
+                    println!("{}", "-".repeat(240));
                 } else if include_dof_col {
                     println!(
-                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                        "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
                         "Op",
                         "Exec",
                         "PCdom",
+                        "PC apply",
                         "Method",
                         "Requested policy",
                         "Effective policy",
@@ -271,13 +273,14 @@ mod complex_demo {
                         "Reason",
                         "DOF/s"
                     );
-                    println!("{}", "-".repeat(304));
+                    println!("{}", "-".repeat(348));
                 } else {
                     println!(
-                        "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26}",
+                        "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26}",
                         "Op",
                         "Exec",
                         "PCdom",
+                        "PC apply",
                         "Method",
                         "Requested policy",
                         "Effective policy",
@@ -294,10 +297,10 @@ mod complex_demo {
                         "x_err(rel)",
                         "Reason"
                     );
-                    println!("{}", "-".repeat(288));
+                    println!("{}", "-".repeat(332));
                 }
                 println!(
-                    "Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global matrix ILU, own0=owned-block overlap=0 local ILU/ASM, n/a=no ILU domain)."
+                    "Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global matrix ILU, own0=owned-block overlap=0 local ILU/ASM, n/a=no ILU domain), PC apply=how the preconditioner is applied."
                 );
             }
 
@@ -310,35 +313,10 @@ mod complex_demo {
                     }
                     Err(err) => {
                         if rank == 0 {
-                            if config.run_mode == RunMode::Scalability {
-                                println!(
-                                    "{:<36} {:<34} {:>9} {:>9} {:>7} {:>6} {:>14} {:>12}",
-                                    spec.method_label(),
-                                    "N/A",
-                                    "FAIL",
-                                    "FAIL",
-                                    "N/A",
-                                    "N/A",
-                                    "N/A",
-                                    "N/A"
-                                );
-                            } else {
-                                println!(
-                                    "{:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>6} {:>14} {:>14} {:>14} {:>26}",
-                                    spec.method_label(),
-                                    spec.requested_policy_label(),
-                                    "N/A",
-                                    "FAIL",
-                                    "FAIL",
-                                    "FAIL",
-                                    "N/A",
-                                    "N/A",
-                                    "N/A",
-                                    "N/A",
-                                    "N/A",
-                                    "N/A"
-                                );
-                            }
+                            println!(
+                                "{}",
+                                render_failure_result_row(&spec, config.run_mode, &problem)
+                            );
                             println!("    → {err}");
                         }
                     }
@@ -426,6 +404,7 @@ mod complex_demo {
         operator_storage: &'static str,
         execution_backend: &'static str,
         pc_domain: &'static str,
+        pc_apply: &'static str,
         method: String,
         requested_policy: String,
         effective_policy: String,
@@ -1147,6 +1126,28 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         }
     }
 
+    fn pc_apply_label(pc: PcKind, problem: &Problem) -> &'static str {
+        pc_apply_label_for_size(pc, problem.comm.size())
+    }
+
+    fn pc_apply_label_for_size(pc: PcKind, comm_size: usize) -> &'static str {
+        match pc {
+            PcKind::ReplicatedFullIlu0 | PcKind::ReplicatedFullIluk { .. } => {
+                if comm_size > 1 {
+                    "replicated/full/allgather, not scalable"
+                } else {
+                    "replicated/full"
+                }
+            }
+            PcKind::Ilu0Local
+            | PcKind::IlutLocal
+            | PcKind::MpiBlockJacobiIlu0Local
+            | PcKind::LocalIluk { .. } => "owned-block/overlap0",
+            PcKind::JacobiWeak => "jacobi/local",
+            PcKind::None => "none",
+        }
+    }
+
     const ILUT_REAL_PROJECTION_FALLBACK_LABEL: &str = "ILUT(real-projection fallback)";
 
     impl PcKind {
@@ -1351,11 +1352,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 for nz in row_ptr[r]..row_ptr[r + 1] {
                     row_inf = row_inf.max(vals[nz].abs());
                 }
-                if row_inf > tiny {
-                    1.0 / row_inf
-                } else {
-                    1.0
-                }
+                if row_inf > tiny { 1.0 / row_inf } else { 1.0 }
             })
             .collect()
     }
@@ -1934,6 +1931,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             operator_storage: operator_storage_label(problem),
             execution_backend: execution_backend_label(problem),
             pc_domain: pc_domain_label(spec.pc),
+            pc_apply: pc_apply_label(spec.pc, problem),
             method: format!(
                 "{} [row-scale={}]",
                 spec.method_label(),
@@ -2230,10 +2228,11 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             return format!(
-                "{:<7} {:<8} {:<6} {:<36} {:<34} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>17} {:>14.2e} {:>12}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>17} {:>14.2e} {:>12}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
+                row.pc_apply,
                 row.method,
                 row.effective_policy,
                 row.median_solve_secs,
@@ -2272,10 +2271,11 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             format!(
-                "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>26?} {:>12}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>26?} {:>12}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
+                row.pc_apply,
                 row.method,
                 row.requested_policy,
                 row.effective_policy,
@@ -2295,10 +2295,11 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             )
         } else {
             format!(
-                "{:<7} {:<8} {:<6} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>26?}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>26?}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
+                row.pc_apply,
                 row.method,
                 row.requested_policy,
                 row.effective_policy,
@@ -2314,6 +2315,81 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 explicit_true_rel,
                 x_error_rel,
                 row.reason
+            )
+        }
+    }
+
+    fn render_failure_result_row(spec: &RunSpec, mode: RunMode, problem: &Problem) -> String {
+        let include_dof_col = matches!(
+            problem.backend,
+            CsrBackend::Serial | CsrBackend::Distributed
+        );
+        if mode == RunMode::Scalability {
+            return format!(
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>17} {:>14} {:>12}",
+                operator_storage_label(problem),
+                execution_backend_label(problem),
+                pc_domain_label(spec.pc),
+                pc_apply_label(spec.pc, problem),
+                spec.method_label(),
+                "N/A",
+                "FAIL",
+                "FAIL",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A"
+            );
+        }
+        if include_dof_col {
+            format!(
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                operator_storage_label(problem),
+                execution_backend_label(problem),
+                pc_domain_label(spec.pc),
+                pc_apply_label(spec.pc, problem),
+                spec.method_label(),
+                spec.requested_policy_label(),
+                "N/A",
+                "FAIL",
+                "FAIL",
+                "FAIL",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A"
+            )
+        } else {
+            format!(
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26}",
+                operator_storage_label(problem),
+                execution_backend_label(problem),
+                pc_domain_label(spec.pc),
+                pc_apply_label(spec.pc, problem),
+                spec.method_label(),
+                spec.requested_policy_label(),
+                "N/A",
+                "FAIL",
+                "FAIL",
+                "FAIL",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A",
+                "N/A"
             )
         }
     }
@@ -2680,19 +2756,23 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
 
         let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
         assert!(row.requested_policy.contains("restart=5"));
-        assert!(row
-            .requested_policy
-            .contains("residual-check=on-convergence"));
+        assert!(
+            row.requested_policy
+                .contains("residual-check=on-convergence")
+        );
         assert!(row.effective_policy.contains("restart=16"));
-        assert!(row
-            .effective_policy
-            .contains("residual-check=every-iteration"));
+        assert!(
+            row.effective_policy
+                .contains("residual-check=every-iteration")
+        );
 
         let rendered = render_result_row(&row, RunMode::Correctness, &problem);
         assert!(rendered.contains(&row.requested_policy));
         assert!(rendered.contains(&row.effective_policy));
+        assert_eq!(row.pc_apply, "none");
         assert!(rendered.contains("csr-cx"));
         assert!(rendered.contains("ser"));
+        assert!(rendered.contains("none"));
     }
 
     #[test]
@@ -2752,16 +2832,39 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
         assert!(row.requested_policy.contains("restart=5"));
         assert!(row.effective_policy.contains("restart=5"));
-        assert!(row
-            .effective_policy
-            .contains("residual-check=on-convergence"));
+        assert!(
+            row.effective_policy
+                .contains("residual-check=on-convergence")
+        );
     }
 
     #[test]
     fn metadata_labels_snapshot() {
         assert_eq!(pc_domain_label(PcKind::ReplicatedFullIlu0), "full");
+        assert_eq!(
+            pc_apply_label_for_size(PcKind::ReplicatedFullIlu0, 2),
+            "replicated/full/allgather, not scalable"
+        );
+        assert_eq!(
+            pc_apply_label_for_size(PcKind::ReplicatedFullIlu0, 1),
+            "replicated/full"
+        );
+        assert_eq!(pc_domain_label(PcKind::ReplicatedFullIluk { k: 1 }), "full");
+        assert_eq!(
+            pc_apply_label_for_size(PcKind::ReplicatedFullIluk { k: 1 }, 2),
+            "replicated/full/allgather, not scalable"
+        );
         assert_eq!(pc_domain_label(PcKind::Ilu0Local), "own0");
+        assert_eq!(
+            pc_apply_label_for_size(PcKind::Ilu0Local, 2),
+            "owned-block/overlap0"
+        );
         assert_eq!(pc_domain_label(PcKind::None), "n/a");
+        assert_eq!(pc_apply_label_for_size(PcKind::None, 2), "none");
+        assert_eq!(
+            pc_apply_label_for_size(PcKind::JacobiWeak, 2),
+            "jacobi/local"
+        );
     }
 
     #[test]
@@ -2914,12 +3017,15 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             pc: PcKind::IlutLocal,
         };
 
-        assert!(spec
-            .method_label()
-            .contains(ILUT_REAL_PROJECTION_FALLBACK_LABEL));
-        assert!(PcKind::IlutLocal
-            .semantic_experiment_key(false)
-            .contains("real-projection-fallback"));
+        assert!(
+            spec.method_label()
+                .contains(ILUT_REAL_PROJECTION_FALLBACK_LABEL)
+        );
+        assert!(
+            PcKind::IlutLocal
+                .semantic_experiment_key(false)
+                .contains("real-projection-fallback")
+        );
     }
 
     #[test]
