@@ -353,3 +353,131 @@ fn complex_nonsymmetric_numeric_update_matches_fresh_setup() {
         );
     }
 }
+
+fn grid_csr_complex(nx: usize, ny: usize) -> CsrMatrix<S> {
+    let n = nx * ny;
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    row_ptr.push(0);
+    for y in 0..ny {
+        for x in 0..nx {
+            let i = y * nx + x;
+            if y > 0 {
+                col_idx.push(i - nx);
+                vals.push(S::from_parts(-0.7, 0.12));
+            }
+            if x > 0 {
+                col_idx.push(i - 1);
+                vals.push(S::from_parts(-0.9, -0.08));
+            }
+            col_idx.push(i);
+            vals.push(S::from_parts(4.4 + 0.03 * i as f64, 0.35));
+            if x + 1 < nx {
+                col_idx.push(i + 1);
+                vals.push(S::from_parts(-0.8, 0.07));
+            }
+            if y + 1 < ny {
+                col_idx.push(i + nx);
+                vals.push(S::from_parts(-0.6, -0.11));
+            }
+            row_ptr.push(col_idx.len());
+        }
+    }
+    CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
+}
+
+fn norm2(v: &[S]) -> f64 {
+    v.iter().map(|z| z.abs() * z.abs()).sum::<f64>().sqrt()
+}
+
+fn assert_complex_ilu_reorder_apply_consistency_and_residual_reduction(kind: ReorderingKind) {
+    use crate::preconditioner::PcSide;
+    use crate::utils::permutation::{Permutation, amd_csr, permute_csr_symmetric, rcm_csr};
+
+    let a = grid_csr_complex(4, 4);
+    let n = a.nrows();
+    let rhs: Vec<S> = (0..n)
+        .map(|i| S::from_parts(1.0 + 0.05 * i as f64, -0.4 + 0.02 * i as f64))
+        .collect();
+
+    let cfg = IluCsrConfig {
+        kind: IluKind::Iluk { k: 1 },
+        reordering: ReorderingOptions {
+            kind,
+            symmetric: true,
+            deterministic: true,
+        },
+        conditioning: ConditioningOptions::default(),
+        ..IluCsrConfig::default()
+    };
+    let mut reordered = IluCsr::new_with_config(cfg);
+    reordered.setup(&a).unwrap();
+    assert_eq!(
+        reordered.complex_kernel_mode(),
+        IluComplexKernelMode::Native
+    );
+
+    let mut actual = vec![S::zero(); n];
+    reordered.apply(PcSide::Left, &rhs, &mut actual).unwrap();
+    assert!(actual.iter().all(|v| v.is_finite()));
+
+    let a_real = CsrMatrix::from_csr(
+        a.nrows(),
+        a.ncols(),
+        a.row_ptr().to_vec(),
+        a.col_idx().to_vec(),
+        a.values().iter().map(|v| v.real()).collect(),
+    );
+    let perm = match kind {
+        ReorderingKind::None => Permutation::identity(n),
+        ReorderingKind::Rcm => rcm_csr(&a_real),
+        ReorderingKind::Amd => amd_csr(&a_real),
+    };
+    let a_perm = permute_csr_symmetric(&a, &perm);
+    let manual_cfg = IluCsrConfig {
+        kind: IluKind::Iluk { k: 1 },
+        reordering: ReorderingOptions::default(),
+        conditioning: ConditioningOptions::default(),
+        ..IluCsrConfig::default()
+    };
+    let mut manual = IluCsr::new_with_config(manual_cfg);
+    manual.setup(&a_perm).unwrap();
+    assert_eq!(manual.complex_kernel_mode(), IluComplexKernelMode::Native);
+
+    let mut rhs_perm = vec![S::zero(); n];
+    perm.apply_vec(&rhs, &mut rhs_perm);
+    let mut y_perm = vec![S::zero(); n];
+    manual.apply(PcSide::Left, &rhs_perm, &mut y_perm).unwrap();
+    let mut expected = vec![S::zero(); n];
+    perm.apply_vec_t(&y_perm, &mut expected);
+
+    for (i, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (*a - *e).abs() < 1e-9,
+            "reordered apply should match explicit permutation pipeline for {kind:?} at {i}: actual={a:?}, expected={e:?}"
+        );
+    }
+
+    let rhs_norm = norm2(&rhs);
+    let reduced = residual_norm(&a, &actual, &rhs);
+    assert!(
+        reduced < 0.35 * rhs_norm,
+        "{kind:?} residual {reduced:.6e} should reduce RHS norm {rhs_norm:.6e}"
+    );
+}
+
+#[test]
+fn ilu_csr_complex_apply_pipeline_none_is_consistent_and_reduces_residual() {
+    assert_complex_ilu_reorder_apply_consistency_and_residual_reduction(ReorderingKind::None);
+}
+
+#[test]
+fn ilu_csr_complex_apply_pipeline_rcm_is_consistent_and_reduces_residual() {
+    assert_complex_ilu_reorder_apply_consistency_and_residual_reduction(ReorderingKind::Rcm);
+}
+
+#[test]
+fn ilu_csr_complex_apply_pipeline_amd_is_consistent_and_reduces_residual() {
+    assert_complex_ilu_reorder_apply_consistency_and_residual_reduction(ReorderingKind::Amd);
+}
