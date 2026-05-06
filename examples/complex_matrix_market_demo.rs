@@ -26,16 +26,16 @@ mod complex_demo {
     use kryst::algebra::bridge::BridgeScratch;
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
-    use kryst::matrix::DistCsrOp;
     use kryst::matrix::dist_csr::DistributedPlanDiagnostics;
     use kryst::matrix::sparse::CsrMatrix as SparseCsrMatrix;
+    use kryst::matrix::DistCsrOp;
     use kryst::ops::klinop::KLinOp;
     use kryst::ops::kpc::KPreconditioner;
     use kryst::parallel::{Comm, UniverseComm};
-    use kryst::preconditioner::PcSide;
-    use kryst::preconditioner::Preconditioner;
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::jacobi::Jacobi;
+    use kryst::preconditioner::PcSide;
+    use kryst::preconditioner::Preconditioner;
     use kryst::solver::fgmres::{
         FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, ResidualCheckPolicy,
     };
@@ -106,7 +106,7 @@ mod complex_demo {
             println!("FGMRES haptol: {:.3e}", config.fgmres_haptol);
             if config.run_mode == RunMode::Correctness {
                 println!(
-                "Replicated check marker: {}",
+                    "Replicated check marker: {}",
                     if config.mark_replicated_check {
                         "enabled (metadata-only)"
                     } else {
@@ -285,7 +285,9 @@ mod complex_demo {
                     );
                     println!("{}", "-".repeat(288));
                 }
-                println!("Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global matrix ILU, own0=owned-block overlap=0 local ILU/ASM, n/a=no ILU domain).");
+                println!(
+                    "Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global matrix ILU, own0=owned-block overlap=0 local ILU/ASM, n/a=no ILU domain)."
+                );
             }
 
             let runs = RunSpec::build_default_matrix(&config, &problem);
@@ -1026,7 +1028,10 @@ mod complex_demo {
     fn pc_domain_label(pc: PcKind) -> &'static str {
         match pc {
             PcKind::ReplicatedFullIlu0 | PcKind::ReplicatedFullIluk { .. } => "full",
-            PcKind::Ilu0Local | PcKind::IlutLocal | PcKind::MpiBlockJacobiIlu0Local | PcKind::LocalIluk { .. } => "own0",
+            PcKind::Ilu0Local
+            | PcKind::IlutLocal
+            | PcKind::MpiBlockJacobiIlu0Local
+            | PcKind::LocalIluk { .. } => "own0",
             PcKind::None | PcKind::JacobiWeak => "n/a",
         }
     }
@@ -1195,7 +1200,11 @@ mod complex_demo {
                 for nz in row_ptr[r]..row_ptr[r + 1] {
                     row_inf = row_inf.max(vals[nz].abs());
                 }
-                if row_inf > tiny { 1.0 / row_inf } else { 1.0 }
+                if row_inf > tiny {
+                    1.0 / row_inf
+                } else {
+                    1.0
+                }
             })
             .collect()
     }
@@ -1212,6 +1221,194 @@ mod complex_demo {
             }
         }
         SparseCsrMatrix::from_csr(matrix.nrows(), matrix.ncols(), row_ptr, col_idx, values)
+    }
+
+    fn validate_replicated_full_apply_layout(
+        x_local: &[S],
+        y_local: &[S],
+        global_n: usize,
+        global_row_start: usize,
+        local_n: usize,
+    ) -> Result<(), KError> {
+        if x_local.len() != local_n {
+            return Err(KError::InvalidInput(format!(
+                "replicated ILU apply expected x_local length {local_n}, got {}",
+                x_local.len()
+            )));
+        }
+        if y_local.len() != local_n {
+            return Err(KError::InvalidInput(format!(
+                "replicated ILU apply expected y_local length {local_n}, got {}",
+                y_local.len()
+            )));
+        }
+        if global_row_start > global_n || local_n > global_n - global_row_start {
+            return Err(KError::InvalidInput(format!(
+                "replicated ILU apply invalid owned segment: global_n={global_n}, \
+                 global_row_start={global_row_start}, local_n={local_n}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn allgather_owned_segment_in_rank_order(
+        comm: &UniverseComm,
+        x_local: &[S],
+        global_n: usize,
+        global_row_start: usize,
+        local_n: usize,
+        x_global: &mut [S],
+    ) -> Result<(), KError> {
+        validate_replicated_full_apply_layout(
+            x_local,
+            &vec![S::zero(); local_n],
+            global_n,
+            global_row_start,
+            local_n,
+        )?;
+        if x_global.len() != global_n {
+            return Err(KError::InvalidInput(format!(
+                "replicated ILU apply expected x_global scratch length {global_n}, got {}",
+                x_global.len()
+            )));
+        }
+
+        x_global.fill(S::zero());
+
+        #[cfg(feature = "mpi")]
+        {
+            use mpi::traits::*;
+
+            if let UniverseComm::Mpi(comm_impl) = comm {
+                let rank = comm_impl.rank;
+                let size = comm_impl.size;
+                let local_len = i32::try_from(local_n).map_err(|_| {
+                    KError::InvalidInput(format!(
+                        "replicated ILU apply local_n={local_n} exceeds MPI i32 length limit"
+                    ))
+                })?;
+                let mut lengths = vec![0i32; size];
+                comm_impl
+                    .world
+                    .all_gather_into(&local_len, &mut lengths[..]);
+
+                let mut offset = 0usize;
+                for (r, &len_i32) in lengths.iter().enumerate() {
+                    if len_i32 < 0 {
+                        return Err(KError::InvalidInput(format!(
+                            "replicated ILU apply received negative segment length from rank {r}"
+                        )));
+                    }
+                    let len = len_i32 as usize;
+                    if r == rank {
+                        if len != x_local.len() || len != local_n {
+                            return Err(KError::InvalidInput(format!(
+                                "replicated ILU apply local length mismatch: gathered={len}, \
+                                 x_local={}, local_n={local_n}",
+                                x_local.len()
+                            )));
+                        }
+                        if offset != global_row_start {
+                            return Err(KError::InvalidInput(format!(
+                                "replicated ILU apply offset mismatch: gathered prefix={offset}, \
+                                 global_row_start={global_row_start}"
+                            )));
+                        }
+                    }
+                    offset = offset.checked_add(len).ok_or_else(|| {
+                        KError::InvalidInput(
+                            "replicated ILU apply segment lengths overflowed usize".into(),
+                        )
+                    })?;
+                }
+                if offset != global_n {
+                    return Err(KError::InvalidInput(format!(
+                        "replicated ILU apply expected global_n={global_n}, gathered owned lengths sum={offset}"
+                    )));
+                }
+
+                let max_len = lengths.iter().copied().max().unwrap_or(0) as usize;
+                let mut send = vec![0.0f64; 2 * max_len];
+                for (i, value) in x_local.iter().copied().enumerate() {
+                    send[2 * i] = value.real();
+                    send[2 * i + 1] = value.imag();
+                }
+                let mut gathered = vec![0.0f64; 2 * max_len * size];
+                if max_len > 0 {
+                    comm_impl
+                        .world
+                        .all_gather_into(&send[..], &mut gathered[..]);
+                }
+
+                let mut offset = 0usize;
+                for (r, &len_i32) in lengths.iter().enumerate() {
+                    let len = len_i32 as usize;
+                    let start = 2 * r * max_len;
+                    for i in 0..len {
+                        x_global[offset + i] =
+                            S::from_parts(gathered[start + 2 * i], gathered[start + 2 * i + 1]);
+                    }
+                    offset += len;
+                }
+                return Ok(());
+            }
+        }
+
+        if comm.size() != 1 || global_row_start != 0 || local_n != global_n {
+            return Err(KError::InvalidInput(
+                "replicated ILU apply requires MPI allgather for distributed owned segments".into(),
+            ));
+        }
+        x_global.copy_from_slice(x_local);
+        Ok(())
+    }
+
+    fn apply_replicated_full_ilu_owned_segment(
+        ilu: &IluCsr,
+        comm: &UniverseComm,
+        side: PcSide,
+        x_local: &[S],
+        y_local: &mut [S],
+        scratch: &mut BridgeScratch,
+        global_n: usize,
+        global_row_start: usize,
+        local_n: usize,
+        scratch_in: &std::sync::Mutex<Vec<S>>,
+        scratch_out: &std::sync::Mutex<Vec<S>>,
+    ) -> Result<(), KError> {
+        validate_replicated_full_apply_layout(
+            x_local,
+            y_local,
+            global_n,
+            global_row_start,
+            local_n,
+        )?;
+
+        let mut in_full = scratch_in.lock().map_err(|_| {
+            KError::InvalidInput("failed to lock replicated ILU input scratch".into())
+        })?;
+        let mut out_full = scratch_out.lock().map_err(|_| {
+            KError::InvalidInput("failed to lock replicated ILU output scratch".into())
+        })?;
+        if out_full.len() != global_n {
+            return Err(KError::InvalidInput(format!(
+                "replicated ILU apply expected output scratch length {global_n}, got {}",
+                out_full.len()
+            )));
+        }
+
+        allgather_owned_segment_in_rank_order(
+            comm,
+            x_local,
+            global_n,
+            global_row_start,
+            local_n,
+            &mut in_full,
+        )?;
+        out_full.fill(S::zero());
+        ilu.apply_s(side, &in_full, &mut out_full, scratch)?;
+        y_local.copy_from_slice(&out_full[global_row_start..global_row_start + local_n]);
+        Ok(())
     }
 
     fn run_once(
@@ -1259,6 +1456,7 @@ mod complex_demo {
             MpiBlockJacobiIlu0(IluCsr),
             ReplicatedFull {
                 ilu: IluCsr,
+                comm: UniverseComm,
                 global_n: usize,
                 global_row_start: usize,
                 local_n: usize,
@@ -1300,32 +1498,25 @@ mod complex_demo {
                     Self::MpiBlockJacobiIlu0(pc) => pc.apply_s(side, x, y, scratch),
                     Self::ReplicatedFull {
                         ilu,
+                        comm,
                         global_n,
                         global_row_start,
                         local_n,
                         scratch_in,
                         scratch_out,
-                    } => {
-                        let mut in_full = scratch_in.lock().map_err(|_| {
-                            KError::InvalidInput(
-                                "failed to lock replicated ILU input scratch".into(),
-                            )
-                        })?;
-                        let mut out_full = scratch_out.lock().map_err(|_| {
-                            KError::InvalidInput(
-                                "failed to lock replicated ILU output scratch".into(),
-                            )
-                        })?;
-                        in_full.fill(S::zero());
-                        in_full[*global_row_start..(*global_row_start + *local_n)]
-                            .copy_from_slice(x);
-                        let _ = global_n;
-                        ilu.apply_s(side, &in_full, &mut out_full, scratch)?;
-                        y.copy_from_slice(
-                            &out_full[*global_row_start..(*global_row_start + *local_n)],
-                        );
-                        Ok(())
-                    }
+                    } => apply_replicated_full_ilu_owned_segment(
+                        ilu,
+                        comm,
+                        side,
+                        x,
+                        y,
+                        scratch,
+                        *global_n,
+                        *global_row_start,
+                        *local_n,
+                        scratch_in,
+                        scratch_out,
+                    ),
                 }
             }
         }
@@ -1375,6 +1566,7 @@ mod complex_demo {
                     PcKind::ReplicatedFullIlu0 | PcKind::ReplicatedFullIluk { .. } => {
                         PcHandle::ReplicatedFull {
                             ilu,
+                            comm: problem.comm.clone(),
                             global_n: problem.global_n,
                             global_row_start: problem.global_row_start,
                             local_n: problem.local_n,
@@ -1746,7 +1938,10 @@ mod complex_demo {
         }
     }
 
-    fn format_csr_for_pc_diagnostics(method_label: &str, diag: &CsrForPcDiagnosticsGlobal) -> String {
+    fn format_csr_for_pc_diagnostics(
+        method_label: &str,
+        diag: &CsrForPcDiagnosticsGlobal,
+    ) -> String {
         let pivot_text = diag
             .pivot_perturbation_count
             .as_ref()
@@ -1759,12 +1954,30 @@ mod complex_demo {
             .unwrap_or_else(|| "N/A".to_string());
         format!(
             "[diag][rank0] {method_label}: nnz(A_ii):global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; nnz(local rows):global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; nnz_ratio:global_sum={:.3e},rank_min={:.3e},rank_max={:.3e},rank0_local={:.3e}; |diag|min:global_sum={:.3e},rank_min={:.3e},rank_max={:.3e},rank0_local={:.3e}; |diag|max:global_sum={:.3e},rank_min={:.3e},rank_max={:.3e},rank0_local={:.3e}; tiny/missing diag:global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; pivot perturbations={}",
-            diag.nnz_local_block.global_sum, diag.nnz_local_block.rank_min, diag.nnz_local_block.rank_max, diag.nnz_local_block.rank0_local,
-            diag.nnz_local_rows.global_sum, diag.nnz_local_rows.rank_min, diag.nnz_local_rows.rank_max, diag.nnz_local_rows.rank0_local,
-            diag.nnz_ratio.global_sum, diag.nnz_ratio.rank_min, diag.nnz_ratio.rank_max, diag.nnz_ratio.rank0_local,
-            diag.diag_min_abs.global_sum, diag.diag_min_abs.rank_min, diag.diag_min_abs.rank_max, diag.diag_min_abs.rank0_local,
-            diag.diag_max_abs.global_sum, diag.diag_max_abs.rank_min, diag.diag_max_abs.rank_max, diag.diag_max_abs.rank0_local,
-            diag.diag_tiny_or_missing_count.global_sum, diag.diag_tiny_or_missing_count.rank_min, diag.diag_tiny_or_missing_count.rank_max, diag.diag_tiny_or_missing_count.rank0_local,
+            diag.nnz_local_block.global_sum,
+            diag.nnz_local_block.rank_min,
+            diag.nnz_local_block.rank_max,
+            diag.nnz_local_block.rank0_local,
+            diag.nnz_local_rows.global_sum,
+            diag.nnz_local_rows.rank_min,
+            diag.nnz_local_rows.rank_max,
+            diag.nnz_local_rows.rank0_local,
+            diag.nnz_ratio.global_sum,
+            diag.nnz_ratio.rank_min,
+            diag.nnz_ratio.rank_max,
+            diag.nnz_ratio.rank0_local,
+            diag.diag_min_abs.global_sum,
+            diag.diag_min_abs.rank_min,
+            diag.diag_min_abs.rank_max,
+            diag.diag_min_abs.rank0_local,
+            diag.diag_max_abs.global_sum,
+            diag.diag_max_abs.rank_min,
+            diag.diag_max_abs.rank_max,
+            diag.diag_max_abs.rank0_local,
+            diag.diag_tiny_or_missing_count.global_sum,
+            diag.diag_tiny_or_missing_count.rank_min,
+            diag.diag_tiny_or_missing_count.rank_max,
+            diag.diag_tiny_or_missing_count.rank0_local,
             pivot_text
         )
     }
@@ -2119,6 +2332,79 @@ mod complex_demo {
         }
     }
 
+    #[cfg(feature = "mpi")]
+    #[test]
+    fn replicated_full_ilu_apply_matches_serial_reference_under_mpi() {
+        let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+        let rank = comm.rank();
+        let size = comm.size();
+        let global_n = 4usize;
+        let row_part = partition_rows_balanced_for_size(global_n, size);
+        let row_start = row_part[rank];
+        let row_end = row_part[rank + 1];
+        let local_n = row_end - row_start;
+
+        let matrix = SparseCsrMatrix::from_csr(
+            global_n,
+            global_n,
+            vec![0, 1, 2, 3, 4],
+            vec![0, 1, 2, 3],
+            vec![
+                S::from_parts(2.0, 0.0),
+                S::from_parts(4.0, 0.0),
+                S::from_parts(5.0, 0.0),
+                S::from_parts(10.0, 0.0),
+            ],
+        );
+        let x_global = vec![
+            S::from_parts(2.0, 1.0),
+            S::from_parts(8.0, -4.0),
+            S::from_parts(15.0, 5.0),
+            S::from_parts(40.0, -10.0),
+        ];
+        let x_local = x_global[row_start..row_end].to_vec();
+
+        let mut cfg = IluCsrConfig::default();
+        cfg.kind = IluKind::Ilu0;
+        let mut serial_ilu = IluCsr::new_with_config(cfg.clone());
+        serial_ilu.setup(&matrix).expect("serial ILU setup");
+        let mut replicated_ilu = IluCsr::new_with_config(cfg);
+        replicated_ilu.setup(&matrix).expect("replicated ILU setup");
+
+        let mut scratch = BridgeScratch::default();
+        let mut expected_global = vec![S::zero(); global_n];
+        serial_ilu
+            .apply_s(PcSide::Right, &x_global, &mut expected_global, &mut scratch)
+            .expect("serial ILU apply");
+
+        let mut y_local = vec![S::zero(); local_n];
+        let scratch_in = std::sync::Mutex::new(vec![S::zero(); global_n]);
+        let scratch_out = std::sync::Mutex::new(vec![S::zero(); global_n]);
+        apply_replicated_full_ilu_owned_segment(
+            &replicated_ilu,
+            &comm,
+            PcSide::Right,
+            &x_local,
+            &mut y_local,
+            &mut scratch,
+            global_n,
+            row_start,
+            local_n,
+            &scratch_in,
+            &scratch_out,
+        )
+        .expect("replicated ILU apply");
+
+        let expected_local = &expected_global[row_start..row_end];
+        assert_eq!(y_local.len(), expected_local.len());
+        for (got, expected) in y_local.iter().zip(expected_local.iter()) {
+            assert!(
+                (*got - *expected).abs() <= 1.0e-12,
+                "rank {rank} replicated apply mismatch: got={got:?}, expected={expected:?}"
+            );
+        }
+    }
+
     #[test]
     fn local_ilu_rejects_rectangular_owned_block() {
         #[cfg(feature = "mpi")]
@@ -2236,15 +2522,13 @@ mod complex_demo {
 
         let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
         assert!(row.requested_policy.contains("restart=5"));
-        assert!(
-            row.requested_policy
-                .contains("residual-check=on-convergence")
-        );
+        assert!(row
+            .requested_policy
+            .contains("residual-check=on-convergence"));
         assert!(row.effective_policy.contains("restart=16"));
-        assert!(
-            row.effective_policy
-                .contains("residual-check=every-iteration")
-        );
+        assert!(row
+            .effective_policy
+            .contains("residual-check=every-iteration"));
 
         let rendered = render_result_row(&row, RunMode::Correctness, &problem);
         assert!(rendered.contains(&row.requested_policy));
@@ -2390,22 +2674,18 @@ mod complex_demo {
 
     #[test]
     fn benchmark_config_parses_fgmres_haptol_override() {
-        let cfg = BenchmarkConfig::from_args(vec![
-            "--fgmres-haptol".to_string(),
-            "1e-22".to_string(),
-        ])
-        .expect("parse args");
+        let cfg =
+            BenchmarkConfig::from_args(vec!["--fgmres-haptol".to_string(), "1e-22".to_string()])
+                .expect("parse args");
         assert_eq!(cfg.fgmres_haptol, 1e-22);
     }
 
     #[test]
     fn benchmark_config_rejects_non_positive_or_non_finite_fgmres_haptol() {
         for bad in ["0", "-1", "NaN", "inf"] {
-            let err = BenchmarkConfig::from_args(vec![
-                "--fgmres-haptol".to_string(),
-                bad.to_string(),
-            ])
-            .expect_err("invalid --fgmres-haptol should be rejected");
+            let err =
+                BenchmarkConfig::from_args(vec!["--fgmres-haptol".to_string(), bad.to_string()])
+                    .expect_err("invalid --fgmres-haptol should be rejected");
             match err {
                 KError::InvalidInput(msg) => assert!(msg.contains("--fgmres-haptol")),
                 other => panic!("unexpected error variant: {other:?}"),
