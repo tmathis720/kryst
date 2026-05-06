@@ -26,18 +26,18 @@ mod complex_demo {
     use kryst::algebra::bridge::BridgeScratch;
     use kryst::algebra::prelude::*;
     use kryst::context::ksp_context::{ReorthPolicy, Workspace};
+    use kryst::matrix::DistCsrOp;
     use kryst::matrix::dist_csr::DistributedPlanDiagnostics;
     use kryst::matrix::sparse::CsrMatrix as SparseCsrMatrix;
-    use kryst::matrix::DistCsrOp;
     use kryst::ops::klinop::KLinOp;
     use kryst::ops::kpc::KPreconditioner;
     use kryst::parallel::{Comm, UniverseComm};
+    use kryst::preconditioner::PcSide;
+    use kryst::preconditioner::Preconditioner;
     use kryst::preconditioner::ilu_csr::{
         IluCsr, IluCsrConfig, IluKind, ReorderingKind, ReorderingOptions,
     };
     use kryst::preconditioner::jacobi::Jacobi;
-    use kryst::preconditioner::PcSide;
-    use kryst::preconditioner::Preconditioner;
     use kryst::solver::fgmres::{
         FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, ResidualCheckPolicy,
     };
@@ -385,6 +385,7 @@ mod complex_demo {
         solution_reference: SolutionReferenceDiagnostics,
         csr_for_pc: Arc<SparseCsrMatrix<S>>,
         local_rows_nnz: usize,
+        zero_global_rows_local: usize,
         local_n: usize,
         global_n: usize,
         global_row_start: usize,
@@ -521,6 +522,9 @@ mod complex_demo {
         nnz_local_block: usize,
         nnz_local_rows: usize,
         nnz_ratio: f64,
+        zero_local_rows: usize,
+        zero_global_rows: usize,
+        structural_diag_missing: usize,
         diag_min_abs: f64,
         diag_max_abs: f64,
         diag_tiny_or_missing_count: usize,
@@ -539,6 +543,9 @@ mod complex_demo {
         nnz_local_block: RankSpread,
         nnz_local_rows: RankSpread,
         nnz_ratio: RankSpread,
+        zero_local_rows_rank_count: f64,
+        zero_global_rows: RankSpread,
+        structural_diag_missing: RankSpread,
         diag_min_abs: RankSpread,
         diag_max_abs: RankSpread,
         diag_tiny_or_missing_count: RankSpread,
@@ -1440,11 +1447,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 for nz in row_ptr[r]..row_ptr[r + 1] {
                     row_inf = row_inf.max(vals[nz].abs());
                 }
-                if row_inf > tiny {
-                    1.0 / row_inf
-                } else {
-                    1.0
-                }
+                if row_inf > tiny { 1.0 / row_inf } else { 1.0 }
             })
             .collect()
     }
@@ -1689,7 +1692,11 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         };
         let b = &b_scaled;
         let effective_pc_side = normalized_fgmres_side(spec.pc_side);
-        let csr_pc_diag = csr_for_pc_diagnostics(pc_csr.as_ref(), problem.local_rows_nnz);
+        let csr_pc_diag = csr_for_pc_diagnostics(
+            pc_csr.as_ref(),
+            problem.local_rows_nnz,
+            problem.zero_global_rows_local,
+        );
         enum PcHandle {
             Jacobi(Jacobi),
             Ilu0(IluCsr),
@@ -2083,15 +2090,21 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
     fn csr_for_pc_diagnostics(
         matrix: &SparseCsrMatrix<S>,
         nnz_local_rows: usize,
+        zero_global_rows: usize,
     ) -> CsrForPcDiagnostics {
         let mut diag_min_abs = f64::INFINITY;
         let mut diag_max_abs = 0.0f64;
+        let mut zero_local_rows = 0usize;
+        let mut structural_diag_missing = 0usize;
         let mut diag_tiny_or_missing_count = 0usize;
         let tiny_diag_threshold = 1e-14f64;
         let row_ptr = matrix.row_ptr();
         let col_idx = matrix.col_idx();
         let values = matrix.values();
         for r in 0..matrix.nrows() {
+            if row_ptr[r] == row_ptr[r + 1] {
+                zero_local_rows += 1;
+            }
             let mut diag = None;
             for nz in row_ptr[r]..row_ptr[r + 1] {
                 if col_idx[nz] == r {
@@ -2107,7 +2120,10 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                         diag_tiny_or_missing_count += 1;
                     }
                 }
-                None => diag_tiny_or_missing_count += 1,
+                None => {
+                    structural_diag_missing += 1;
+                    diag_tiny_or_missing_count += 1;
+                }
             }
         }
         if !diag_min_abs.is_finite() {
@@ -2119,6 +2135,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             nnz_local_block,
             nnz_local_rows,
             nnz_ratio,
+            zero_local_rows,
+            zero_global_rows,
+            structural_diag_missing,
             diag_min_abs,
             diag_max_abs,
             diag_tiny_or_missing_count,
@@ -2171,10 +2190,15 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         local: &CsrForPcDiagnostics,
         pivot_perturbation_count: Option<usize>,
     ) -> CsrForPcDiagnosticsGlobal {
+        let zero_local_rows_rank_count =
+            reduce_rank_spread(comm, if local.zero_local_rows > 0 { 1.0 } else { 0.0 }).global_sum;
         CsrForPcDiagnosticsGlobal {
             nnz_local_block: reduce_rank_spread(comm, local.nnz_local_block as f64),
             nnz_local_rows: reduce_rank_spread(comm, local.nnz_local_rows as f64),
             nnz_ratio: reduce_rank_spread(comm, local.nnz_ratio),
+            zero_local_rows_rank_count,
+            zero_global_rows: reduce_rank_spread(comm, local.zero_global_rows as f64),
+            structural_diag_missing: reduce_rank_spread(comm, local.structural_diag_missing as f64),
             diag_min_abs: reduce_rank_spread(comm, local.diag_min_abs),
             diag_max_abs: reduce_rank_spread(comm, local.diag_max_abs),
             diag_tiny_or_missing_count: reduce_rank_spread(
@@ -2200,8 +2224,10 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 )
             })
             .unwrap_or_else(|| "N/A".to_string());
+        let nnz_ratio_global =
+            diag.nnz_local_block.global_sum / diag.nnz_local_rows.global_sum.max(1.0);
         format!(
-            "[diag][rank0] {method_label}: nnz(A_ii):global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; nnz(local rows):global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; nnz_ratio:global_sum={:.3e},rank_min={:.3e},rank_max={:.3e},rank0_local={:.3e}; |diag|min:global_sum={:.3e},rank_min={:.3e},rank_max={:.3e},rank0_local={:.3e}; |diag|max:global_sum={:.3e},rank_min={:.3e},rank_max={:.3e},rank0_local={:.3e}; tiny/missing diag:global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; pivot perturbations={}",
+            "[diag][rank0] {method_label}: nnz(A_ii):global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; nnz(local rows):global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; nnz_ratio_global={:.3e},rank_local_min={:.3e},rank_local_max={:.3e},rank0_local={:.3e}; zero_local_rows_rank_count={:.0}; zero_global_rows:global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; structural_diag_missing:global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; |diag|min:global_sum={:.3e},rank_min={:.3e},rank_max={:.3e},rank0_local={:.3e}; |diag|max:global_sum={:.3e},rank_min={:.3e},rank_max={:.3e},rank0_local={:.3e}; tiny/missing diag:global_sum={:.0},rank_min={:.0},rank_max={:.0},rank0_local={:.0}; pivot perturbations={}",
             diag.nnz_local_block.global_sum,
             diag.nnz_local_block.rank_min,
             diag.nnz_local_block.rank_max,
@@ -2210,10 +2236,19 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             diag.nnz_local_rows.rank_min,
             diag.nnz_local_rows.rank_max,
             diag.nnz_local_rows.rank0_local,
-            diag.nnz_ratio.global_sum,
+            nnz_ratio_global,
             diag.nnz_ratio.rank_min,
             diag.nnz_ratio.rank_max,
             diag.nnz_ratio.rank0_local,
+            diag.zero_local_rows_rank_count,
+            diag.zero_global_rows.global_sum,
+            diag.zero_global_rows.rank_min,
+            diag.zero_global_rows.rank_max,
+            diag.zero_global_rows.rank0_local,
+            diag.structural_diag_missing.global_sum,
+            diag.structural_diag_missing.rank_min,
+            diag.structural_diag_missing.rank_max,
+            diag.structural_diag_missing.rank0_local,
             diag.diag_min_abs.global_sum,
             diag.diag_min_abs.rank_min,
             diag.diag_min_abs.rank_max,
@@ -2570,6 +2605,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             solution_reference,
             csr_for_pc: Arc::new(local_pc_block),
             local_rows_nnz: local_csr.values().len(),
+            zero_global_rows_local: count_zero_rows(&local_csr),
             local_n,
             global_n,
             global_row_start: row_start,
@@ -2577,6 +2613,13 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             backend,
             backend_descr: "Distributed CSR (complex)".to_string(),
         })
+    }
+
+    fn count_zero_rows(matrix: &SparseCsrMatrix<S>) -> usize {
+        let row_ptr = matrix.row_ptr();
+        (0..matrix.nrows())
+            .filter(|&r| row_ptr[r] == row_ptr[r + 1])
+            .count()
     }
 
     fn slice_csr_rows(matrix: &SparseCsrMatrix<S>, start: usize, end: usize) -> SparseCsrMatrix<S> {
@@ -2802,8 +2845,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             rhs: vec![S::one(), S::one()],
             rhs_source: RhsSource::GeneratedAOnes,
             solution_reference: solution_reference_diagnostics(&rectangular_pc),
-            csr_for_pc: Arc::new(rectangular_pc),
+            csr_for_pc: Arc::new(rectangular_pc.clone()),
             local_rows_nnz: op_local.values().len(),
+            zero_global_rows_local: count_zero_rows(&op_local),
             local_n: 2,
             global_n: 2,
             global_row_start: 0,
@@ -2864,8 +2908,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             rhs: vec![S::one(), S::one()],
             rhs_source: RhsSource::GeneratedAOnes,
             solution_reference: solution_reference_diagnostics(&op_local),
-            csr_for_pc: Arc::new(op_local),
+            csr_for_pc: Arc::new(op_local.clone()),
             local_rows_nnz: 2,
+            zero_global_rows_local: count_zero_rows(&op_local),
             local_n: 2,
             global_n: 2,
             global_row_start: 0,
@@ -2891,13 +2936,15 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
 
         let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
         assert!(row.requested_policy.contains("restart=5"));
-        assert!(row
-            .requested_policy
-            .contains("residual-check=on-convergence"));
+        assert!(
+            row.requested_policy
+                .contains("residual-check=on-convergence")
+        );
         assert!(row.effective_policy.contains("restart=16"));
-        assert!(row
-            .effective_policy
-            .contains("residual-check=every-iteration"));
+        assert!(
+            row.effective_policy
+                .contains("residual-check=every-iteration")
+        );
 
         let rendered = render_result_row(&row, RunMode::Correctness, &problem);
         assert!(rendered.contains(&row.requested_policy));
@@ -2940,8 +2987,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             rhs: vec![S::one(), S::zero()],
             rhs_source: RhsSource::GeneratedAOnes,
             solution_reference: diagnostics,
-            csr_for_pc: Arc::new(op_local),
+            csr_for_pc: Arc::new(op_local.clone()),
             local_rows_nnz: 1,
+            zero_global_rows_local: count_zero_rows(&op_local),
             local_n: 2,
             global_n: 2,
             global_row_start: 0,
@@ -3001,8 +3049,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             rhs: vec![S::one(), S::one()],
             rhs_source: RhsSource::GeneratedAOnes,
             solution_reference: solution_reference_diagnostics(&op_local),
-            csr_for_pc: Arc::new(op_local),
+            csr_for_pc: Arc::new(op_local.clone()),
             local_rows_nnz: 2,
+            zero_global_rows_local: count_zero_rows(&op_local),
             local_n: 2,
             global_n: 2,
             global_row_start: 0,
@@ -3030,9 +3079,10 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
         assert!(row.requested_policy.contains("restart=5"));
         assert!(row.effective_policy.contains("restart=5"));
-        assert!(row
-            .effective_policy
-            .contains("residual-check=on-convergence"));
+        assert!(
+            row.effective_policy
+                .contains("residual-check=on-convergence")
+        );
     }
 
     #[test]
@@ -3253,12 +3303,15 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             pc: PcKind::IlutLocal,
         };
 
-        assert!(spec
-            .method_label()
-            .contains(ILUT_REAL_PROJECTION_FALLBACK_LABEL));
-        assert!(PcKind::IlutLocal
-            .semantic_experiment_key(false)
-            .contains("real-projection-fallback"));
+        assert!(
+            spec.method_label()
+                .contains(ILUT_REAL_PROJECTION_FALLBACK_LABEL)
+        );
+        assert!(
+            PcKind::IlutLocal
+                .semantic_experiment_key(false)
+                .contains("real-projection-fallback")
+        );
     }
 
     #[test]
@@ -3364,6 +3417,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             nnz_local_block: rank_spread_from_locals(&[12.0, 30.0], 12.0),
             nnz_local_rows: rank_spread_from_locals(&[10.0, 20.0], 10.0),
             nnz_ratio: rank_spread_from_locals(&[1.2, 1.5], 1.2),
+            zero_local_rows_rank_count: 1.0,
+            zero_global_rows: rank_spread_from_locals(&[0.0, 2.0], 0.0),
+            structural_diag_missing: rank_spread_from_locals(&[1.0, 3.0], 1.0),
             diag_min_abs: rank_spread_from_locals(&[1e-8, 1e-10], 1e-8),
             diag_max_abs: rank_spread_from_locals(&[9.0, 11.0], 9.0),
             diag_tiny_or_missing_count: rank_spread_from_locals(&[1.0, 4.0], 1.0),
@@ -3374,6 +3430,13 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         assert!(text.contains("rank_min="));
         assert!(text.contains("rank_max="));
         assert!(text.contains("rank0_local="));
+        assert!(text.contains("nnz_ratio_global=1.400e0"));
+        assert!(text.contains("rank_local_min=1.200e0"));
+        assert!(text.contains("rank_local_max=1.500e0"));
+        assert!(!text.contains("nnz_ratio:global_sum="));
+        assert!(text.contains("zero_local_rows_rank_count=1"));
+        assert!(text.contains("zero_global_rows:global_sum=2"));
+        assert!(text.contains("structural_diag_missing:global_sum=4"));
     }
 
     #[test]
