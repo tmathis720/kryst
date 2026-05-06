@@ -514,6 +514,7 @@ mod complex_demo {
         restarts: Vec<usize>,
         pcs: Vec<PcKind>,
         include_restart_200: bool,
+        include_ilut_real_projection_fallback: bool,
         variants: Vec<FgmresVariant>,
         orthogs: Vec<OrthogMethod>,
         reorths: Vec<ReorthPolicy>,
@@ -569,6 +570,7 @@ mod complex_demo {
                 restarts: vec![50, 100, 150],
                 pcs: Vec::new(),
                 include_restart_200: false,
+                include_ilut_real_projection_fallback: false,
                 variants: vec![FgmresVariant::Classical],
                 orthogs: vec![OrthogMethod::ClassicalGS],
                 reorths: vec![ReorthPolicy::IfNeeded],
@@ -618,11 +620,11 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]"
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]"
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]"
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]]"
                             );
                         }
                         std::process::exit(0);
@@ -675,6 +677,9 @@ mod complex_demo {
                     }
                     "--include-restart-200" => {
                         cfg.include_restart_200 = true;
+                    }
+                    "--include-ilut-real-projection-fallback" => {
+                        cfg.include_ilut_real_projection_fallback = true;
                     }
                     "--ilu-reordering" | "--pc-ilu-reordering-type" => {
                         let Some(v) = args.next() else {
@@ -774,6 +779,12 @@ mod complex_demo {
             if cfg.pcs.iter().any(|pc| pc.is_ilut()) {
                 eprintln!(
                     "⚠ --pcs includes ILUT for a complex run: current ILUT path is a degraded real projection and is not trusted for complex robustness benchmarking."
+                );
+            }
+            if cfg.include_ilut_real_projection_fallback && !cfg.pcs.iter().any(|pc| pc.is_ilut()) {
+                eprintln!(
+                    "⚠ Including {} in the default complex benchmark set: current ILUT path is a degraded real projection and is not trusted for complex robustness benchmarking.",
+                    ILUT_REAL_PROJECTION_FALLBACK_LABEL
                 );
             }
             if cfg.residual_history
@@ -959,7 +970,7 @@ mod complex_demo {
 
     impl RunSpec {
         fn build_default_matrix(cfg: &BenchmarkConfig, problem: &Problem) -> Vec<Self> {
-            let pcs = if cfg.pcs.is_empty() {
+            let mut pcs = if cfg.pcs.is_empty() {
                 match cfg.run_mode {
                     RunMode::Correctness => {
                         if problem.comm.size() > 1 {
@@ -990,6 +1001,9 @@ mod complex_demo {
             } else {
                 cfg.pcs.clone()
             };
+            if cfg.pcs.is_empty() && cfg.include_ilut_real_projection_fallback {
+                pcs.push(PcKind::IlutLocal);
+            }
             let mut runs = Vec::new();
             for &restart in &cfg.restarts {
                 for &variant in &cfg.variants {
@@ -1078,6 +1092,8 @@ mod complex_demo {
         }
     }
 
+    const ILUT_REAL_PROJECTION_FALLBACK_LABEL: &str = "ILUT(real-projection fallback)";
+
     impl PcKind {
         fn label(&self) -> &'static str {
             match self {
@@ -1085,7 +1101,7 @@ mod complex_demo {
                 Self::JacobiWeak => "jacobi (weak baseline)",
                 Self::Ilu0Local => "block-jacobi-ilu0-overlap0",
                 Self::IlutLocal => {
-                    "local ILUT [degraded/provisional complex path: real-projection fallback; not trusted for complex robustness benchmarking]"
+                    "local ILUT(real-projection fallback) [degraded/provisional complex path: real-projection fallback; not trusted for complex robustness benchmarking]"
                 }
                 Self::MpiBlockJacobiIlu0Local => "block-jacobi-ilu0-overlap0 [mpi spelling alias]",
                 Self::LocalIluk { .. } => {
@@ -1135,7 +1151,7 @@ mod complex_demo {
                 Self::Ilu0Local => "local-ilu0".to_string(),
                 Self::None => "none".to_string(),
                 Self::JacobiWeak => "jacobi-weak".to_string(),
-                Self::IlutLocal => "local-ilut".to_string(),
+                Self::IlutLocal => "local-ilut-real-projection-fallback".to_string(),
                 Self::LocalIluk { k } => format!("local-iluk:{k}"),
                 Self::ReplicatedFullIlu0 => "replicated-ilu0".to_string(),
                 Self::ReplicatedFullIluk { k } => format!("replicated-iluk:{k}"),
@@ -2679,10 +2695,34 @@ mod complex_demo {
     }
 
     #[test]
-    fn ilut_complex_label_explicitly_marks_degraded_provisional_path() {
+    fn ilut_complex_label_explicitly_marks_real_projection_fallback_path() {
         let label = PcKind::IlutLocal.label();
+        assert!(label.contains(ILUT_REAL_PROJECTION_FALLBACK_LABEL));
         assert!(label.contains("degraded/provisional"));
-        assert!(label.contains("real-projection"));
+        assert!(label.contains("real-projection fallback"));
+    }
+
+    #[test]
+    fn ilut_method_row_and_export_labels_are_self_contained() {
+        let spec = RunSpec {
+            restart: 50,
+            variant: FgmresVariant::Classical,
+            residual_check_policy: ResidualCheckPolicy::OnConvergence,
+            orthog: OrthogMethod::ClassicalGS,
+            reorth: ReorthPolicy::IfNeeded,
+            pc_side: PcSide::Right,
+            pc: PcKind::IlutLocal,
+        };
+
+        assert!(
+            spec.method_label()
+                .contains(ILUT_REAL_PROJECTION_FALLBACK_LABEL)
+        );
+        assert!(
+            PcKind::IlutLocal
+                .semantic_experiment_key(false)
+                .contains("real-projection-fallback")
+        );
     }
 
     #[test]
