@@ -193,8 +193,12 @@ pub struct IluCsr {
     buckets_fwd: Vec<Vec<usize>>,
     buckets_bwd: Vec<Vec<usize>>,
 
-    // scratch for apply
+    // scratch for mutable apply paths. Immutable trait apply cannot borrow these,
+    // but GMRES/FGMRES and other mutable callers can reuse them without per-apply
+    // heap traffic.
     tmp: Vec<Real>,
+    tmp2: Vec<Real>,
+    tmp3: Vec<Real>,
     perm: Permutation,
     pipeline_meta: PreconditioningMetadata,
     #[cfg(feature = "complex")]
@@ -203,6 +207,16 @@ pub struct IluCsr {
     c_u_val: Vec<S>,
     #[cfg(feature = "complex")]
     c_tmp: Vec<S>,
+    #[cfg(feature = "complex")]
+    c_y_tmp: Vec<S>,
+    #[cfg(feature = "complex")]
+    c_xr: Vec<Real>,
+    #[cfg(feature = "complex")]
+    c_xi: Vec<Real>,
+    #[cfg(feature = "complex")]
+    c_yr: Vec<Real>,
+    #[cfg(feature = "complex")]
+    c_yi: Vec<Real>,
     #[cfg(feature = "complex")]
     native_complex_active: bool,
     #[cfg(feature = "complex")]
@@ -234,6 +248,8 @@ impl IluCsr {
             buckets_fwd: Vec::new(),
             buckets_bwd: Vec::new(),
             tmp: Vec::new(),
+            tmp2: Vec::new(),
+            tmp3: Vec::new(),
             perm: Permutation::identity(0),
             pipeline_meta: PreconditioningMetadata::identity(0),
             #[cfg(feature = "complex")]
@@ -242,6 +258,16 @@ impl IluCsr {
             c_u_val: Vec::new(),
             #[cfg(feature = "complex")]
             c_tmp: Vec::new(),
+            #[cfg(feature = "complex")]
+            c_y_tmp: Vec::new(),
+            #[cfg(feature = "complex")]
+            c_xr: Vec::new(),
+            #[cfg(feature = "complex")]
+            c_xi: Vec::new(),
+            #[cfg(feature = "complex")]
+            c_yr: Vec::new(),
+            #[cfg(feature = "complex")]
+            c_yi: Vec::new(),
             #[cfg(feature = "complex")]
             native_complex_active: false,
             #[cfg(feature = "complex")]
@@ -1171,7 +1197,7 @@ impl IluCsr {
             }
         }
 
-        self.tmp.resize(n, Real::zero());
+        self.resize_apply_workspace(n);
 
         // Optional numeric refine
         self.ilut_numeric_only(a, max_diag_abs)
@@ -1296,7 +1322,7 @@ impl IluCsr {
             self.build_levels_if_enabled();
             self.last_sid = Some(sid);
             self.last_vid = Some(vid);
-            self.tmp.resize(a.nrows(), Real::zero());
+            self.resize_apply_workspace(a.nrows());
             Ok(())
         } else if values_changed {
             self.pipeline_meta = pipeline.metadata.clone();
@@ -1311,6 +1337,21 @@ impl IluCsr {
     pub fn setup_local_square(&mut self, local: &LocalSquareCsr<f64>) -> Result<(), KError> {
         let op = local.as_csr();
         self.setup_from_local_square_ids(op, op.structure_id(), op.values_id())
+    }
+
+    fn resize_apply_workspace(&mut self, n: usize) {
+        self.tmp.resize(n, Real::zero());
+        self.tmp2.resize(n, Real::zero());
+        self.tmp3.resize(n, Real::zero());
+        #[cfg(feature = "complex")]
+        {
+            self.c_tmp.resize(n, S::zero());
+            self.c_y_tmp.resize(n, S::zero());
+            self.c_xr.resize(n, Real::zero());
+            self.c_xi.resize(n, Real::zero());
+            self.c_yr.resize(n, Real::zero());
+            self.c_yi.resize(n, Real::zero());
+        }
     }
 }
 
@@ -1347,8 +1388,8 @@ impl Preconditioner for IluCsr {
         self.apply_op_scalar(op, x, y)
     }
 
-    fn apply_mut(&mut self, side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
-        self.apply(side, x, y)
+    fn apply_mut(&mut self, _side: PcSide, x: &[f64], y: &mut [f64]) -> Result<(), KError> {
+        self.apply_op_scalar_mut(Op::NoTrans, x, y)
     }
 
     fn supports_numeric_update(&self) -> bool {
@@ -1507,8 +1548,7 @@ impl Preconditioner for IluCsr {
             self.build_levels_if_enabled();
             self.last_sid = Some(sid);
             self.last_vid = Some(vid);
-            self.tmp.resize(csr.nrows(), Real::zero());
-            self.c_tmp.resize(csr.nrows(), S::zero());
+            self.resize_apply_workspace(csr.nrows());
             Ok(())
         } else if values_changed {
             self.update_numeric(op)
@@ -1568,6 +1608,10 @@ impl Preconditioner for IluCsr {
             }
             Ok(())
         }
+    }
+
+    fn apply_mut(&mut self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        self.apply_complex_mut(x, y)
     }
 
     fn supports_numeric_update(&self) -> bool {
@@ -1702,6 +1746,17 @@ impl KPreconditioner for IluCsr {
         let _ = scratch;
         self.apply(side, x, y)
     }
+
+    fn apply_mut_s(
+        &mut self,
+        side: PcSide,
+        x: &[Self::Scalar],
+        y: &mut [Self::Scalar],
+        scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        let _ = scratch;
+        crate::preconditioner::Preconditioner::apply_mut(self, side, x, y)
+    }
 }
 
 impl IluCsr {
@@ -1718,6 +1773,86 @@ impl IluCsr {
     #[cfg(feature = "complex")]
     pub fn set_complex_force_degraded(&mut self, on: bool) {
         self.complex_force_degraded = on;
+    }
+
+    #[cfg(feature = "complex")]
+    fn apply_complex_mut(&mut self, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        let n = self.n;
+        if x.len() != n || y.len() != n {
+            return Err(KError::InvalidInput(format!(
+                "IluCsr::apply dimension mismatch: n={}, x.len()={}, y.len()={}",
+                self.n,
+                x.len(),
+                y.len()
+            )));
+        }
+        if self.c_tmp.len() != n
+            || self.c_y_tmp.len() != n
+            || self.c_xr.len() != n
+            || self.c_xi.len() != n
+            || self.c_yr.len() != n
+            || self.c_yi.len() != n
+            || self.tmp.len() != n
+            || self.tmp2.len() != n
+            || self.tmp3.len() != n
+        {
+            self.resize_apply_workspace(n);
+        }
+
+        if self.native_complex_active {
+            let mut w = std::mem::take(&mut self.c_tmp);
+            let mut y_perm = std::mem::take(&mut self.c_y_tmp);
+            let result = (|| {
+                let w = &mut w[..n];
+                let y_perm = &mut y_perm[..n];
+                self.pipeline_meta.left_perm.apply_vec(x, w);
+                for i in 0..n {
+                    let mut s = w[i];
+                    for p in self.l_row[i]..self.l_row[i + 1] {
+                        s -= self.c_l_val[p] * w[self.l_col[p]];
+                    }
+                    w[i] = s;
+                }
+                for i in (0..n).rev() {
+                    let mut s = w[i];
+                    for p in self.u_row[i]..self.u_row[i + 1] {
+                        let j = self.u_col[p];
+                        if j > i {
+                            s -= self.c_u_val[p] * w[j];
+                        }
+                    }
+                    w[i] = s / self.c_u_val[self.u_diag_ix[i]];
+                }
+                self.pipeline_meta.right_perm.apply_vec_t(w, y_perm);
+                y.copy_from_slice(y_perm);
+                Ok(())
+            })();
+            self.c_tmp = w;
+            self.c_y_tmp = y_perm;
+            result
+        } else {
+            let mut xr = std::mem::take(&mut self.c_xr);
+            let mut xi = std::mem::take(&mut self.c_xi);
+            let mut yr = std::mem::take(&mut self.c_yr);
+            let mut yi = std::mem::take(&mut self.c_yi);
+            let result = (|| {
+                for i in 0..n {
+                    xr[i] = x[i].real();
+                    xi[i] = x[i].imag();
+                }
+                self.apply_op_scalar_mut(Op::NoTrans, &xr[..n], &mut yr[..n])?;
+                self.apply_op_scalar_mut(Op::NoTrans, &xi[..n], &mut yi[..n])?;
+                for i in 0..n {
+                    y[i] = S::from_parts(yr[i], yi[i]);
+                }
+                Ok(())
+            })();
+            self.c_xr = xr;
+            self.c_xi = xi;
+            self.c_yr = yr;
+            self.c_yi = yi;
+            result
+        }
     }
 
     #[inline]
@@ -1781,15 +1916,14 @@ impl IluCsr {
         }
     }
 
-    fn pipeline_apply_right_inverse(&self, x: &[Real], y: &mut [Real]) {
-        let mut tmp = vec![Real::zero(); x.len()];
-        self.pipeline_meta.right_perm.apply_vec_t(x, &mut tmp);
+    fn pipeline_apply_right_inverse_with_tmp(&self, x: &[Real], tmp: &mut [Real], y: &mut [Real]) {
+        self.pipeline_meta.right_perm.apply_vec_t(x, tmp);
         if let Some(scale) = &self.pipeline_meta.col_scaling {
             for i in 0..y.len() {
                 y[i] = tmp[i] / scale[i];
             }
         } else {
-            y.copy_from_slice(&tmp);
+            y.copy_from_slice(tmp);
         }
     }
 
@@ -1804,13 +1938,55 @@ impl IluCsr {
         }
         let mut x_perm = vec![Real::zero(); self.n];
         let mut y_perm = vec![Real::zero(); self.n];
-        self.pipeline_apply_left(x, &mut x_perm);
+        let mut right_tmp = vec![Real::zero(); self.n];
+        self.apply_op_scalar_with_workspace(op, x, y, &mut x_perm, &mut y_perm, &mut right_tmp)
+    }
+
+    fn apply_op_scalar_mut(&mut self, op: Op, x: &[Real], y: &mut [Real]) -> Result<(), KError> {
+        if self.tmp.len() != self.n || self.tmp2.len() != self.n || self.tmp3.len() != self.n {
+            self.resize_apply_workspace(self.n);
+        }
+        let mut x_perm = std::mem::take(&mut self.tmp);
+        let mut y_perm = std::mem::take(&mut self.tmp2);
+        let mut right_tmp = std::mem::take(&mut self.tmp3);
+        let result = self.apply_op_scalar_with_workspace(
+            op,
+            x,
+            y,
+            &mut x_perm[..self.n],
+            &mut y_perm[..self.n],
+            &mut right_tmp[..self.n],
+        );
+        self.tmp = x_perm;
+        self.tmp2 = y_perm;
+        self.tmp3 = right_tmp;
+        result
+    }
+
+    fn apply_op_scalar_with_workspace(
+        &self,
+        op: Op,
+        x: &[Real],
+        y: &mut [Real],
+        x_perm: &mut [Real],
+        y_perm: &mut [Real],
+        right_tmp: &mut [Real],
+    ) -> Result<(), KError> {
+        if x.len() != self.n || y.len() != self.n {
+            return Err(KError::InvalidInput(format!(
+                "IluCsr::apply dimension mismatch: n={}, x.len()={}, y.len()={}",
+                self.n,
+                x.len(),
+                y.len()
+            )));
+        }
+        self.pipeline_apply_left(x, x_perm);
         match op {
             Op::NoTrans => {
                 if self.cfg.level_sched {
-                    tri_solve::tri_solve_level_scheduled(self, &x_perm, &mut y_perm)
+                    tri_solve::tri_solve_level_scheduled(self, x_perm, y_perm)
                 } else {
-                    tri_solve::tri_solve_serial(self, &x_perm, &mut y_perm)
+                    tri_solve::tri_solve_serial(self, x_perm, y_perm)
                 }
             }
             Op::Trans | Op::ConjTrans => {
@@ -1821,19 +1997,11 @@ impl IluCsr {
                     .lt
                     .get_or_init(|| transpose_csr(self.n, &self.l_row, &self.l_col, &self.l_val));
                 tri_solve::tri_solve_transpose_serial(
-                    self,
-                    &ut.0,
-                    &ut.1,
-                    &ut.2,
-                    &lt.0,
-                    &lt.1,
-                    &lt.2,
-                    &x_perm,
-                    &mut y_perm,
+                    self, &ut.0, &ut.1, &ut.2, &lt.0, &lt.1, &lt.2, x_perm, y_perm,
                 )
             }
         }?;
-        self.pipeline_apply_right_inverse(&y_perm, y);
+        self.pipeline_apply_right_inverse_with_tmp(y_perm, right_tmp, y);
         Ok(())
     }
 }
