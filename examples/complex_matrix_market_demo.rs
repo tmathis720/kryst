@@ -1100,13 +1100,13 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 k: parse_positive_usize("local-iluk:k", k_str)?,
             });
         }
-        if token_norm == "block-jacobi-iluk1-overlap0" {
-            return Ok(PcKind::LocalIluk { k: 1 });
+        if let Some(k_str) = token_norm.strip_prefix("block-jacobi-iluk:") {
+            return Ok(PcKind::LocalIluk {
+                k: parse_positive_usize("block-jacobi-iluk:k", k_str)?,
+            });
         }
-        if let Some(k_str) = token_norm
-            .strip_prefix("block-jacobi-iluk")
-            .and_then(|rest| rest.strip_suffix("-overlap0"))
-        {
+        if let Some(k_str) = token_norm.strip_prefix("block-jacobi-iluk") {
+            let k_str = k_str.strip_suffix("-overlap0").unwrap_or(k_str);
             return Ok(PcKind::LocalIluk {
                 k: parse_positive_usize("block-jacobi-iluk:k", k_str)?,
             });
@@ -1127,7 +1127,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             | "block-jacobi-ilu0-overlap0"
             | "mpi-block-ilu0" => Ok(PcKind::MpiBlockJacobiIlu0Local),
             other => Err(KError::InvalidInput(format!(
-                "invalid pc '{other}', expected none|jacobi|local-ilu0|local-ilut|local-iluk:<k>|block-jacobi-ilu0-overlap0|block-jacobi-iluk<K>-overlap0|replicated-ilu0|replicated-full-ilu0|replicated-iluk:<k>|mpi-block-jacobi-ilu0"
+                "invalid pc '{other}', expected none|jacobi|local-ilu0|local-ilut|local-iluk:<k>|block-jacobi-ilu0-overlap0|block-jacobi-iluk1|block-jacobi-iluk1-overlap0|block-jacobi-iluk:<k>|block-jacobi-iluk<k>-overlap0|replicated-ilu0|replicated-full-ilu0|replicated-iluk:<k>|mpi-block-jacobi-ilu0"
             ))),
         }
     }
@@ -1323,24 +1323,23 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
     const ILUT_REAL_PROJECTION_FALLBACK_LABEL: &str = "ILUT(real-projection fallback)";
 
     impl PcKind {
-        fn label(&self) -> &'static str {
+        fn label(&self) -> String {
             match self {
-                Self::None => "none (unpreconditioned reference)",
-                Self::JacobiWeak => "jacobi (weak baseline)",
-                Self::Ilu0Local => "block-jacobi-ilu0-overlap0",
+                Self::None => "none (unpreconditioned reference)".to_string(),
+                Self::JacobiWeak => "jacobi (weak baseline)".to_string(),
+                Self::Ilu0Local => "block-jacobi-ilu0-overlap0".to_string(),
                 Self::IlutLocal => {
-                    "local ILUT(real-projection fallback) [degraded/provisional complex path: real-projection fallback; not trusted for complex robustness benchmarking]"
+                    "local ILUT(real-projection fallback) [degraded/provisional complex path: real-projection fallback; not trusted for complex robustness benchmarking]".to_string()
                 }
-                Self::MpiBlockJacobiIlu0Local => "block-jacobi-ilu0-overlap0 [mpi spelling alias]",
-                Self::LocalIluk { k: 1 } => "block-jacobi-iluk1-overlap0",
-                Self::LocalIluk { .. } => {
-                    "local ILU(k) (block-Jacobi ILU(k), zero overlap/local owned block)"
+                Self::MpiBlockJacobiIlu0Local => {
+                    "block-jacobi-ilu0-overlap0 [mpi spelling alias]".to_string()
                 }
+                Self::LocalIluk { k } => format!("block-jacobi-iluk{k}-overlap0"),
                 Self::ReplicatedFullIlu0 => {
-                    "replicated full ILU(0) [correctness only, not scalable]"
+                    "replicated full ILU(0) [correctness only, not scalable]".to_string()
                 }
                 Self::ReplicatedFullIluk { .. } => {
-                    "replicated full ILU(k) [correctness only, not scalable]"
+                    "replicated full ILU(k) [correctness only, not scalable]".to_string()
                 }
             }
         }
@@ -3546,6 +3545,34 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
     }
 
     #[test]
+    fn parse_pc_accepts_block_jacobi_iluk_aliases() {
+        assert_eq!(
+            parse_pc("block-jacobi-iluk1").expect("parse block-jacobi-iluk1"),
+            PcKind::LocalIluk { k: 1 }
+        );
+        assert_eq!(
+            parse_pc("block-jacobi-iluk1-overlap0").expect("parse block-jacobi-iluk1-overlap0"),
+            PcKind::LocalIluk { k: 1 }
+        );
+        assert_eq!(
+            parse_pc("block-jacobi-iluk:2").expect("parse block-jacobi-iluk:2"),
+            PcKind::LocalIluk { k: 2 }
+        );
+        assert_eq!(
+            parse_pc("block-jacobi-iluk3-overlap0").expect("parse block-jacobi-iluk3-overlap0"),
+            PcKind::LocalIluk { k: 3 }
+        );
+    }
+
+    #[test]
+    fn local_iluk_label_renders_block_jacobi_alias() {
+        assert_eq!(
+            PcKind::LocalIluk { k: 3 }.label(),
+            "block-jacobi-iluk3-overlap0"
+        );
+    }
+
+    #[test]
     fn preconditioner_dispatch_variants_are_distinct_or_explicit_aliases() {
         let variants = [
             PcKind::None,
@@ -3649,6 +3676,17 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         ])
         .expect("parse explicit dist policy");
         assert_eq!(cfg.dist_policy, DistPolicyMode::Off);
+    }
+
+    #[test]
+    fn benchmark_config_parses_block_jacobi_iluk_overlap_pc() {
+        let cfg = BenchmarkConfig::from_args(vec![
+            "--pcs".to_string(),
+            "block-jacobi-iluk1-overlap0".to_string(),
+        ])
+        .expect("parse block Jacobi ILU(k) pc alias");
+
+        assert_eq!(cfg.pcs, vec![PcKind::LocalIluk { k: 1 }]);
     }
 
     #[test]
