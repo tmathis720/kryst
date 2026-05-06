@@ -196,11 +196,14 @@ mod complex_demo {
                         "MPI scalability note: use distributed mode for scaling claims; correctness mode emphasizes solver validation."
                     );
                 }
-                println!("‖rhs‖₂ = {:.3e}", rhs_norm);
+                println!("‖b_unscaled‖₂ = {:.3e}", rhs_norm);
                 println!("Residual semantics: rec/reported = solver recurrence/monitor residual.");
                 if config.run_mode == RunMode::Correctness {
                     println!(
-                        "                    true(explicit) = ||b - A x||₂ recomputed after solve."
+                        "                    true(explicit) = ||b_unscaled - A_unscaled x_unscaled||₂ recomputed after solve."
+                    );
+                    println!(
+                        "                    True(rel) = true(explicit) / ||b_unscaled||₂ (stable under --row-scale)."
                     );
                 }
                 println!(
@@ -1512,7 +1515,7 @@ mod complex_demo {
                 }
                 let r2_local = ax.iter().map(|v| v.abs2()).sum::<f64>();
                 let true_res = problem.comm.all_reduce_f64(r2_local).sqrt();
-                let rhs_norm2_local = b.iter().map(|v| v.abs2()).sum::<f64>();
+                let rhs_norm2_local = b_unscaled.iter().map(|v| v.abs2()).sum::<f64>();
                 let rhs_norm = problem.comm.all_reduce_f64(rhs_norm2_local).sqrt();
                 let rel_true = true_res / rhs_norm.max(f64::MIN_POSITIVE);
                 (Some(true_res), Some(rel_true))
