@@ -277,10 +277,13 @@ mod complex_demo {
             println!("Residual semantics: rec/reported = solver recurrence/monitor residual.");
             if config.run_mode == RunMode::Correctness {
                 println!(
-                    "                    true(explicit) = ||b_unscaled - A_unscaled x_unscaled||₂ recomputed after solve."
+                    "                    True(dist) = ||b_unscaled - A_dist x_unscaled||₂ using the run operator."
                 );
                 println!(
-                    "                    True(rel) = true(explicit) / ||b_unscaled||₂ (stable under --row-scale)."
+                    "                    True(global) = ||b_global - A_global x_global||₂ after gathering owned vectors in rank order."
+                );
+                println!(
+                    "                    *(rel) columns divide by the corresponding unscaled RHS norm (stable under --row-scale)."
                 );
             }
             println!(
@@ -330,7 +333,7 @@ mod complex_demo {
                 println!("{}", "-".repeat(240));
             } else if include_dof_col {
                 println!(
-                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
                     "Op",
                     "Exec",
                     "PCdom",
@@ -346,16 +349,19 @@ mod complex_demo {
                     "Inn",
                     "Pfb",
                     "Rec/Reported",
-                    "True(explicit)",
-                    "True(rel)",
-                    "x_err(rel)",
+                    "True(dist)",
+                    "Dist(rel)",
+                    "x_err(dist)",
+                    "True(global)",
+                    "Glob(rel)",
+                    "x_err(global)",
                     "Reason",
                     "DOF/s"
                 );
-                println!("{}", "-".repeat(348));
+                println!("{}", "-".repeat(390));
             } else {
                 println!(
-                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26}",
+                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26}",
                     "Op",
                     "Exec",
                     "PCdom",
@@ -371,12 +377,15 @@ mod complex_demo {
                     "Inn",
                     "Pfb",
                     "Rec/Reported",
-                    "True(explicit)",
-                    "True(rel)",
-                    "x_err(rel)",
+                    "True(dist)",
+                    "Dist(rel)",
+                    "x_err(dist)",
+                    "True(global)",
+                    "Glob(rel)",
+                    "x_err(global)",
                     "Reason"
                 );
-                println!("{}", "-".repeat(332));
+                println!("{}", "-".repeat(374));
             }
             println!(
                 "Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global/full serial matrix ILU, own0=MPI owned block, overlap=0 local ILU/ASM, n/a=no ILU domain), PC apply=how the preconditioner is applied."
@@ -545,6 +554,9 @@ mod complex_demo {
         explicit_true_residual: Option<R>,
         explicit_true_residual_rel: Option<R>,
         x_error_rel: Option<R>,
+        global_true_residual: Option<R>,
+        global_true_residual_rel: Option<R>,
+        global_x_error_rel: Option<R>,
         reason: ConvergedReason,
         dof_per_sec: Option<f64>,
     }
@@ -1534,6 +1546,13 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         entries: Vec<ResidualHistoryEntry>,
     }
 
+    #[derive(Clone, Debug)]
+    struct GlobalReferenceCheck {
+        true_residual: R,
+        true_residual_rel: R,
+        x_error_rel: Option<R>,
+    }
+
     struct RowScaledOp {
         base: Arc<dyn KLinOp<Scalar = S>>,
         d: Vec<R>,
@@ -1728,6 +1747,202 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         }
         x_global.copy_from_slice(x_local);
         Ok(())
+    }
+
+    fn gather_global_reference_vector(
+        comm: &UniverseComm,
+        local: &[S],
+        global_n: usize,
+        global_row_start: usize,
+        local_n: usize,
+        global: &mut [S],
+    ) -> Result<(), KError> {
+        if local.len() != local_n {
+            return Err(KError::InvalidInput(format!(
+                "global reference gather expected local length {local_n}, got {}",
+                local.len()
+            )));
+        }
+        if global.len() != global_n {
+            return Err(KError::InvalidInput(format!(
+                "global reference gather expected global scratch length {global_n}, got {}",
+                global.len()
+            )));
+        }
+        if global_row_start > global_n || local_n > global_n - global_row_start {
+            return Err(KError::InvalidInput(format!(
+                "global reference gather invalid owned segment: global_n={global_n}, \
+                 global_row_start={global_row_start}, local_n={local_n}"
+            )));
+        }
+
+        global.fill(S::zero());
+
+        if comm.size() == 1 {
+            if global_row_start != 0 || local_n != global_n {
+                return Err(KError::InvalidInput(format!(
+                    "single-rank global reference gather expected ownership [0..{global_n}), got [{global_row_start}..{})",
+                    global_row_start + local_n
+                )));
+            }
+            global.copy_from_slice(local);
+            return Ok(());
+        }
+
+        #[cfg(feature = "mpi")]
+        {
+            use mpi::traits::*;
+
+            if let UniverseComm::Mpi(comm_impl) = comm {
+                let rank = comm_impl.rank;
+                let size = comm_impl.size;
+                let local_len = i32::try_from(local_n).map_err(|_| {
+                    KError::InvalidInput(format!(
+                        "global reference gather local_n={local_n} exceeds MPI i32 length limit"
+                    ))
+                })?;
+                let mut lengths = vec![0i32; size];
+                comm_impl
+                    .world
+                    .all_gather_into(&local_len, &mut lengths[..]);
+
+                let expected_part = DistCsrOp::partition_rows_balanced(global_n, comm);
+                let mut offset = 0usize;
+                for (r, &len_i32) in lengths.iter().enumerate() {
+                    if len_i32 < 0 {
+                        return Err(KError::InvalidInput(format!(
+                            "global reference gather received negative segment length from rank {r}"
+                        )));
+                    }
+                    let len = len_i32 as usize;
+                    let expected_len = expected_part[r + 1] - expected_part[r];
+                    if len != expected_len {
+                        return Err(KError::InvalidInput(format!(
+                            "global reference gather rank {r} length mismatch: gathered={len}, expected balanced={expected_len}"
+                        )));
+                    }
+                    if r == rank {
+                        if len != local.len() || len != local_n {
+                            return Err(KError::InvalidInput(format!(
+                                "global reference gather local length mismatch: gathered={len}, \
+                                 local={}, local_n={local_n}",
+                                local.len()
+                            )));
+                        }
+                        if offset != global_row_start || expected_part[r] != global_row_start {
+                            return Err(KError::InvalidInput(format!(
+                                "global reference gather offset mismatch: gathered prefix={offset}, \
+                                 expected balanced={}, global_row_start={global_row_start}",
+                                expected_part[r]
+                            )));
+                        }
+                    }
+                    offset = offset.checked_add(len).ok_or_else(|| {
+                        KError::InvalidInput(
+                            "global reference gather segment lengths overflowed usize".into(),
+                        )
+                    })?;
+                }
+                if offset != global_n {
+                    return Err(KError::InvalidInput(format!(
+                        "global reference gather expected global_n={global_n}, gathered owned lengths sum={offset}"
+                    )));
+                }
+
+                let max_len = lengths.iter().copied().max().unwrap_or(0) as usize;
+                let mut send = vec![0.0f64; 2 * max_len];
+                for (i, value) in local.iter().copied().enumerate() {
+                    send[2 * i] = value.real();
+                    send[2 * i + 1] = value.imag();
+                }
+                let mut gathered = vec![0.0f64; 2 * max_len * size];
+                if max_len > 0 {
+                    comm_impl
+                        .world
+                        .all_gather_into(&send[..], &mut gathered[..]);
+                }
+
+                let mut offset = 0usize;
+                for (r, &len_i32) in lengths.iter().enumerate() {
+                    let len = len_i32 as usize;
+                    let start = 2 * r * max_len;
+                    for i in 0..len {
+                        global[offset + i] =
+                            S::from_parts(gathered[start + 2 * i], gathered[start + 2 * i + 1]);
+                    }
+                    offset += len;
+                }
+                return Ok(());
+            }
+        }
+
+        Err(KError::InvalidInput(
+            "global reference gather requires MPI for multi-rank owned segments".into(),
+        ))
+    }
+
+    fn global_reference_residual(
+        problem: &Problem,
+        x_local: &[S],
+        b_local: &[S],
+    ) -> Result<GlobalReferenceCheck, KError> {
+        if problem.global_csr.ncols() != problem.global_n {
+            return Err(KError::InvalidInput(format!(
+                "global reference residual requires square row-owned solution layout, got matrix {}x{} with global_n={}",
+                problem.global_csr.nrows(),
+                problem.global_csr.ncols(),
+                problem.global_n
+            )));
+        }
+
+        let mut x_global = vec![S::zero(); problem.global_n];
+        let mut b_global = vec![S::zero(); problem.global_n];
+        gather_global_reference_vector(
+            &problem.comm,
+            x_local,
+            problem.global_n,
+            problem.global_row_start,
+            problem.local_n,
+            &mut x_global,
+        )?;
+        gather_global_reference_vector(
+            &problem.comm,
+            b_local,
+            problem.global_n,
+            problem.global_row_start,
+            problem.local_n,
+            &mut b_global,
+        )?;
+
+        let mut ax_global = vec![S::zero(); problem.global_csr.nrows()];
+        problem.global_csr.spmv(&x_global, &mut ax_global);
+        let true_global = b_global
+            .iter()
+            .zip(ax_global.iter())
+            .map(|(bi, ai)| (*bi - *ai).abs2())
+            .sum::<f64>()
+            .sqrt();
+        let b_norm = b_global.iter().map(|bi| bi.abs2()).sum::<f64>().sqrt();
+        let true_global_rel = true_global / b_norm.max(f64::MIN_POSITIVE);
+        let x_error_rel = if problem.rhs_source == RhsSource::GeneratedAOnes
+            && problem.solution_reference.valid_for_x_error()
+        {
+            let err = x_global
+                .iter()
+                .map(|xi| (*xi - S::one()).abs2())
+                .sum::<f64>()
+                .sqrt();
+            let one_norm = x_global.iter().map(|_| S::one().abs2()).sum::<f64>().sqrt();
+            Some(err / one_norm.max(f64::MIN_POSITIVE))
+        } else {
+            None
+        };
+
+        Ok(GlobalReferenceCheck {
+            true_residual: true_global,
+            true_residual_rel: true_global_rel,
+            x_error_rel,
+        })
     }
 
     fn apply_replicated_full_ilu_owned_segment(
@@ -2205,6 +2420,11 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         } else {
             None
         };
+        let global_reference_check = if bench_cfg.run_mode == RunMode::Correctness {
+            Some(global_reference_residual(problem, &x_unscaled, b_unscaled)?)
+        } else {
+            None
+        };
         let dof_per_sec = if matches!(
             problem.backend,
             CsrBackend::Serial | CsrBackend::Distributed
@@ -2261,6 +2481,13 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             explicit_true_residual,
             explicit_true_residual_rel,
             x_error_rel,
+            global_true_residual: global_reference_check
+                .as_ref()
+                .map(|check| check.true_residual),
+            global_true_residual_rel: global_reference_check
+                .as_ref()
+                .map(|check| check.true_residual_rel),
+            global_x_error_rel: global_reference_check.and_then(|check| check.x_error_rel),
             reason: stats.reason,
             dof_per_sec,
         })
@@ -2581,13 +2808,25 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             .x_error_rel
             .map(|v| format!("{v:.2e}"))
             .unwrap_or_else(|| "N/A".to_string());
+        let global_true = row
+            .global_true_residual
+            .map(|v| format!("{v:.2e}"))
+            .unwrap_or_else(|| "N/A".to_string());
+        let global_true_rel = row
+            .global_true_residual_rel
+            .map(|v| format!("{v:.2e}"))
+            .unwrap_or_else(|| "N/A".to_string());
+        let global_x_error_rel = row
+            .global_x_error_rel
+            .map(|v| format!("{v:.2e}"))
+            .unwrap_or_else(|| "N/A".to_string());
         if include_dof_col {
             let dof = row
                 .dof_per_sec
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>26?} {:>12}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26?} {:>12}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
@@ -2606,12 +2845,15 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 explicit_true,
                 explicit_true_rel,
                 x_error_rel,
+                global_true,
+                global_true_rel,
+                global_x_error_rel,
                 row.reason,
                 dof
             )
         } else {
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>26?}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26?}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
@@ -2630,6 +2872,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 explicit_true,
                 explicit_true_rel,
                 x_error_rel,
+                global_true,
+                global_true_rel,
+                global_x_error_rel,
                 row.reason
             )
         }
@@ -2662,7 +2907,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         }
         if include_dof_col {
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
                 operator_storage_label(problem),
                 execution_backend_label(problem),
                 pc_domain_label(spec.pc, problem),
@@ -2673,6 +2918,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 "FAIL",
                 "FAIL",
                 "FAIL",
+                "N/A",
+                "N/A",
+                "N/A",
                 "N/A",
                 "N/A",
                 "N/A",
@@ -2686,7 +2934,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             )
         } else {
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>26}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26}",
                 operator_storage_label(problem),
                 execution_backend_label(problem),
                 pc_domain_label(spec.pc, problem),
@@ -2697,6 +2945,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 "FAIL",
                 "FAIL",
                 "FAIL",
+                "N/A",
+                "N/A",
+                "N/A",
                 "N/A",
                 "N/A",
                 "N/A",
