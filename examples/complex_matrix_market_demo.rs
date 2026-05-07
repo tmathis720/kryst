@@ -614,6 +614,7 @@ mod complex_demo {
         None,
         JacobiWeak,
         Ilu0Local,
+        ReplicatedFullIlu,
         IlutLocal,
         OverlapIlu,
     }
@@ -1384,11 +1385,12 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             match self {
                 Self::None => PcDispatchBranch::None,
                 Self::JacobiWeak => PcDispatchBranch::JacobiWeak,
-                Self::Ilu0Local
-                | Self::MpiBlockJacobiIlu0Local
-                | Self::LocalIluk { .. }
-                | Self::ReplicatedFullIlu0
-                | Self::ReplicatedFullIluk { .. } => PcDispatchBranch::Ilu0Local,
+                Self::Ilu0Local | Self::MpiBlockJacobiIlu0Local | Self::LocalIluk { .. } => {
+                    PcDispatchBranch::Ilu0Local
+                }
+                Self::ReplicatedFullIlu0 | Self::ReplicatedFullIluk { .. } => {
+                    PcDispatchBranch::ReplicatedFullIlu
+                }
                 Self::AsmIlu0Overlap { .. }
                 | Self::RasIlu0Overlap { .. }
                 | Self::RasIlukOverlap { .. } => PcDispatchBranch::OverlapIlu,
@@ -1915,20 +1917,16 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 validate_local_ilu_owned_block(pc_csr.as_ref())?;
                 let mut cfg = IluCsrConfig::default();
                 cfg.kind = match spec.pc {
-                    PcKind::Ilu0Local
-                    | PcKind::MpiBlockJacobiIlu0Local
-                    | PcKind::ReplicatedFullIlu0 => IluKind::Ilu0,
-                    PcKind::IlutLocal => IluKind::Ilut {
-                        params: Default::default(),
-                    },
-                    PcKind::LocalIluk { k } | PcKind::ReplicatedFullIluk { k } => {
-                        IluKind::Iluk { k }
-                    }
+                    PcKind::Ilu0Local | PcKind::MpiBlockJacobiIlu0Local => IluKind::Ilu0,
+                    PcKind::LocalIluk { k } => IluKind::Iluk { k },
                     PcKind::AsmIlu0Overlap { .. }
                     | PcKind::RasIlu0Overlap { .. }
                     | PcKind::RasIlukOverlap { .. }
+                    | PcKind::IlutLocal
+                    | PcKind::ReplicatedFullIlu0
+                    | PcKind::ReplicatedFullIluk { .. }
                     | PcKind::None
-                    | PcKind::JacobiWeak => IluKind::Ilu0,
+                    | PcKind::JacobiWeak => unreachable!(),
                 };
                 cfg.reordering = bench_cfg.ilu_reordering.clone();
                 let mut ilu = IluCsr::new_with_config(cfg);
@@ -1945,26 +1943,47 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                     }
                 }
                 pc = Some(match spec.pc {
-                    PcKind::Ilu0Local | PcKind::IlutLocal | PcKind::LocalIluk { .. } => {
-                        PcHandle::Ilu0(ilu)
-                    }
+                    PcKind::Ilu0Local | PcKind::LocalIluk { .. } => PcHandle::Ilu0(ilu),
                     PcKind::MpiBlockJacobiIlu0Local => PcHandle::MpiBlockJacobiIlu0(ilu),
-                    PcKind::ReplicatedFullIlu0 | PcKind::ReplicatedFullIluk { .. } => {
-                        PcHandle::ReplicatedFull {
-                            ilu,
-                            comm: problem.comm.clone(),
-                            global_n: problem.global_n,
-                            global_row_start: problem.global_row_start,
-                            local_n: problem.local_n,
-                            scratch_in: std::sync::Mutex::new(vec![S::zero(); problem.global_n]),
-                            scratch_out: std::sync::Mutex::new(vec![S::zero(); problem.global_n]),
-                        }
-                    }
                     PcKind::AsmIlu0Overlap { .. }
                     | PcKind::RasIlu0Overlap { .. }
                     | PcKind::RasIlukOverlap { .. }
+                    | PcKind::IlutLocal
+                    | PcKind::ReplicatedFullIlu0
+                    | PcKind::ReplicatedFullIluk { .. }
                     | PcKind::None
                     | PcKind::JacobiWeak => unreachable!(),
+                });
+            }
+            PcDispatchBranch::ReplicatedFullIlu => {
+                let mut cfg = IluCsrConfig::default();
+                cfg.kind = match spec.pc {
+                    PcKind::ReplicatedFullIlu0 => IluKind::Ilu0,
+                    PcKind::ReplicatedFullIluk { k } => IluKind::Iluk { k },
+                    _ => unreachable!(),
+                };
+                cfg.reordering = bench_cfg.ilu_reordering.clone();
+                let mut ilu = IluCsr::new_with_config(cfg);
+                ilu.setup(global_pc_csr.as_ref())?;
+                if bench_cfg.run_mode == RunMode::Correctness {
+                    let pivot_perturbation_count = None::<usize>;
+                    let diag_global = reduce_csr_for_pc_diagnostics(
+                        &problem.comm,
+                        &csr_pc_diag,
+                        pivot_perturbation_count,
+                    );
+                    if problem.comm.rank() == 0 {
+                        print_csr_for_pc_diagnostics(&spec.method_label(), &diag_global);
+                    }
+                }
+                pc = Some(PcHandle::ReplicatedFull {
+                    ilu,
+                    comm: problem.comm.clone(),
+                    global_n: problem.global_n,
+                    global_row_start: problem.global_row_start,
+                    local_n: problem.local_n,
+                    scratch_in: std::sync::Mutex::new(vec![S::zero(); problem.global_n]),
+                    scratch_out: std::sync::Mutex::new(vec![S::zero(); problem.global_n]),
                 });
             }
             PcDispatchBranch::OverlapIlu => {
@@ -3187,6 +3206,107 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 "rank {rank} replicated apply mismatch: got={got:?}, expected={expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn replicated_full_ilu_dispatches_separately_from_local_ilu() {
+        assert_eq!(
+            PcKind::ReplicatedFullIlu0.dispatch_branch(),
+            PcDispatchBranch::ReplicatedFullIlu
+        );
+        assert_eq!(
+            PcKind::ReplicatedFullIluk { k: 2 }.dispatch_branch(),
+            PcDispatchBranch::ReplicatedFullIlu
+        );
+        assert_eq!(
+            PcKind::Ilu0Local.dispatch_branch(),
+            PcDispatchBranch::Ilu0Local
+        );
+        assert_eq!(
+            PcKind::MpiBlockJacobiIlu0Local.dispatch_branch(),
+            PcDispatchBranch::Ilu0Local
+        );
+        assert_eq!(
+            PcKind::LocalIluk { k: 1 }.dispatch_branch(),
+            PcDispatchBranch::Ilu0Local
+        );
+        assert_eq!(
+            PcKind::IlutLocal.dispatch_branch(),
+            PcDispatchBranch::IlutLocal
+        );
+    }
+
+    #[test]
+    fn replicated_full_ilu_uses_global_csr_even_when_local_pc_block_is_rectangular() {
+        #[cfg(feature = "mpi")]
+        let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+        #[cfg(not(feature = "mpi"))]
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let op_local = SparseCsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 1, 2],
+            vec![0, 1],
+            vec![S::from_parts(2.0, 0.0), S::from_parts(3.0, 0.0)],
+        );
+        let row_part = vec![0, 2];
+        let op = DistCsrOp::from_local_rows(2, 0, &op_local, &row_part, comm.clone())
+            .expect("build local dist op");
+
+        let rectangular_pc = SparseCsrMatrix::from_csr(
+            2,
+            3,
+            vec![0, 1, 2],
+            vec![0, 1],
+            vec![S::from_parts(2.0, 0.0), S::from_parts(3.0, 0.0)],
+        );
+        let problem = Problem {
+            op: Arc::new(op),
+            dist_plan_diagnostics: DistributedPlanDiagnostics {
+                overlap_mode: kryst::matrix::dist_csr::HaloOverlapMode::Disabled,
+                kernel_strategy: kryst::matrix::dist_csr::DistLocalKernelStrategy::RowSplitScalar,
+                local_spmv_kernel: None,
+                row_locality_ratio: 1.0,
+                border_ratio: 0.0,
+                halo_recv_volume: 0,
+                halo_send_volume: 0,
+                expected_communication_fraction: 0.0,
+                expected_computation_fraction: 1.0,
+            },
+            rhs: vec![S::from_parts(2.0, 0.0), S::from_parts(3.0, 0.0)],
+            rhs_source: RhsSource::GeneratedAOnes,
+            solution_reference: solution_reference_diagnostics(&op_local),
+            csr_for_pc: Arc::new(rectangular_pc),
+            global_csr: Arc::new(op_local.clone()),
+            local_rows_nnz: op_local.values().len(),
+            zero_global_rows_local: count_zero_rows(&op_local),
+            local_n: 2,
+            global_n: 2,
+            global_row_start: 0,
+            comm,
+            backend: CsrBackend::Serial,
+            backend_descr: "unit-test".to_string(),
+            generated_case: false,
+        };
+        let spec = RunSpec {
+            restart: 5,
+            variant: FgmresVariant::Classical,
+            residual_check_policy: ResidualCheckPolicy::OnConvergence,
+            orthog: OrthogMethod::ClassicalGS,
+            reorth: ReorthPolicy::IfNeeded,
+            pc_side: PcSide::Right,
+            pc: PcKind::ReplicatedFullIlu0,
+        };
+        let bench_cfg = BenchmarkConfig {
+            warmup_runs: 0,
+            measured_runs: 1,
+            maxits: 10,
+            ..BenchmarkConfig::default()
+        };
+
+        run_once(&problem, &spec, &bench_cfg)
+            .expect("replicated full ILU should set up from global CSR, not local PC CSR");
     }
 
     #[test]
