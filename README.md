@@ -940,6 +940,12 @@ cargo run --example dense_direct
 
 # Matrix market file demonstration
 cargo run --example matrix_market_demo
+
+# Complex Matrix Market correctness sweep (requires MPI + complex support)
+cargo mpirun -n 4 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples -- --mode correctness --dist-policy off --maxits 2000 --restarts 150,250,324 --pcs replicated-full-ilu0,none,jacobi,block-jacobi-ilu0 --fgmres-orthog modified --fgmres-reorth always
+
+# Complex Matrix Market scalability sweep (requires MPI + complex support)
+cargo mpirun -n 4 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples -- --mode scalability --dist-policy auto --maxits 1000 --restarts 50,100 --pcs none,jacobi,block-jacobi-ilu0
 ```
 
 ### Advanced Feature Examples  

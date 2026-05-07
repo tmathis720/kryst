@@ -1,8 +1,17 @@
-//! to run:
-//! cargo mpirun -n 4 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples
+//! Complex Matrix Market benchmark/demo for FGMRES on generated and file-backed
+//! complex systems. Run it with MPI enabled when comparing replicated correctness
+//! checks against distributed scalability behavior.
+//!
+//! Correctness sweep (replicated operator/preconditioner checks, long iteration
+//! budget, and stricter modified Gram-Schmidt reorthogonalization):
+//! cargo mpirun -n 4 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples -- --mode correctness --dist-policy off --maxits 2000 --restarts 150,250,324 --pcs replicated-full-ilu0,none,jacobi,block-jacobi-ilu0 --fgmres-orthog modified --fgmres-reorth always
+//!
+//! Scalability sweep (automatic distributed policy with lightweight local-block
+//! preconditioners):
+//! cargo mpirun -n 4 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples -- --mode scalability --dist-policy auto --maxits 1000 --restarts 50,100 --pcs none,jacobi,block-jacobi-ilu0
 //!
 //! Manual MPI smoke commands for overlapping ILU rows (enable once MPI execution is available):
-//! cargo mpirun -n 2 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples -- --pcs asm-ilu0-overlap1,asm-ilu0-overlap2,ras-ilu0-overlap1,ras-iluk1-overlap1 --run-mode correctness --warmup-runs 0 --measured-runs 1
+//! cargo mpirun -n 2 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples -- --pcs asm-ilu0-overlap1,asm-ilu0-overlap2,ras-ilu0-overlap1,ras-iluk1-overlap1 --mode correctness --warmup-runs 0 --measured-runs 1
 
 #![cfg_attr(not(feature = "complex"), allow(dead_code))]
 
@@ -3635,6 +3644,32 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 }
             }
         }
+    }
+
+    #[test]
+    fn parse_pc_accepts_documented_sweep_names() {
+        assert_eq!(
+            parse_pc_csv(
+                "--pcs",
+                "replicated-full-ilu0,none,jacobi,block-jacobi-ilu0"
+            )
+            .expect("parse documented correctness preconditioners"),
+            vec![
+                PcKind::ReplicatedFullIlu0,
+                PcKind::None,
+                PcKind::JacobiWeak,
+                PcKind::MpiBlockJacobiIlu0Local,
+            ]
+        );
+        assert_eq!(
+            parse_pc_csv("--pcs", "none,jacobi,block-jacobi-ilu0")
+                .expect("parse documented scalability preconditioners"),
+            vec![
+                PcKind::None,
+                PcKind::JacobiWeak,
+                PcKind::MpiBlockJacobiIlu0Local,
+            ]
+        );
     }
 
     #[test]
