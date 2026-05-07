@@ -60,6 +60,8 @@ use crate::matrix::op::LinOp;
 
 pub mod bddc;
 pub mod bridge;
+#[cfg(all(feature = "complex", feature = "backend-faer"))]
+pub mod overlap_ilu;
 pub mod pc_bridge;
 #[cfg(all(feature = "legacy-pc-bridge", feature = "backend-faer"))]
 use faer::Mat;
