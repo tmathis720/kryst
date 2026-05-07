@@ -277,6 +277,11 @@ mod complex_demo {
             println!("Residual semantics: rec/reported = solver recurrence/monitor residual.");
             if config.run_mode == RunMode::Correctness {
                 println!(
+                    "Verdict threshold: rel residual and generated x_err checks pass when <= {:.3e} ({}× rtol).",
+                    correctness_verdict_tolerance(config),
+                    CORRECTNESS_VERDICT_RTOL_MULTIPLIER
+                );
+                println!(
                     "                    True(dist) = ||b_unscaled - A_dist x_unscaled||₂ using the run operator."
                 );
                 println!(
@@ -333,7 +338,7 @@ mod complex_demo {
                 println!("{}", "-".repeat(240));
             } else if include_dof_col {
                 println!(
-                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26} {:>12}",
                     "Op",
                     "Exec",
                     "PCdom",
@@ -355,13 +360,14 @@ mod complex_demo {
                     "True(global)",
                     "Glob(rel)",
                     "x_err(global)",
+                    "OK(d/g/x)",
                     "Reason",
                     "DOF/s"
                 );
                 println!("{}", "-".repeat(390));
             } else {
                 println!(
-                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26}",
+                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26}",
                     "Op",
                     "Exec",
                     "PCdom",
@@ -383,6 +389,7 @@ mod complex_demo {
                     "True(global)",
                     "Glob(rel)",
                     "x_err(global)",
+                    "OK(d/g/x)",
                     "Reason"
                 );
                 println!("{}", "-".repeat(374));
@@ -532,6 +539,12 @@ mod complex_demo {
         }
     }
 
+    const CORRECTNESS_VERDICT_RTOL_MULTIPLIER: f64 = 10.0;
+
+    fn correctness_verdict_tolerance(bench_cfg: &BenchmarkConfig) -> f64 {
+        bench_cfg.rtol * CORRECTNESS_VERDICT_RTOL_MULTIPLIER
+    }
+
     struct ResultRow {
         operator_storage: &'static str,
         execution_backend: &'static str,
@@ -557,6 +570,9 @@ mod complex_demo {
         global_true_residual: Option<R>,
         global_true_residual_rel: Option<R>,
         global_x_error_rel: Option<R>,
+        dist_ok: Option<bool>,
+        global_ok: Option<bool>,
+        x_ok: Option<bool>,
         reason: ConvergedReason,
         dof_per_sec: Option<f64>,
     }
@@ -2425,6 +2441,22 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         } else {
             None
         };
+        let verdict_tol = correctness_verdict_tolerance(bench_cfg);
+        let dist_ok = explicit_true_residual_rel.map(|rel| rel <= verdict_tol);
+        let global_ok = global_reference_check
+            .as_ref()
+            .map(|check| check.true_residual_rel <= verdict_tol);
+        let x_ok = if bench_cfg.run_mode == RunMode::Correctness
+            && problem.rhs_source == RhsSource::GeneratedAOnes
+            && problem.solution_reference.valid_for_x_error()
+        {
+            global_reference_check
+                .as_ref()
+                .and_then(|check| check.x_error_rel)
+                .map(|rel| rel <= verdict_tol)
+        } else {
+            None
+        };
         let dof_per_sec = if matches!(
             problem.backend,
             CsrBackend::Serial | CsrBackend::Distributed
@@ -2488,6 +2520,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 .as_ref()
                 .map(|check| check.true_residual_rel),
             global_x_error_rel: global_reference_check.and_then(|check| check.x_error_rel),
+            dist_ok,
+            global_ok,
+            x_ok,
             reason: stats.reason,
             dof_per_sec,
         })
@@ -2748,6 +2783,35 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         }
     }
 
+    fn render_verdict(flag: Option<bool>) -> &'static str {
+        match flag {
+            Some(true) => "OK",
+            Some(false) => "FAIL",
+            None => "N/A",
+        }
+    }
+
+    fn render_correctness_verdict(row: &ResultRow) -> String {
+        format!(
+            "{}/{}/{}",
+            render_verdict(row.dist_ok),
+            render_verdict(row.global_ok),
+            render_verdict(row.x_ok)
+        )
+    }
+
+    fn render_reason(row: &ResultRow, problem: &Problem) -> String {
+        if row.reason == ConvergedReason::ConvergedRtol
+            && problem.generated_case
+            && problem.comm.size() > 1
+            && (row.global_ok == Some(false) || row.x_ok == Some(false))
+        {
+            "ConvergedRtolDistOpButFailedGlobalReference".to_string()
+        } else {
+            format!("{:?}", row.reason)
+        }
+    }
+
     fn render_result_row(row: &ResultRow, mode: RunMode, problem: &Problem) -> String {
         let rst = row
             .restart_count
@@ -2820,13 +2884,15 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             .global_x_error_rel
             .map(|v| format!("{v:.2e}"))
             .unwrap_or_else(|| "N/A".to_string());
+        let correctness_verdict = render_correctness_verdict(row);
+        let reason = render_reason(row, problem);
         if include_dof_col {
             let dof = row
                 .dof_per_sec
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26?} {:>12}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26} {:>12}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
@@ -2848,12 +2914,13 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 global_true,
                 global_true_rel,
                 global_x_error_rel,
-                row.reason,
+                correctness_verdict,
+                reason,
                 dof
             )
         } else {
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26?}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
@@ -2875,7 +2942,8 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 global_true,
                 global_true_rel,
                 global_x_error_rel,
-                row.reason
+                correctness_verdict,
+                reason
             )
         }
     }
@@ -2907,7 +2975,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         }
         if include_dof_col {
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26} {:>12}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26} {:>12}",
                 operator_storage_label(problem),
                 execution_backend_label(problem),
                 pc_domain_label(spec.pc, problem),
@@ -2918,6 +2986,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 "FAIL",
                 "FAIL",
                 "FAIL",
+                "N/A",
                 "N/A",
                 "N/A",
                 "N/A",
@@ -2934,7 +3003,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             )
         } else {
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>26}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26}",
                 operator_storage_label(problem),
                 execution_backend_label(problem),
                 pc_domain_label(spec.pc, problem),
@@ -2945,6 +3014,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 "FAIL",
                 "FAIL",
                 "FAIL",
+                "N/A",
                 "N/A",
                 "N/A",
                 "N/A",
@@ -3700,6 +3770,10 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         assert!(rendered.contains(&row.requested_policy));
         assert!(rendered.contains(&row.effective_policy));
         assert_eq!(row.pc_apply, "none");
+        assert_eq!(row.dist_ok, Some(true));
+        assert_eq!(row.global_ok, Some(true));
+        assert_eq!(row.x_ok, Some(true));
+        assert!(rendered.contains("OK/OK/OK"));
         assert!(rendered.contains("csr-cx"));
         assert!(rendered.contains("ser"));
         assert!(rendered.contains("none"));
@@ -3768,8 +3842,10 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         let row = run_once(&problem, &spec, &bench_cfg).expect("run once");
         assert_eq!(problem.rhs_source, RhsSource::GeneratedAOnes);
         assert_eq!(row.x_error_rel, None);
+        assert_eq!(row.global_x_error_rel, None);
+        assert_eq!(row.x_ok, None);
         let rendered = render_result_row(&row, RunMode::Correctness, &problem);
-        assert!(rendered.contains("N/A"));
+        assert!(rendered.contains("OK/OK/N/A"));
     }
 
     #[test]
