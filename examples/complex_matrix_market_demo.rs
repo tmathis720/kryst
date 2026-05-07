@@ -1,5 +1,8 @@
 //! to run:
 //! cargo mpirun -n 4 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples
+//!
+//! Manual MPI smoke commands for overlapping ILU rows (enable once MPI execution is available):
+//! cargo mpirun -n 2 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples -- --pcs asm-ilu0-overlap1,asm-ilu0-overlap2,ras-ilu0-overlap1,ras-iluk1-overlap1 --run-mode correctness --warmup-runs 0 --measured-runs 1
 
 #![cfg_attr(not(feature = "complex"), allow(dead_code))]
 
@@ -38,6 +41,7 @@ mod complex_demo {
         IluCsr, IluCsrConfig, IluKind, ReorderingKind, ReorderingOptions,
     };
     use kryst::preconditioner::jacobi::Jacobi;
+    use kryst::preconditioner::overlap_ilu::{OverlapIluPc, OverlapRestriction};
     use kryst::solver::fgmres::{
         FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, ResidualCheckPolicy,
     };
@@ -411,6 +415,7 @@ mod complex_demo {
         rhs_source: RhsSource,
         solution_reference: SolutionReferenceDiagnostics,
         csr_for_pc: Arc<SparseCsrMatrix<S>>,
+        global_csr: Arc<SparseCsrMatrix<S>>,
         local_rows_nnz: usize,
         zero_global_rows_local: usize,
         local_n: usize,
@@ -587,6 +592,9 @@ mod complex_demo {
         Ilu0Local,
         IlutLocal,
         MpiBlockJacobiIlu0Local,
+        AsmIlu0Overlap { overlap: usize },
+        RasIlu0Overlap { overlap: usize },
+        RasIlukOverlap { k: usize, overlap: usize },
         LocalIluk { k: usize },
         ReplicatedFullIlu0,
         ReplicatedFullIluk { k: usize },
@@ -598,6 +606,7 @@ mod complex_demo {
         JacobiWeak,
         Ilu0Local,
         IlutLocal,
+        OverlapIlu,
     }
 
     #[derive(Clone, Debug)]
@@ -1117,6 +1126,10 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             });
         }
         match token_norm.as_str() {
+            "asm-ilu0-overlap1" => Ok(PcKind::AsmIlu0Overlap { overlap: 1 }),
+            "asm-ilu0-overlap2" => Ok(PcKind::AsmIlu0Overlap { overlap: 2 }),
+            "ras-ilu0-overlap1" => Ok(PcKind::RasIlu0Overlap { overlap: 1 }),
+            "ras-iluk1-overlap1" => Ok(PcKind::RasIlukOverlap { k: 1, overlap: 1 }),
             "none" | "off" => Ok(PcKind::None),
             "jacobi" | "jacobi-weak" | "weak-jacobi" => Ok(PcKind::JacobiWeak),
             "ilu0" | "ilu0-local" | "local-ilu0" => Ok(PcKind::Ilu0Local),
@@ -1127,7 +1140,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             | "block-jacobi-ilu0-overlap0"
             | "mpi-block-ilu0" => Ok(PcKind::MpiBlockJacobiIlu0Local),
             other => Err(KError::InvalidInput(format!(
-                "invalid pc '{other}', expected none|jacobi|local-ilu0|local-ilut|local-iluk:<k>|block-jacobi-ilu0-overlap0|block-jacobi-iluk1|block-jacobi-iluk1-overlap0|block-jacobi-iluk:<k>|block-jacobi-iluk<k>-overlap0|replicated-ilu0|replicated-full-ilu0|replicated-iluk:<k>|mpi-block-jacobi-ilu0"
+                "invalid pc '{other}', expected none|jacobi|local-ilu0|local-ilut|local-iluk:<k>|block-jacobi-ilu0-overlap0|block-jacobi-iluk1|block-jacobi-iluk1-overlap0|block-jacobi-iluk:<k>|block-jacobi-iluk<k>-overlap0|replicated-ilu0|replicated-full-ilu0|replicated-iluk:<k>|mpi-block-jacobi-ilu0|asm-ilu0-overlap1|asm-ilu0-overlap2|ras-ilu0-overlap1|ras-iluk1-overlap1"
             ))),
         }
     }
@@ -1294,6 +1307,13 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 }
             }
             PcKind::MpiBlockJacobiIlu0Local => "own0",
+            PcKind::AsmIlu0Overlap { overlap }
+            | PcKind::RasIlu0Overlap { overlap }
+            | PcKind::RasIlukOverlap { overlap, .. } => match overlap {
+                1 => "own+ghost1",
+                2 => "own+ghost2",
+                _ => "own+ghostN",
+            },
             PcKind::None | PcKind::JacobiWeak => "n/a",
         }
     }
@@ -1315,6 +1335,10 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             | PcKind::IlutLocal
             | PcKind::MpiBlockJacobiIlu0Local
             | PcKind::LocalIluk { .. } => "owned-block/overlap0",
+            PcKind::AsmIlu0Overlap { .. } => "asm/overlap-gather/owned-output",
+            PcKind::RasIlu0Overlap { .. } | PcKind::RasIlukOverlap { .. } => {
+                "ras/overlap-gather/restricted-owned"
+            }
             PcKind::JacobiWeak => "jacobi/local",
             PcKind::None => "none",
         }
@@ -1334,6 +1358,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 Self::MpiBlockJacobiIlu0Local => {
                     "block-jacobi-ilu0-overlap0 [mpi spelling alias]".to_string()
                 }
+                Self::AsmIlu0Overlap { overlap } => format!("asm-ilu0-overlap{overlap}"),
+                Self::RasIlu0Overlap { overlap } => format!("ras-ilu0-overlap{overlap}"),
+                Self::RasIlukOverlap { k, overlap } => format!("ras-iluk{k}-overlap{overlap}"),
                 Self::LocalIluk { k } => format!("block-jacobi-iluk{k}-overlap0"),
                 Self::ReplicatedFullIlu0 => {
                     "replicated full ILU(0) [correctness only, not scalable]".to_string()
@@ -1353,6 +1380,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 | Self::LocalIluk { .. }
                 | Self::ReplicatedFullIlu0
                 | Self::ReplicatedFullIluk { .. } => PcDispatchBranch::Ilu0Local,
+                Self::AsmIlu0Overlap { .. }
+                | Self::RasIlu0Overlap { .. }
+                | Self::RasIlukOverlap { .. } => PcDispatchBranch::OverlapIlu,
                 Self::IlutLocal => PcDispatchBranch::IlutLocal,
             }
         }
@@ -1365,6 +1395,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 | Self::Ilu0Local
                 | Self::IlutLocal
                 | Self::LocalIluk { .. }
+                | Self::AsmIlu0Overlap { .. }
+                | Self::RasIlu0Overlap { .. }
+                | Self::RasIlukOverlap { .. }
                 | Self::ReplicatedFullIlu0
                 | Self::ReplicatedFullIluk { .. } => None,
             }
@@ -1381,6 +1414,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 Self::JacobiWeak => "jacobi-weak".to_string(),
                 Self::IlutLocal => "local-ilut-real-projection-fallback".to_string(),
                 Self::LocalIluk { k } => format!("local-iluk:{k}"),
+                Self::AsmIlu0Overlap { overlap } => format!("asm-ilu0-overlap{overlap}"),
+                Self::RasIlu0Overlap { overlap } => format!("ras-ilu0-overlap{overlap}"),
+                Self::RasIlukOverlap { k, overlap } => format!("ras-iluk{k}-overlap{overlap}"),
                 Self::ReplicatedFullIlu0 => "replicated-ilu0".to_string(),
                 Self::ReplicatedFullIluk { k } => format!("replicated-iluk:{k}"),
             }
@@ -1758,6 +1794,14 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         } else {
             problem.csr_for_pc.clone()
         };
+        let global_pc_csr: Arc<SparseCsrMatrix<S>> = if bench_cfg.row_scale {
+            let row_scale = row_scaling.as_ref().ok_or_else(|| {
+                KError::InvalidInput("row scaling requested but factors were not computed".into())
+            })?;
+            Arc::new(scale_csr_rows(problem.global_csr.as_ref(), row_scale))
+        } else {
+            problem.global_csr.clone()
+        };
         let b_scaled: Vec<S> = if let Some(d) = &row_scaling {
             b_unscaled
                 .iter()
@@ -1778,6 +1822,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             Jacobi(Jacobi),
             Ilu0(IluCsr),
             MpiBlockJacobiIlu0(IluCsr),
+            OverlapIlu(OverlapIluPc),
             ReplicatedFull {
                 ilu: IluCsr,
                 comm: UniverseComm,
@@ -1795,6 +1840,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                     Self::Jacobi(pc) => pc,
                     Self::Ilu0(pc) => pc,
                     Self::MpiBlockJacobiIlu0(pc) => pc,
+                    Self::OverlapIlu(pc) => pc,
                     Self::ReplicatedFull { .. } => self,
                 }
             }
@@ -1806,6 +1852,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                     Self::Jacobi(pc) => KPreconditioner::dims(pc),
                     Self::Ilu0(pc) => KPreconditioner::dims(pc),
                     Self::MpiBlockJacobiIlu0(pc) => KPreconditioner::dims(pc),
+                    Self::OverlapIlu(pc) => KPreconditioner::dims(pc),
                     Self::ReplicatedFull { global_n, .. } => (*global_n, *global_n),
                 }
             }
@@ -1820,6 +1867,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                     Self::Jacobi(pc) => pc.apply_s(side, x, y, scratch),
                     Self::Ilu0(pc) => pc.apply_s(side, x, y, scratch),
                     Self::MpiBlockJacobiIlu0(pc) => pc.apply_s(side, x, y, scratch),
+                    Self::OverlapIlu(pc) => pc.apply_s(side, x, y, scratch),
                     Self::ReplicatedFull {
                         ilu,
                         comm,
@@ -1867,7 +1915,11 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                     PcKind::LocalIluk { k } | PcKind::ReplicatedFullIluk { k } => {
                         IluKind::Iluk { k }
                     }
-                    PcKind::None | PcKind::JacobiWeak => IluKind::Ilu0,
+                    PcKind::AsmIlu0Overlap { .. }
+                    | PcKind::RasIlu0Overlap { .. }
+                    | PcKind::RasIlukOverlap { .. }
+                    | PcKind::None
+                    | PcKind::JacobiWeak => IluKind::Ilu0,
                 };
                 cfg.reordering = bench_cfg.ilu_reordering.clone();
                 let mut ilu = IluCsr::new_with_config(cfg);
@@ -1899,8 +1951,39 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                             scratch_out: std::sync::Mutex::new(vec![S::zero(); problem.global_n]),
                         }
                     }
-                    PcKind::None | PcKind::JacobiWeak => unreachable!(),
+                    PcKind::AsmIlu0Overlap { .. }
+                    | PcKind::RasIlu0Overlap { .. }
+                    | PcKind::RasIlukOverlap { .. }
+                    | PcKind::None
+                    | PcKind::JacobiWeak => unreachable!(),
                 });
+            }
+            PcDispatchBranch::OverlapIlu => {
+                let (kind, overlap, restriction) = match spec.pc {
+                    PcKind::AsmIlu0Overlap { overlap } => {
+                        (IluKind::Ilu0, overlap, OverlapRestriction::Asm)
+                    }
+                    PcKind::RasIlu0Overlap { overlap } => {
+                        (IluKind::Ilu0, overlap, OverlapRestriction::Ras)
+                    }
+                    PcKind::RasIlukOverlap { k, overlap } => {
+                        (IluKind::Iluk { k }, overlap, OverlapRestriction::Ras)
+                    }
+                    _ => unreachable!(),
+                };
+                let mut cfg = IluCsrConfig::default();
+                cfg.reordering = bench_cfg.ilu_reordering.clone();
+                let pc_overlap = OverlapIluPc::setup_from_global_csr(
+                    global_pc_csr.as_ref(),
+                    problem.comm.clone(),
+                    problem.global_row_start,
+                    problem.global_row_start + problem.local_n,
+                    overlap,
+                    kind,
+                    cfg,
+                    restriction,
+                )?;
+                pc = Some(PcHandle::OverlapIlu(pc_overlap));
             }
             PcDispatchBranch::IlutLocal => {
                 validate_local_ilu_owned_block(pc_csr.as_ref())?;
@@ -2686,6 +2769,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             rhs_source: RhsSource::GeneratedAOnes,
             solution_reference,
             csr_for_pc: Arc::new(local_pc_block),
+            global_csr: Arc::new(csr_sparse),
             local_rows_nnz: local_csr.values().len(),
             zero_global_rows_local: count_zero_rows(&local_csr),
             local_n,
@@ -2787,6 +2871,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             rhs_source,
             solution_reference,
             csr_for_pc: Arc::new(local_pc_block),
+            global_csr: Arc::new(csr_sparse),
             local_rows_nnz: local_csr.values().len(),
             zero_global_rows_local: count_zero_rows(&local_csr),
             local_n,
@@ -3127,6 +3212,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             rhs_source: RhsSource::GeneratedAOnes,
             solution_reference: solution_reference_diagnostics(&rectangular_pc),
             csr_for_pc: Arc::new(rectangular_pc.clone()),
+            global_csr: Arc::new(op_local.clone()),
             local_rows_nnz: op_local.values().len(),
             zero_global_rows_local: count_zero_rows(&op_local),
             local_n: 2,
@@ -3191,6 +3277,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             rhs_source: RhsSource::GeneratedAOnes,
             solution_reference: solution_reference_diagnostics(&op_local),
             csr_for_pc: Arc::new(op_local.clone()),
+            global_csr: Arc::new(op_local.clone()),
             local_rows_nnz: 2,
             zero_global_rows_local: count_zero_rows(&op_local),
             local_n: 2,
@@ -3271,6 +3358,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             rhs_source: RhsSource::GeneratedAOnes,
             solution_reference: diagnostics,
             csr_for_pc: Arc::new(op_local.clone()),
+            global_csr: Arc::new(op_local.clone()),
             local_rows_nnz: 1,
             zero_global_rows_local: count_zero_rows(&op_local),
             local_n: 2,
@@ -3334,6 +3422,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             rhs_source: RhsSource::GeneratedAOnes,
             solution_reference: solution_reference_diagnostics(&op_local),
             csr_for_pc: Arc::new(op_local.clone()),
+            global_csr: Arc::new(op_local.clone()),
             local_rows_nnz: 2,
             zero_global_rows_local: count_zero_rows(&op_local),
             local_n: 2,
@@ -3429,6 +3518,22 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         assert_eq!(
             pc_apply_label_for_size(PcKind::Ilu0Local, 2),
             "owned-block/overlap0"
+        );
+        assert_eq!(
+            pc_domain_label_for_size(PcKind::AsmIlu0Overlap { overlap: 1 }, 2),
+            "own+ghost1"
+        );
+        assert_eq!(
+            pc_domain_label_for_size(PcKind::AsmIlu0Overlap { overlap: 2 }, 2),
+            "own+ghost2"
+        );
+        assert_eq!(
+            pc_apply_label_for_size(PcKind::AsmIlu0Overlap { overlap: 1 }, 2),
+            "asm/overlap-gather/owned-output"
+        );
+        assert_eq!(
+            pc_apply_label_for_size(PcKind::RasIlu0Overlap { overlap: 1 }, 2),
+            "ras/overlap-gather/restricted-owned"
         );
         assert_eq!(pc_domain_label_for_size(PcKind::None, 2), "n/a");
         assert_eq!(pc_apply_label_for_size(PcKind::None, 2), "none");
@@ -3561,6 +3666,26 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         assert_eq!(
             parse_pc("block-jacobi-iluk3-overlap0").expect("parse block-jacobi-iluk3-overlap0"),
             PcKind::LocalIluk { k: 3 }
+        );
+    }
+
+    #[test]
+    fn parse_pc_accepts_overlap_aliases() {
+        assert_eq!(
+            parse_pc("asm-ilu0-overlap1").expect("parse asm-ilu0-overlap1"),
+            PcKind::AsmIlu0Overlap { overlap: 1 }
+        );
+        assert_eq!(
+            parse_pc("asm-ilu0-overlap2").expect("parse asm-ilu0-overlap2"),
+            PcKind::AsmIlu0Overlap { overlap: 2 }
+        );
+        assert_eq!(
+            parse_pc("ras-ilu0-overlap1").expect("parse ras-ilu0-overlap1"),
+            PcKind::RasIlu0Overlap { overlap: 1 }
+        );
+        assert_eq!(
+            parse_pc("ras-iluk1-overlap1").expect("parse ras-iluk1-overlap1"),
+            PcKind::RasIlukOverlap { k: 1, overlap: 1 }
         );
     }
 
