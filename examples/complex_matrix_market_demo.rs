@@ -2013,134 +2013,90 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         Ok(())
     }
 
-    fn run_once(
+    enum PcHandle {
+        Jacobi(Jacobi),
+        Ilu0(IluCsr),
+        MpiBlockJacobiIlu0(IluCsr),
+        OverlapIlu(OverlapIluPc),
+        ReplicatedFull {
+            ilu: IluCsr,
+            comm: UniverseComm,
+            global_n: usize,
+            global_row_start: usize,
+            local_n: usize,
+            scratch_in: std::sync::Mutex<Vec<S>>,
+            scratch_out: std::sync::Mutex<Vec<S>>,
+        },
+    }
+
+    impl PcHandle {
+        fn as_kpc_mut(&mut self) -> &mut dyn KPreconditioner<Scalar = S> {
+            match self {
+                Self::Jacobi(pc) => pc,
+                Self::Ilu0(pc) => pc,
+                Self::MpiBlockJacobiIlu0(pc) => pc,
+                Self::OverlapIlu(pc) => pc,
+                Self::ReplicatedFull { .. } => self,
+            }
+        }
+    }
+    impl KPreconditioner for PcHandle {
+        type Scalar = S;
+        fn dims(&self) -> (usize, usize) {
+            match self {
+                Self::Jacobi(pc) => KPreconditioner::dims(pc),
+                Self::Ilu0(pc) => KPreconditioner::dims(pc),
+                Self::MpiBlockJacobiIlu0(pc) => KPreconditioner::dims(pc),
+                Self::OverlapIlu(pc) => KPreconditioner::dims(pc),
+                Self::ReplicatedFull { global_n, .. } => (*global_n, *global_n),
+            }
+        }
+        fn apply_s(
+            &self,
+            side: PcSide,
+            x: &[S],
+            y: &mut [S],
+            scratch: &mut BridgeScratch,
+        ) -> Result<(), KError> {
+            match self {
+                Self::Jacobi(pc) => pc.apply_s(side, x, y, scratch),
+                Self::Ilu0(pc) => pc.apply_s(side, x, y, scratch),
+                Self::MpiBlockJacobiIlu0(pc) => pc.apply_s(side, x, y, scratch),
+                Self::OverlapIlu(pc) => pc.apply_s(side, x, y, scratch),
+                Self::ReplicatedFull {
+                    ilu,
+                    comm,
+                    global_n,
+                    global_row_start,
+                    local_n,
+                    scratch_in,
+                    scratch_out,
+                } => apply_replicated_full_ilu_owned_segment(
+                    ilu,
+                    comm,
+                    side,
+                    x,
+                    y,
+                    scratch,
+                    *global_n,
+                    *global_row_start,
+                    *local_n,
+                    scratch_in,
+                    scratch_out,
+                ),
+            }
+        }
+    }
+
+    fn setup_preconditioner_for_run_once(
         problem: &Problem,
         spec: &RunSpec,
         bench_cfg: &BenchmarkConfig,
-    ) -> Result<ResultRow, KError> {
-        let b_unscaled = &problem.rhs;
-        let (row_scaling, op_scaled): (Option<Vec<R>>, Arc<dyn KLinOp<Scalar = S>>) =
-            if bench_cfg.row_scale {
-                let d = compute_row_scaling(problem.csr_for_pc.as_ref(), bench_cfg.row_scale_tiny);
-                (
-                    Some(d.clone()),
-                    Arc::new(RowScaledOp {
-                        base: problem.op.clone(),
-                        d,
-                    }),
-                )
-            } else {
-                (None, problem.op.clone())
-            };
-        let pc_csr: Arc<SparseCsrMatrix<S>> = if bench_cfg.row_scale {
-            let row_scale = row_scaling.as_ref().ok_or_else(|| {
-                KError::InvalidInput("row scaling requested but factors were not computed".into())
-            })?;
-            Arc::new(scale_csr_rows(problem.csr_for_pc.as_ref(), row_scale))
-        } else {
-            problem.csr_for_pc.clone()
-        };
-        let global_pc_csr: Arc<SparseCsrMatrix<S>> = if bench_cfg.row_scale {
-            let row_scale = row_scaling.as_ref().ok_or_else(|| {
-                KError::InvalidInput("row scaling requested but factors were not computed".into())
-            })?;
-            Arc::new(scale_csr_rows(problem.global_csr.as_ref(), row_scale))
-        } else {
-            problem.global_csr.clone()
-        };
-        let b_scaled: Vec<S> = if let Some(d) = &row_scaling {
-            b_unscaled
-                .iter()
-                .zip(d.iter())
-                .map(|(bi, di)| *bi * S::from_real(*di))
-                .collect()
-        } else {
-            b_unscaled.clone()
-        };
-        let b = &b_scaled;
-        let effective_pc_side = normalized_fgmres_side(spec.pc_side);
-        let csr_pc_diag = csr_for_pc_diagnostics(
-            pc_csr.as_ref(),
-            problem.local_rows_nnz,
-            problem.zero_global_rows_local,
-        );
-        enum PcHandle {
-            Jacobi(Jacobi),
-            Ilu0(IluCsr),
-            MpiBlockJacobiIlu0(IluCsr),
-            OverlapIlu(OverlapIluPc),
-            ReplicatedFull {
-                ilu: IluCsr,
-                comm: UniverseComm,
-                global_n: usize,
-                global_row_start: usize,
-                local_n: usize,
-                scratch_in: std::sync::Mutex<Vec<S>>,
-                scratch_out: std::sync::Mutex<Vec<S>>,
-            },
-        }
-
-        impl PcHandle {
-            fn as_kpc_mut(&mut self) -> &mut dyn KPreconditioner<Scalar = S> {
-                match self {
-                    Self::Jacobi(pc) => pc,
-                    Self::Ilu0(pc) => pc,
-                    Self::MpiBlockJacobiIlu0(pc) => pc,
-                    Self::OverlapIlu(pc) => pc,
-                    Self::ReplicatedFull { .. } => self,
-                }
-            }
-        }
-        impl KPreconditioner for PcHandle {
-            type Scalar = S;
-            fn dims(&self) -> (usize, usize) {
-                match self {
-                    Self::Jacobi(pc) => KPreconditioner::dims(pc),
-                    Self::Ilu0(pc) => KPreconditioner::dims(pc),
-                    Self::MpiBlockJacobiIlu0(pc) => KPreconditioner::dims(pc),
-                    Self::OverlapIlu(pc) => KPreconditioner::dims(pc),
-                    Self::ReplicatedFull { global_n, .. } => (*global_n, *global_n),
-                }
-            }
-            fn apply_s(
-                &self,
-                side: PcSide,
-                x: &[S],
-                y: &mut [S],
-                scratch: &mut BridgeScratch,
-            ) -> Result<(), KError> {
-                match self {
-                    Self::Jacobi(pc) => pc.apply_s(side, x, y, scratch),
-                    Self::Ilu0(pc) => pc.apply_s(side, x, y, scratch),
-                    Self::MpiBlockJacobiIlu0(pc) => pc.apply_s(side, x, y, scratch),
-                    Self::OverlapIlu(pc) => pc.apply_s(side, x, y, scratch),
-                    Self::ReplicatedFull {
-                        ilu,
-                        comm,
-                        global_n,
-                        global_row_start,
-                        local_n,
-                        scratch_in,
-                        scratch_out,
-                    } => apply_replicated_full_ilu_owned_segment(
-                        ilu,
-                        comm,
-                        side,
-                        x,
-                        y,
-                        scratch,
-                        *global_n,
-                        *global_row_start,
-                        *local_n,
-                        scratch_in,
-                        scratch_out,
-                    ),
-                }
-            }
-        }
-
+        pc_csr: &Arc<SparseCsrMatrix<S>>,
+        global_pc_csr: &Arc<SparseCsrMatrix<S>>,
+        csr_pc_diag: &CsrForPcDiagnostics,
+    ) -> Result<Option<PcHandle>, KError> {
         let mut pc: Option<PcHandle> = None;
-        let setup_start = Instant::now();
         match spec.pc.dispatch_branch() {
             PcDispatchBranch::None => {}
             PcDispatchBranch::JacobiWeak => {
@@ -2271,6 +2227,69 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 pc = Some(PcHandle::Ilu0(ilu));
             }
         }
+        Ok(pc)
+    }
+
+    fn run_once(
+        problem: &Problem,
+        spec: &RunSpec,
+        bench_cfg: &BenchmarkConfig,
+    ) -> Result<ResultRow, KError> {
+        let b_unscaled = &problem.rhs;
+        let (row_scaling, op_scaled): (Option<Vec<R>>, Arc<dyn KLinOp<Scalar = S>>) =
+            if bench_cfg.row_scale {
+                let d = compute_row_scaling(problem.csr_for_pc.as_ref(), bench_cfg.row_scale_tiny);
+                (
+                    Some(d.clone()),
+                    Arc::new(RowScaledOp {
+                        base: problem.op.clone(),
+                        d,
+                    }),
+                )
+            } else {
+                (None, problem.op.clone())
+            };
+        let pc_csr: Arc<SparseCsrMatrix<S>> = if bench_cfg.row_scale {
+            let row_scale = row_scaling.as_ref().ok_or_else(|| {
+                KError::InvalidInput("row scaling requested but factors were not computed".into())
+            })?;
+            Arc::new(scale_csr_rows(problem.csr_for_pc.as_ref(), row_scale))
+        } else {
+            problem.csr_for_pc.clone()
+        };
+        let global_pc_csr: Arc<SparseCsrMatrix<S>> = if bench_cfg.row_scale {
+            let row_scale = row_scaling.as_ref().ok_or_else(|| {
+                KError::InvalidInput("row scaling requested but factors were not computed".into())
+            })?;
+            Arc::new(scale_csr_rows(problem.global_csr.as_ref(), row_scale))
+        } else {
+            problem.global_csr.clone()
+        };
+        let b_scaled: Vec<S> = if let Some(d) = &row_scaling {
+            b_unscaled
+                .iter()
+                .zip(d.iter())
+                .map(|(bi, di)| *bi * S::from_real(*di))
+                .collect()
+        } else {
+            b_unscaled.clone()
+        };
+        let b = &b_scaled;
+        let effective_pc_side = normalized_fgmres_side(spec.pc_side);
+        let csr_pc_diag = csr_for_pc_diagnostics(
+            pc_csr.as_ref(),
+            problem.local_rows_nnz,
+            problem.zero_global_rows_local,
+        );
+        let setup_start = Instant::now();
+        let mut pc = setup_preconditioner_for_run_once(
+            problem,
+            spec,
+            bench_cfg,
+            &pc_csr,
+            &global_pc_csr,
+            &csr_pc_diag,
+        )?;
         let setup_secs = setup_start.elapsed().as_secs_f64();
         for _ in 0..bench_cfg.warmup_runs {
             let mut x = vec![S::zero(); problem.local_n];
@@ -3619,6 +3638,80 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 "rank {rank} replicated apply mismatch: got={got:?}, expected={expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn replicated_full_ilu0_setup_helper_uses_global_dimensions_for_shifted_poisson() {
+        #[cfg(feature = "mpi")]
+        let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+        #[cfg(not(feature = "mpi"))]
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let problem = build_shifted_poisson_case(&comm, 5, 5, 1.0, 0.25)
+            .expect("build generated shifted Poisson problem");
+        assert_eq!(problem.global_n, 25);
+        assert_eq!(
+            problem.global_n % 4,
+            1,
+            "test matrix should not divide evenly over 4 ranks"
+        );
+        assert_eq!(problem.csr_for_pc.nrows(), problem.local_n);
+        assert_eq!(problem.csr_for_pc.ncols(), problem.local_n);
+        assert_eq!(problem.global_csr.nrows(), problem.global_n);
+        assert_eq!(problem.global_csr.ncols(), problem.global_n);
+
+        let spec = RunSpec {
+            restart: 5,
+            variant: FgmresVariant::Classical,
+            residual_check_policy: ResidualCheckPolicy::OnConvergence,
+            orthog: OrthogMethod::ClassicalGS,
+            reorth: ReorthPolicy::IfNeeded,
+            pc_side: PcSide::Right,
+            pc: PcKind::ReplicatedFullIlu0,
+        };
+        let bench_cfg = BenchmarkConfig {
+            run_mode: RunMode::Scalability,
+            warmup_runs: 0,
+            measured_runs: 0,
+            ..BenchmarkConfig::default()
+        };
+        let pc_csr = problem.csr_for_pc.clone();
+        let global_pc_csr = problem.global_csr.clone();
+        let csr_pc_diag = csr_for_pc_diagnostics(
+            pc_csr.as_ref(),
+            problem.local_rows_nnz,
+            problem.zero_global_rows_local,
+        );
+
+        let pc = setup_preconditioner_for_run_once(
+            &problem,
+            &spec,
+            &bench_cfg,
+            &pc_csr,
+            &global_pc_csr,
+            &csr_pc_diag,
+        )
+        .expect("replicated full ILU0 setup through run_once helper")
+        .expect("replicated full ILU0 preconditioner handle");
+
+        assert!(
+            matches!(pc, PcHandle::ReplicatedFull { .. }),
+            "expected replicated full preconditioner handle"
+        );
+        assert_eq!(
+            KPreconditioner::dims(&pc),
+            (problem.global_n, problem.global_n)
+        );
+
+        let x_local = (0..problem.local_n)
+            .map(|i| S::from_parts(1.0 + (problem.global_row_start + i) as f64, -0.25))
+            .collect::<Vec<_>>();
+        let mut y_local = vec![S::zero(); problem.local_n];
+        let mut scratch = BridgeScratch::default();
+        pc.apply_s(PcSide::Right, &x_local, &mut y_local, &mut scratch)
+            .expect(
+                "replicated full ILU0 applies to owned local vector without dimension mismatch",
+            );
     }
 
     #[test]
