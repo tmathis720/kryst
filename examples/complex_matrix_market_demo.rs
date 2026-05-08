@@ -282,10 +282,10 @@ mod complex_demo {
                     CORRECTNESS_VERDICT_RTOL_MULTIPLIER
                 );
                 println!(
-                    "                    True(dist) = ||b_unscaled - A_dist x_unscaled||₂ using the run operator."
+                    "                    True(dist) = ||b_unscaled - problem.op x_unscaled||₂ on owned rows, then reduced across ranks."
                 );
                 println!(
-                    "                    True(global) = ||b_global - A_global x_global||₂ after gathering owned vectors in rank order."
+                    "                    True(global) = ||b_global - problem.global_csr x_global||₂ after gathering owned vectors in rank order."
                 );
                 println!(
                     "                    *(rel) columns divide by the corresponding unscaled RHS norm (stable under --row-scale)."
@@ -338,7 +338,7 @@ mod complex_demo {
                 println!("{}", "-".repeat(240));
             } else if include_dof_col {
                 println!(
-                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26} {:>12}",
+                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>8} {:>8} {:>8} {:>26} {:>12}",
                     "Op",
                     "Exec",
                     "PCdom",
@@ -355,19 +355,21 @@ mod complex_demo {
                     "Pfb",
                     "Rec/Reported",
                     "True(dist)",
-                    "Dist(rel)",
+                    "TrueDist(rel)",
                     "x_err(dist)",
                     "True(global)",
-                    "Glob(rel)",
+                    "TrueGlob(rel)",
                     "x_err(global)",
-                    "OK(d/g/x)",
+                    "DistOK",
+                    "GlobalOK",
+                    "XOK",
                     "Reason",
                     "DOF/s"
                 );
-                println!("{}", "-".repeat(390));
+                println!("{}", "-".repeat(408));
             } else {
                 println!(
-                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26}",
+                    "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>8} {:>8} {:>8} {:>26}",
                     "Op",
                     "Exec",
                     "PCdom",
@@ -384,15 +386,17 @@ mod complex_demo {
                     "Pfb",
                     "Rec/Reported",
                     "True(dist)",
-                    "Dist(rel)",
+                    "TrueDist(rel)",
                     "x_err(dist)",
                     "True(global)",
-                    "Glob(rel)",
+                    "TrueGlob(rel)",
                     "x_err(global)",
-                    "OK(d/g/x)",
+                    "DistOK",
+                    "GlobalOK",
+                    "XOK",
                     "Reason"
                 );
-                println!("{}", "-".repeat(374));
+                println!("{}", "-".repeat(392));
             }
             println!(
                 "Legend: Op=operator storage (csr-cx=complex CSR), Exec=execution backend (ser=serial, mpi-row=MPI row partition, mpi-repl=MPI replicated operator), PCdom=PC domain (full=global/full serial matrix ILU, own0=MPI owned block, overlap=0 local ILU/ASM, n/a=no ILU domain), PC apply=how the preconditioner is applied."
@@ -2791,15 +2795,6 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         }
     }
 
-    fn render_correctness_verdict(row: &ResultRow) -> String {
-        format!(
-            "{}/{}/{}",
-            render_verdict(row.dist_ok),
-            render_verdict(row.global_ok),
-            render_verdict(row.x_ok)
-        )
-    }
-
     fn render_reason(row: &ResultRow, problem: &Problem) -> String {
         if row.reason == ConvergedReason::ConvergedRtol
             && problem.generated_case
@@ -2884,7 +2879,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             .global_x_error_rel
             .map(|v| format!("{v:.2e}"))
             .unwrap_or_else(|| "N/A".to_string());
-        let correctness_verdict = render_correctness_verdict(row);
+        let dist_ok = render_verdict(row.dist_ok);
+        let global_ok = render_verdict(row.global_ok);
+        let x_ok = render_verdict(row.x_ok);
         let reason = render_reason(row, problem);
         if include_dof_col {
             let dof = row
@@ -2892,7 +2889,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 .map(|v| format!("{v:.2e}"))
                 .unwrap_or_else(|| "N/A".to_string());
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26} {:>12}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>8} {:>8} {:>8} {:>26} {:>12}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
@@ -2914,13 +2911,15 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 global_true,
                 global_true_rel,
                 global_x_error_rel,
-                correctness_verdict,
+                dist_ok,
+                global_ok,
+                x_ok,
                 reason,
                 dof
             )
         } else {
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9.3} {:>9.3} {:>9.3} {:>7} {:>5} {:>5} {:>5} {:>14.2e} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>8} {:>8} {:>8} {:>26}",
                 row.operator_storage,
                 row.execution_backend,
                 row.pc_domain,
@@ -2942,7 +2941,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 global_true,
                 global_true_rel,
                 global_x_error_rel,
-                correctness_verdict,
+                dist_ok,
+                global_ok,
+                x_ok,
                 reason
             )
         }
@@ -2975,7 +2976,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         }
         if include_dof_col {
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26} {:>12}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>8} {:>8} {:>8} {:>26} {:>12}",
                 operator_storage_label(problem),
                 execution_backend_label(problem),
                 pc_domain_label(spec.pc, problem),
@@ -2986,6 +2987,8 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 "FAIL",
                 "FAIL",
                 "FAIL",
+                "N/A",
+                "N/A",
                 "N/A",
                 "N/A",
                 "N/A",
@@ -3003,7 +3006,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             )
         } else {
             format!(
-                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>13} {:>26}",
+                "{:<7} {:<8} {:<6} {:<42} {:<36} {:<34} {:<34} {:>9} {:>9} {:>9} {:>7} {:>5} {:>5} {:>5} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>14} {:>8} {:>8} {:>8} {:>26}",
                 operator_storage_label(problem),
                 execution_backend_label(problem),
                 pc_domain_label(spec.pc, problem),
@@ -3014,6 +3017,8 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 "FAIL",
                 "FAIL",
                 "FAIL",
+                "N/A",
+                "N/A",
                 "N/A",
                 "N/A",
                 "N/A",
@@ -3773,7 +3778,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         assert_eq!(row.dist_ok, Some(true));
         assert_eq!(row.global_ok, Some(true));
         assert_eq!(row.x_ok, Some(true));
-        assert!(rendered.contains("OK/OK/OK"));
+        assert!(rendered.contains("OK       OK       OK"));
         assert!(rendered.contains("csr-cx"));
         assert!(rendered.contains("ser"));
         assert!(rendered.contains("none"));
@@ -3845,7 +3850,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         assert_eq!(row.global_x_error_rel, None);
         assert_eq!(row.x_ok, None);
         let rendered = render_result_row(&row, RunMode::Correctness, &problem);
-        assert!(rendered.contains("OK/OK/N/A"));
+        assert!(rendered.contains("OK       OK      N/A"));
     }
 
     #[test]
