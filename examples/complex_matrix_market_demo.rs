@@ -10,8 +10,11 @@
 //! preconditioners):
 //! cargo mpirun -n 4 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples -- --mode scalability --dist-policy auto --maxits 1000 --restarts 50,100 --pcs none,jacobi,block-jacobi-ilu0
 //!
-//! Manual MPI smoke commands for overlapping ILU rows (enable once MPI execution is available):
-//! cargo mpirun -n 2 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples -- --pcs asm-ilu0-overlap1,asm-ilu0-overlap2,ras-ilu0-overlap1,ras-iluk1-overlap1 --mode correctness --warmup-runs 0 --measured-runs 1
+//! Optional MPI correctness sweep with overlap ILU rows. `--include-overlap-pcs`
+//! keeps the zero-overlap block-Jacobi ILU baseline, then adds
+//! `asm-ilu0-overlap1`, `ras-ilu0-overlap1`, and `ras-iluk1-overlap1`;
+//! correctness rows include `GlobalOK`/`XOK` verdicts before users compare speed.
+//! cargo mpirun -n 4 --example complex_matrix_market_demo --features=complex,mpi,mpi_examples -- --mode correctness --dist-policy auto --include-overlap-pcs --warmup-runs 0 --measured-runs 1
 
 #![cfg_attr(not(feature = "complex"), allow(dead_code))]
 
@@ -128,6 +131,16 @@ mod complex_demo {
                     "Replicated check marker: {}",
                     if config.mark_replicated_check {
                         "enabled (metadata-only)"
+                    } else {
+                        "disabled"
+                    }
+                );
+                println!(
+                    "Overlap PC preset: {}",
+                    if should_include_overlap_pcs(&config, size) {
+                        "enabled (MPI correctness only; GlobalOK/XOK verdict columns shown)"
+                    } else if config.include_overlap_pcs {
+                        "requested but inactive (requires MPI correctness with >1 rank)"
                     } else {
                         "disabled"
                     }
@@ -692,6 +705,7 @@ mod complex_demo {
         pcs: Vec<PcKind>,
         include_restart_200: bool,
         include_ilut_real_projection_fallback: bool,
+        include_overlap_pcs: bool,
         variants: Vec<FgmresVariant>,
         orthogs: Vec<OrthogMethod>,
         reorths: Vec<ReorthPolicy>,
@@ -788,6 +802,7 @@ mod complex_demo {
                 pcs: Vec::new(),
                 include_restart_200: false,
                 include_ilut_real_projection_fallback: false,
+                include_overlap_pcs: false,
                 variants: vec![FgmresVariant::Classical],
                 orthogs: vec![OrthogMethod::ClassicalGS],
                 reorths: vec![ReorthPolicy::IfNeeded],
@@ -844,13 +859,15 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY] [--poisson-shift-real F] [--poisson-shift-imag F] [--poisson-convection CX,CY]
-Defaults: --dist-policy is off for correctness and robustness, auto for scalability."
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--include-overlap-pcs] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY] [--poisson-shift-real F] [--poisson-shift-imag F] [--poisson-convection CX,CY]
+Defaults: --dist-policy is off for correctness and robustness, auto for scalability.
+--include-overlap-pcs is active only for MPI correctness sweeps; it keeps block-jacobi-ilu0-overlap0 and appends asm-ilu0-overlap1, ras-ilu0-overlap1, ras-iluk1-overlap1 so GlobalOK/XOK verdicts are visible before performance comparisons."
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY] [--poisson-shift-real F] [--poisson-shift-imag F] [--poisson-convection CX,CY]
-Defaults: --dist-policy is off for correctness and robustness, auto for scalability."
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--include-overlap-pcs] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY] [--poisson-shift-real F] [--poisson-shift-imag F] [--poisson-convection CX,CY]
+Defaults: --dist-policy is off for correctness and robustness, auto for scalability.
+--include-overlap-pcs is active only for MPI correctness sweeps; it keeps block-jacobi-ilu0-overlap0 and appends asm-ilu0-overlap1, ras-ilu0-overlap1, ras-iluk1-overlap1 so GlobalOK/XOK verdicts are visible before performance comparisons."
                             );
                         }
                         std::process::exit(0);
@@ -948,6 +965,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                     }
                     "--include-ilut-real-projection-fallback" => {
                         cfg.include_ilut_real_projection_fallback = true;
+                    }
+                    "--include-overlap-pcs" => {
+                        cfg.include_overlap_pcs = true;
                     }
                     "--ilu-reordering" | "--pc-ilu-reordering-type" => {
                         let Some(v) = args.next() else {
@@ -1278,6 +1298,29 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         parse_csv(flag, value, parse_pc)
     }
 
+    const MPI_CORRECTNESS_OVERLAP_PCS: [PcKind; 3] = [
+        PcKind::AsmIlu0Overlap { overlap: 1 },
+        PcKind::RasIlu0Overlap { overlap: 1 },
+        PcKind::RasIlukOverlap { k: 1, overlap: 1 },
+    ];
+
+    fn should_include_overlap_pcs(cfg: &BenchmarkConfig, comm_size: usize) -> bool {
+        cfg.include_overlap_pcs && cfg.run_mode == RunMode::Correctness && comm_size > 1
+    }
+
+    fn push_pc_unique(pcs: &mut Vec<PcKind>, pc: PcKind) {
+        if !pcs.contains(&pc) {
+            pcs.push(pc);
+        }
+    }
+
+    fn append_mpi_correctness_overlap_pcs(pcs: &mut Vec<PcKind>) {
+        push_pc_unique(pcs, PcKind::MpiBlockJacobiIlu0Local);
+        for pc in MPI_CORRECTNESS_OVERLAP_PCS {
+            push_pc_unique(pcs, pc);
+        }
+    }
+
     fn parse_csv<T, F>(flag: &str, value: &str, mut parser: F) -> Result<Vec<T>, KError>
     where
         F: FnMut(&str) -> Result<T, KError>,
@@ -1343,6 +1386,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             };
             if cfg.pcs.is_empty() && cfg.include_ilut_real_projection_fallback {
                 pcs.push(PcKind::IlutLocal);
+            }
+            if should_include_overlap_pcs(cfg, problem.comm.size()) {
+                append_mpi_correctness_overlap_pcs(&mut pcs);
             }
             let mut runs = Vec::new();
             for &restart in &cfg.restarts {
@@ -4658,6 +4704,56 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 KError::InvalidInput(msg) => assert!(msg.contains("--fgmres-haptol")),
                 other => panic!("unexpected error variant: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn benchmark_config_accepts_include_overlap_pcs_flag() {
+        let cfg = BenchmarkConfig::from_args(vec!["--include-overlap-pcs".to_string()])
+            .expect("parse args");
+        assert!(cfg.include_overlap_pcs);
+    }
+
+    #[test]
+    fn include_overlap_pcs_is_limited_to_mpi_correctness_mode() {
+        let correctness_cfg = BenchmarkConfig {
+            include_overlap_pcs: true,
+            run_mode: RunMode::Correctness,
+            ..BenchmarkConfig::default()
+        };
+        assert!(should_include_overlap_pcs(&correctness_cfg, 4));
+        assert!(!should_include_overlap_pcs(&correctness_cfg, 1));
+
+        let scalability_cfg = BenchmarkConfig {
+            include_overlap_pcs: true,
+            run_mode: RunMode::Scalability,
+            ..BenchmarkConfig::default()
+        };
+        assert!(!should_include_overlap_pcs(&scalability_cfg, 4));
+    }
+
+    #[test]
+    fn include_overlap_pcs_appends_verdict_gated_mpi_rows_after_block_jacobi_baseline() {
+        let mut pcs = vec![PcKind::ReplicatedFullIlu0, PcKind::None, PcKind::JacobiWeak];
+        append_mpi_correctness_overlap_pcs(&mut pcs);
+        assert_eq!(
+            pcs,
+            vec![
+                PcKind::ReplicatedFullIlu0,
+                PcKind::None,
+                PcKind::JacobiWeak,
+                PcKind::MpiBlockJacobiIlu0Local,
+                PcKind::AsmIlu0Overlap { overlap: 1 },
+                PcKind::RasIlu0Overlap { overlap: 1 },
+                PcKind::RasIlukOverlap { k: 1, overlap: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn overlap_pcs_dispatch_through_overlap_ilu_branch() {
+        for pc in MPI_CORRECTNESS_OVERLAP_PCS {
+            assert_eq!(pc.dispatch_branch(), PcDispatchBranch::OverlapIlu);
         }
     }
 
