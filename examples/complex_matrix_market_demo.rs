@@ -1,4 +1,4 @@
-//! Complex Matrix Market benchmark/demo for FGMRES on generated and file-backed
+//! Complex Matrix Market benchmark/demo for GMRES/FGMRES on generated and file-backed
 //! complex systems. Run it with MPI enabled when comparing replicated correctness
 //! checks against distributed scalability behavior.
 //!
@@ -57,6 +57,7 @@ mod complex_demo {
     use kryst::solver::fgmres::{
         FgmresSolver, FgmresStagnationPolicy, FgmresVariant, OrthogMethod, ResidualCheckPolicy,
     };
+    use kryst::solver::gmres::{GmresOrthog, GmresSolver, GmresVariant as PlainGmresVariant};
     use kryst::solver::{LinearSolver, MonitorAction, MonitorCallback};
     use kryst::utils::convergence::ConvergedReason;
     use kryst::utils::matrix_market::read_matrix_market;
@@ -84,7 +85,7 @@ mod complex_demo {
         let is_parallel = false;
 
         if rank == 0 {
-            println!("Complex Matrix Market demo (FGMRES)");
+            println!("Complex Matrix Market demo (GMRES/FGMRES)");
             println!("Run mode: {}", config.run_mode.label());
             println!(
                 "Parallel backend: {}",
@@ -121,7 +122,8 @@ mod complex_demo {
                 },
                 config.min_inner_before_fallback
             );
-            println!("FGMRES haptol: {:.3e}", config.fgmres_haptol);
+            println!("KSP default: {}", config.ksp.label());
+            println!("GMRES/FGMRES haptol: {:.3e}", config.fgmres_haptol);
             println!(
                 "Complex ILU reordering: kind={:?}, symmetric={}",
                 config.ilu_reordering.kind, config.ilu_reordering.symmetric
@@ -625,6 +627,7 @@ mod complex_demo {
 
     struct RunSpec {
         restart: usize,
+        ksp: KspKind,
         variant: FgmresVariant,
         residual_check_policy: ResidualCheckPolicy,
         orthog: OrthogMethod,
@@ -702,6 +705,7 @@ mod complex_demo {
         atol: f64,
         maxits: usize,
         restarts: Vec<usize>,
+        ksp: KspKind,
         pcs: Vec<PcKind>,
         include_restart_200: bool,
         include_ilut_real_projection_fallback: bool,
@@ -789,6 +793,39 @@ mod complex_demo {
         }
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum KspKind {
+        Gmres,
+        Fgmres,
+    }
+
+    impl KspKind {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Gmres => "GMRES",
+                Self::Fgmres => "FGMRES",
+            }
+        }
+
+        fn parse(token: &str) -> Result<Self, KError> {
+            match token.trim().to_ascii_lowercase().as_str() {
+                "gmres" => Ok(Self::Gmres),
+                "fgmres" => Ok(Self::Fgmres),
+                other => Err(KError::InvalidInput(format!(
+                    "invalid KSP '{other}', expected gmres|fgmres"
+                ))),
+            }
+        }
+
+        fn for_pc(self, pc: PcKind) -> Self {
+            if pc.requires_flexible_right_preconditioning() {
+                Self::Fgmres
+            } else {
+                self
+            }
+        }
+    }
+
     impl Default for BenchmarkConfig {
         fn default() -> Self {
             Self {
@@ -799,6 +836,7 @@ mod complex_demo {
                 atol: 1e-12,
                 maxits: 500,
                 restarts: vec![50, 100, 150],
+                ksp: KspKind::Gmres,
                 pcs: Vec::new(),
                 include_restart_200: false,
                 include_ilut_real_projection_fallback: false,
@@ -859,14 +897,14 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--include-overlap-pcs] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY] [--poisson-shift-real F] [--poisson-shift-imag F] [--poisson-convection CX,CY]
-Defaults: --dist-policy is off for correctness and robustness, auto for scalability.
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--ksp gmres|fgmres] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--include-overlap-pcs] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY] [--poisson-shift-real F] [--poisson-shift-imag F] [--poisson-convection CX,CY]
+Defaults: --ksp gmres for fixed linear PCs; flexible/nonlinear PC modes select FGMRES. --dist-policy is off for correctness and robustness, auto for scalability.
 --include-overlap-pcs is active only for MPI correctness sweeps; it keeps block-jacobi-ilu0-overlap0 and appends asm-ilu0-overlap1, ras-ilu0-overlap1, ras-iluk1-overlap1 so GlobalOK/XOK verdicts are visible before performance comparisons."
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--include-overlap-pcs] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY] [--poisson-shift-real F] [--poisson-shift-imag F] [--poisson-convection CX,CY]
-Defaults: --dist-policy is off for correctness and robustness, auto for scalability.
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--ksp gmres|fgmres] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--include-overlap-pcs] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY] [--poisson-shift-real F] [--poisson-shift-imag F] [--poisson-convection CX,CY]
+Defaults: --ksp gmres for fixed linear PCs; flexible/nonlinear PC modes select FGMRES. --dist-policy is off for correctness and robustness, auto for scalability.
 --include-overlap-pcs is active only for MPI correctness sweeps; it keeps block-jacobi-ilu0-overlap0 and appends asm-ilu0-overlap1, ras-ilu0-overlap1, ras-iluk1-overlap1 so GlobalOK/XOK verdicts are visible before performance comparisons."
                             );
                         }
@@ -877,6 +915,12 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                             return Err(KError::InvalidInput("missing value for --mode".into()));
                         };
                         cfg.run_mode = RunMode::parse(&v)?;
+                    }
+                    "--ksp" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput("missing value for --ksp".into()));
+                        };
+                        cfg.ksp = KspKind::parse(&v)?;
                     }
                     "--dist-policy" => {
                         let Some(v) = args.next() else {
@@ -1402,6 +1446,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                                 }
                                 runs.push(Self {
                                     restart,
+                                    ksp: cfg.ksp.for_pc(pc),
                                     variant,
                                     residual_check_policy: match cfg.run_mode {
                                         RunMode::Correctness => ResidualCheckPolicy::OnConvergence,
@@ -1433,7 +1478,8 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 )
             };
             format!(
-                "FGMRES+{} [m={}, v={}, reschk={}, orth={}, reorth={}, pc=requested {}, effective {}]",
+                "{}+{} [m={}, v={}, reschk={}, orth={}, reorth={}, pc=requested {}, effective {}]",
+                self.ksp.label(),
                 self.pc.label(),
                 self.restart,
                 variant_label(self.variant),
@@ -1447,7 +1493,8 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
 
         fn requested_policy_label(&self) -> String {
             format!(
-                "variant={}, restart={}, residual-check={}",
+                "ksp={}, variant={}, restart={}, residual-check={}",
+                self.ksp.label(),
                 variant_label(self.variant),
                 self.restart,
                 residual_check_policy_label(self.residual_check_policy)
@@ -1600,12 +1647,26 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         fn is_ilut(self) -> bool {
             matches!(self, Self::IlutLocal)
         }
+
+        fn requires_flexible_right_preconditioning(self) -> bool {
+            // Current demo PCs are fixed linear operators. Future variable/nonlinear
+            // modes should return true here so run construction preserves FGMRES.
+            false
+        }
     }
 
     fn variant_label(variant: FgmresVariant) -> &'static str {
         match variant {
             FgmresVariant::Classical => "classical",
             FgmresVariant::Pipelined => "pipelined",
+        }
+    }
+
+    fn plain_gmres_variant_label(variant: PlainGmresVariant) -> &'static str {
+        match variant {
+            PlainGmresVariant::Classical => "classical",
+            PlainGmresVariant::Pipelined => "pipelined",
+            PlainGmresVariant::SStep { .. } => "s-step",
         }
     }
 
@@ -1632,18 +1693,31 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
     ) -> String {
         match cfg.dist_policy {
             DistPolicyMode::Off => format!("DistCSR policy: {}", cfg.dist_policy.label()),
-            DistPolicyMode::Auto => {
-                let mut solver = sample_spec
-                    .map(|spec| configured_solver(spec, cfg))
-                    .unwrap_or_else(|| FgmresSolver::new(cfg.rtol, cfg.maxits, 1));
-                apply_dist_plan_policy(&mut solver, problem);
-                format!(
-                    "DistCSR policy: auto, selected restart={}, variant={}, reason={}",
-                    solver.restart,
-                    variant_label(solver.variant),
-                    dist_policy_reason(&problem.dist_plan_diagnostics, problem.comm.size())
-                )
-            }
+            DistPolicyMode::Auto => match sample_spec.map(|spec| spec.ksp).unwrap_or(cfg.ksp) {
+                KspKind::Gmres => {
+                    let solver = sample_spec
+                        .map(|spec| configured_gmres_solver(spec, cfg))
+                        .unwrap_or_else(|| GmresSolver::new(1, cfg.rtol, cfg.maxits));
+                    format!(
+                        "DistCSR policy: auto, KSP=GMRES, selected restart={}, variant={}, reason={}",
+                        solver.restart,
+                        plain_gmres_variant_label(solver.variant),
+                        dist_policy_reason(&problem.dist_plan_diagnostics, problem.comm.size())
+                    )
+                }
+                KspKind::Fgmres => {
+                    let mut solver = sample_spec
+                        .map(|spec| configured_fgmres_solver(spec, cfg))
+                        .unwrap_or_else(|| FgmresSolver::new(cfg.rtol, cfg.maxits, 1));
+                    apply_fgmres_dist_plan_policy(&mut solver, problem);
+                    format!(
+                        "DistCSR policy: auto, KSP=FGMRES, selected restart={}, variant={}, reason={}",
+                        solver.restart,
+                        variant_label(solver.variant),
+                        dist_policy_reason(&problem.dist_plan_diagnostics, problem.comm.size())
+                    )
+                }
+            },
         }
     }
 
@@ -2426,19 +2500,16 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         let setup_secs = setup_start.elapsed().as_secs_f64();
         for _ in 0..bench_cfg.warmup_runs {
             let mut x = vec![S::zero(); problem.local_n];
-            let mut solver = configured_solver(spec, bench_cfg);
-            if bench_cfg.dist_policy == DistPolicyMode::Auto {
-                apply_dist_plan_policy(&mut solver, problem);
-            }
             let mut workspace = Workspace::new(problem.local_n);
-            solver.setup_workspace(&mut workspace);
-            let _ = solver.solve_k(
+            let _ = solve_with_selected_ksp(
+                spec,
+                bench_cfg,
+                problem,
                 op_scaled.as_ref(),
                 pc.as_mut().map(PcHandle::as_kpc_mut),
                 b,
                 &mut x,
                 effective_pc_side,
-                &problem.comm,
                 None,
                 Some(&mut workspace),
             )?;
@@ -2452,12 +2523,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             let mut x = vec![S::zero(); problem.local_n];
             problem.comm.barrier();
             let start = Instant::now();
-            let mut solver = configured_solver(spec, bench_cfg);
-            if bench_cfg.dist_policy == DistPolicyMode::Auto {
-                apply_dist_plan_policy(&mut solver, problem);
-            }
             let mut workspace = Workspace::new(problem.local_n);
-            solver.setup_workspace(&mut workspace);
             let mut run_history = RunResidualHistory::default();
             let mut monitors: Vec<Box<MonitorCallback<R>>> = Vec::new();
             if bench_cfg.residual_history {
@@ -2477,13 +2543,15 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                     MonitorAction::Continue
                 }));
             }
-            let stats = solver.solve_k(
+            let stats = solve_with_selected_ksp(
+                spec,
+                bench_cfg,
+                problem,
                 op_scaled.as_ref(),
                 pc.as_mut().map(PcHandle::as_kpc_mut),
                 b,
                 &mut x,
                 effective_pc_side,
-                &problem.comm,
                 if monitors.is_empty() {
                     None
                 } else {
@@ -2635,7 +2703,8 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             ),
             requested_policy: spec.requested_policy_label(),
             effective_policy: format!(
-                "variant={}, restart={}, residual-check={}",
+                "ksp={}, variant={}, restart={}, residual-check={}",
+                spec.ksp.label(),
                 stats
                     .effective_variant
                     .as_deref()
@@ -2875,7 +2944,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         println!("{}", format_csr_for_pc_diagnostics(method_label, diag));
     }
 
-    fn configured_solver(spec: &RunSpec, bench_cfg: &BenchmarkConfig) -> FgmresSolver {
+    fn configured_fgmres_solver(spec: &RunSpec, bench_cfg: &BenchmarkConfig) -> FgmresSolver {
         let mut solver = FgmresSolver::new(bench_cfg.rtol, bench_cfg.maxits, spec.restart);
         solver.variant = spec.variant;
         solver.residual_check_policy = spec.residual_check_policy;
@@ -2897,8 +2966,70 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         solver
     }
 
-    fn apply_dist_plan_policy(solver: &mut FgmresSolver, problem: &Problem) {
+    fn apply_fgmres_dist_plan_policy(solver: &mut FgmresSolver, problem: &Problem) {
         solver.apply_distcsr_policy(&problem.dist_plan_diagnostics, problem.comm.size());
+    }
+
+    fn gmres_variant_from_fgmres(variant: FgmresVariant) -> PlainGmresVariant {
+        match variant {
+            FgmresVariant::Classical => PlainGmresVariant::Classical,
+            FgmresVariant::Pipelined => PlainGmresVariant::Pipelined,
+        }
+    }
+
+    fn gmres_orthog_from_fgmres(orthog: OrthogMethod) -> GmresOrthog {
+        match orthog {
+            OrthogMethod::ClassicalGS => GmresOrthog::Cgs,
+            OrthogMethod::ModifiedGS => GmresOrthog::Mgs,
+        }
+    }
+
+    fn configured_gmres_solver(spec: &RunSpec, bench_cfg: &BenchmarkConfig) -> GmresSolver {
+        let mut solver = GmresSolver::new(spec.restart, bench_cfg.rtol, bench_cfg.maxits);
+        solver.variant = gmres_variant_from_fgmres(spec.variant);
+        solver.orthog = gmres_orthog_from_fgmres(spec.orthog);
+        solver.reorth = spec.reorth;
+        solver.conv.atol = bench_cfg.atol;
+        solver.conv.dtol = 1e6;
+        solver.haptol = bench_cfg.fgmres_haptol;
+        solver
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_with_selected_ksp(
+        spec: &RunSpec,
+        bench_cfg: &BenchmarkConfig,
+        problem: &Problem,
+        op: &(dyn KLinOp<Scalar = S> + '_),
+        mut pc: Option<&mut dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
+        mut work: Option<&mut Workspace>,
+    ) -> Result<kryst::utils::convergence::SolveStats<R>, KError> {
+        match spec.ksp {
+            KspKind::Gmres => {
+                let mut solver = configured_gmres_solver(spec, bench_cfg);
+                if let Some(w) = work.as_deref_mut() {
+                    solver.setup_workspace(w);
+                }
+                let pc_ref = pc
+                    .as_deref_mut()
+                    .map(|p| p as &dyn KPreconditioner<Scalar = S>);
+                solver.solve(op, pc_ref, b, x, pc_side, &problem.comm, monitors, work)
+            }
+            KspKind::Fgmres => {
+                let mut solver = configured_fgmres_solver(spec, bench_cfg);
+                if bench_cfg.dist_policy == DistPolicyMode::Auto {
+                    apply_fgmres_dist_plan_policy(&mut solver, problem);
+                }
+                if let Some(w) = work.as_deref_mut() {
+                    solver.setup_workspace(w);
+                }
+                solver.solve_k(op, pc, b, x, pc_side, &problem.comm, monitors, work)
+            }
+        }
     }
 
     fn dump_residual_history(path: &Path, history: &RunResidualHistory) -> Result<(), KError> {
@@ -3830,6 +3961,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
 
         let spec = RunSpec {
             restart: 5,
+            ksp: KspKind::Gmres,
             variant: FgmresVariant::Classical,
             residual_check_policy: ResidualCheckPolicy::OnConvergence,
             orthog: OrthogMethod::ClassicalGS,
@@ -3965,6 +4097,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         };
         let spec = RunSpec {
             restart: 5,
+            ksp: KspKind::Gmres,
             variant: FgmresVariant::Classical,
             residual_check_policy: ResidualCheckPolicy::OnConvergence,
             orthog: OrthogMethod::ClassicalGS,
@@ -4028,6 +4161,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         };
         let spec = RunSpec {
             restart: 10,
+            ksp: KspKind::Gmres,
             variant: FgmresVariant::Classical,
             residual_check_policy: ResidualCheckPolicy::OnConvergence,
             orthog: OrthogMethod::ClassicalGS,
@@ -4093,6 +4227,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         };
         let spec = RunSpec {
             restart: 5,
+            ksp: KspKind::Fgmres,
             variant: FgmresVariant::Classical,
             residual_check_policy: ResidualCheckPolicy::OnConvergence,
             orthog: OrthogMethod::ClassicalGS,
@@ -4103,6 +4238,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         let bench_cfg = BenchmarkConfig {
             warmup_runs: 0,
             measured_runs: 1,
+            ksp: KspKind::Fgmres,
             dist_policy: DistPolicyMode::Auto,
             ..BenchmarkConfig::default()
         };
@@ -4178,6 +4314,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         };
         let spec = RunSpec {
             restart: 5,
+            ksp: KspKind::Gmres,
             variant: FgmresVariant::Classical,
             residual_check_policy: ResidualCheckPolicy::OnConvergence,
             orthog: OrthogMethod::ClassicalGS,
@@ -4244,6 +4381,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         };
         let spec = RunSpec {
             restart: 5,
+            ksp: KspKind::Gmres,
             variant: FgmresVariant::Classical,
             residual_check_policy: ResidualCheckPolicy::OnConvergence,
             orthog: OrthogMethod::ClassicalGS,
@@ -4557,6 +4695,46 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
     }
 
     #[test]
+    fn method_label_distinguishes_gmres_and_fgmres() {
+        let base = RunSpec {
+            restart: 50,
+            ksp: KspKind::Gmres,
+            variant: FgmresVariant::Classical,
+            residual_check_policy: ResidualCheckPolicy::OnConvergence,
+            orthog: OrthogMethod::ClassicalGS,
+            reorth: ReorthPolicy::IfNeeded,
+            pc_side: PcSide::Right,
+            pc: PcKind::JacobiWeak,
+        };
+        assert!(base.method_label().starts_with("GMRES+"));
+
+        let flexible = RunSpec {
+            ksp: KspKind::Fgmres,
+            ..base
+        };
+        assert!(flexible.method_label().starts_with("FGMRES+"));
+    }
+
+    #[test]
+    fn fixed_pc_default_run_specs_select_gmres() {
+        #[cfg(feature = "mpi")]
+        let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+        #[cfg(not(feature = "mpi"))]
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let problem = build_shifted_poisson_case(&comm, 4, 4, 1.0, 0.25, 0.0, 0.0)
+            .expect("build generated shifted Poisson problem");
+        let cfg = BenchmarkConfig {
+            restarts: vec![8],
+            pcs: vec![PcKind::None, PcKind::JacobiWeak, PcKind::Ilu0Local],
+            ..BenchmarkConfig::default()
+        };
+        let runs = RunSpec::build_default_matrix(&cfg, &problem);
+        assert_eq!(runs.len(), 3);
+        assert!(runs.iter().all(|spec| spec.ksp == KspKind::Gmres));
+    }
+
+    #[test]
     fn ilut_complex_label_explicitly_marks_real_projection_fallback_path() {
         let label = PcKind::IlutLocal.label();
         assert!(label.contains(ILUT_REAL_PROJECTION_FALLBACK_LABEL));
@@ -4568,6 +4746,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
     fn ilut_method_row_and_export_labels_are_self_contained() {
         let spec = RunSpec {
             restart: 50,
+            ksp: KspKind::Gmres,
             variant: FgmresVariant::Classical,
             residual_check_policy: ResidualCheckPolicy::OnConvergence,
             orthog: OrthogMethod::ClassicalGS,
@@ -4591,6 +4770,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
     fn correctness_mode_disables_stagnation_fallback_and_keeps_restart_target() {
         let spec = RunSpec {
             restart: 50,
+            ksp: KspKind::Gmres,
             variant: FgmresVariant::Classical,
             residual_check_policy: ResidualCheckPolicy::OnConvergence,
             orthog: OrthogMethod::ClassicalGS,
@@ -4604,7 +4784,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             min_inner_before_fallback: 12,
             ..BenchmarkConfig::default()
         };
-        let solver = configured_solver(&spec, &cfg);
+        let solver = configured_fgmres_solver(&spec, &cfg);
         assert_eq!(solver.restart, 50);
         assert_eq!(solver.stagnation_policy, FgmresStagnationPolicy::Disabled);
         assert_eq!(solver.min_inner_before_fallback, 12);
@@ -4624,6 +4804,28 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             BenchmarkConfig::from_args(vec!["--mode".to_string(), "robustness".to_string()])
                 .expect("parse robustness mode");
         assert_eq!(robustness_cfg.dist_policy, DistPolicyMode::Off);
+    }
+
+    #[test]
+    fn benchmark_config_parses_ksp_selection() {
+        let gmres_cfg = BenchmarkConfig::from_args(vec!["--ksp".to_string(), "gmres".to_string()])
+            .expect("parse --ksp gmres");
+        assert_eq!(gmres_cfg.ksp, KspKind::Gmres);
+
+        let fgmres_cfg =
+            BenchmarkConfig::from_args(vec!["--ksp".to_string(), "fgmres".to_string()])
+                .expect("parse --ksp fgmres");
+        assert_eq!(fgmres_cfg.ksp, KspKind::Fgmres);
+    }
+
+    #[test]
+    fn benchmark_config_rejects_invalid_ksp_selection() {
+        let err = BenchmarkConfig::from_args(vec!["--ksp".to_string(), "bicgstab".to_string()])
+            .expect_err("invalid --ksp should be rejected");
+        match err {
+            KError::InvalidInput(msg) => assert!(msg.contains("--ksp") || msg.contains("KSP")),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     #[test]
