@@ -3375,6 +3375,93 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
     }
 
     #[test]
+    fn shifted_poisson_dist_spmv_matches_global_spmv_for_ones_and_random_x() {
+        #[cfg(feature = "mpi")]
+        let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+        #[cfg(not(feature = "mpi"))]
+        let comm = UniverseComm::NoComm(NoComm);
+
+        let nx = 8usize;
+        let ny = 7usize;
+        let alpha = 1.0;
+        let beta = 0.25;
+        let global_csr = build_shifted_poisson_csr(nx, ny, alpha, beta);
+        let global_n = global_csr.nrows();
+        if global_n < comm.size() {
+            eprintln!(
+                "skipping shifted Poisson distributed SpMV check: {global_n} rows for {} ranks",
+                comm.size()
+            );
+            return;
+        }
+
+        let row_part = DistCsrOp::partition_rows_balanced(global_n, &comm);
+        let global_row_start = row_part[comm.rank()];
+        let global_row_end = row_part[comm.rank() + 1];
+        let local_n = global_row_end - global_row_start;
+        let local_csr = slice_csr_rows(&global_csr, global_row_start, global_row_end);
+        let op = DistCsrOp::from_local_rows(
+            global_n,
+            global_row_start,
+            &local_csr,
+            &row_part,
+            comm.clone(),
+        )
+        .expect("build distributed shifted Poisson CSR operator");
+
+        let ones = vec![S::one(); global_n];
+        let ramp = (0..global_n)
+            .map(|i| S::from_parts(0.125 * (i as f64 + 1.0), -0.0625 * (i as f64 + 3.0)))
+            .collect::<Vec<_>>();
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let random = (0..global_n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let re = ((state >> 33) as f64) / ((1_u64 << 31) as f64) - 0.5;
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let im = ((state >> 33) as f64) / ((1_u64 << 31) as f64) - 0.5;
+                S::from_parts(re, im)
+            })
+            .collect::<Vec<_>>();
+
+        let cases = [
+            ("ones", ones),
+            ("complex ramp", ramp),
+            ("pseudo-random", random),
+        ];
+        let mut scratch = BridgeScratch::default();
+        for (label, x_global) in cases {
+            let x_local = x_global[global_row_start..global_row_end].to_vec();
+            let mut y_dist = vec![S::zero(); local_n];
+            op.matvec_s(&x_local, &mut y_dist, &mut scratch);
+
+            let mut y_global = vec![S::zero(); global_n];
+            global_csr.spmv(&x_global, &mut y_global);
+            let expected = &y_global[global_row_start..global_row_end];
+
+            assert_eq!(
+                y_dist.len(),
+                expected.len(),
+                "{label} local result length mismatch on rank {}",
+                comm.rank()
+            );
+            for (local_row, (&actual, &want)) in y_dist.iter().zip(expected).enumerate() {
+                let diff = (actual - want).abs();
+                assert!(
+                    diff <= 1.0e-12,
+                    "{label} SpMV mismatch on rank {}, local row {local_row} (global row {}): actual={actual:?}, expected={want:?}, diff={diff:e}",
+                    comm.rank(),
+                    global_row_start + local_row
+                );
+            }
+        }
+    }
+
+    #[test]
     fn shifted_poisson_problem_rhs_matches_a_times_ones() {
         #[cfg(feature = "mpi")]
         let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
