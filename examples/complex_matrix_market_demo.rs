@@ -168,18 +168,47 @@ mod complex_demo {
 
         if matches!(config.run_mode, RunMode::Correctness | RunMode::Scalability) {
             let (nx, ny) = config.poisson_grid;
-            match build_shifted_poisson_case(&comm, nx, ny, 1.0, 0.25) {
-                Ok(problem) => execute_problem(
-                    "generated shifted Poisson (-Δ + (1.0 + 0.25i)I)",
+            let generated_cases = [
+                (
+                    config.poisson_shift_real,
+                    config.poisson_shift_imag,
+                    "easy",
                     "generated complex shifted Poisson case",
-                    problem,
-                    &config,
-                    rank,
                 ),
-                Err(err) if rank == 0 => {
-                    println!("❌ Failed to build generated shifted Poisson case: {err}\n");
+                (
+                    0.01,
+                    0.25,
+                    "hard",
+                    "generated complex shifted Poisson hard-shift case",
+                ),
+            ];
+            for (alpha, beta, difficulty, classification) in generated_cases {
+                match build_shifted_poisson_case(
+                    &comm,
+                    nx,
+                    ny,
+                    alpha,
+                    beta,
+                    config.poisson_convection_x,
+                    config.poisson_convection_y,
+                ) {
+                    Ok(problem) => execute_problem(
+                        &format!(
+                            "generated shifted Poisson {difficulty} (-Δ + ({alpha:.3} + {beta:.3}i)I, convection=({:.3},{:.3}))",
+                            config.poisson_convection_x, config.poisson_convection_y
+                        ),
+                        classification,
+                        problem,
+                        &config,
+                        rank,
+                    ),
+                    Err(err) if rank == 0 => {
+                        println!(
+                            "❌ Failed to build generated shifted Poisson {difficulty} case: {err}\n"
+                        );
+                    }
+                    Err(_) => {}
                 }
-                Err(_) => {}
             }
         }
 
@@ -678,6 +707,10 @@ mod complex_demo {
         row_scale_tiny: f64,
         ilu_reordering: ReorderingOptions,
         poisson_grid: (usize, usize),
+        poisson_shift_real: f64,
+        poisson_shift_imag: f64,
+        poisson_convection_x: f64,
+        poisson_convection_y: f64,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -770,6 +803,10 @@ mod complex_demo {
                 row_scale_tiny: 1e-15,
                 ilu_reordering: ReorderingOptions::default(),
                 poisson_grid: (16, 16),
+                poisson_shift_real: 1.0,
+                poisson_shift_imag: 0.25,
+                poisson_convection_x: 0.0,
+                poisson_convection_y: 0.0,
             }
         }
     }
@@ -807,12 +844,12 @@ mod complex_demo {
                     "--help" | "-h" => {
                         if cfg!(feature = "mpi") {
                             println!(
-                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY]
+                                "Usage: cargo mpirun -n <ranks> --example complex_matrix_market_demo --features complex,mpi,mpi_examples -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY] [--poisson-shift-real F] [--poisson-shift-imag F] [--poisson-convection CX,CY]
 Defaults: --dist-policy is off for correctness and robustness, auto for scalability."
                             );
                         } else {
                             println!(
-                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY]
+                                "Usage: cargo run --example complex_matrix_market_demo --features complex -- [--mode correctness|scalability|robustness] [--dist-policy off|auto] [--mark-replicated-check] [--warmup-runs N] [--measured-runs N] [--rtol F] [--atol F] [--maxits N] [--restarts csv] [--pcs csv] [--include-restart-200] [--include-ilut-real-projection-fallback] [--allow-stagnation-fallback] [--min-inner-before-fallback N] [--fgmres-variant csv] [--fgmres-orthog csv] [--fgmres-reorth csv] [--fgmres-haptol F] [--residual-history] [--residual-history-file <path>] [--residual-history-force] [--row-scale [tiny]] [--ilu-reordering none|rcm|amd[:nonsym]] [--poisson-grid NXxNY] [--poisson-shift-real F] [--poisson-shift-imag F] [--poisson-convection CX,CY]
 Defaults: --dist-policy is off for correctness and robustness, auto for scalability."
                             );
                         }
@@ -840,6 +877,31 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                             ));
                         };
                         cfg.poisson_grid = parse_grid_dims("--poisson-grid", &v)?;
+                    }
+                    "--poisson-shift-real" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --poisson-shift-real".into(),
+                            ));
+                        };
+                        cfg.poisson_shift_real = parse_finite_f64("--poisson-shift-real", &v)?;
+                    }
+                    "--poisson-shift-imag" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --poisson-shift-imag".into(),
+                            ));
+                        };
+                        cfg.poisson_shift_imag = parse_finite_f64("--poisson-shift-imag", &v)?;
+                    }
+                    "--poisson-convection" => {
+                        let Some(v) = args.next() else {
+                            return Err(KError::InvalidInput(
+                                "missing value for --poisson-convection".into(),
+                            ));
+                        };
+                        (cfg.poisson_convection_x, cfg.poisson_convection_y) =
+                            parse_f64_pair("--poisson-convection", &v)?;
                     }
                     "--mark-replicated-check" => {
                         cfg.mark_replicated_check = true;
@@ -1042,6 +1104,31 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             )));
         }
         Ok(val)
+    }
+
+    fn parse_finite_f64(flag: &str, value: &str) -> Result<f64, KError> {
+        let val = value.parse::<f64>().map_err(|_| {
+            KError::InvalidInput(format!(
+                "invalid value '{value}' for {flag}, expected finite float"
+            ))
+        })?;
+        if !val.is_finite() {
+            return Err(KError::InvalidInput(format!(
+                "invalid value '{value}' for {flag}, expected finite float"
+            )));
+        }
+        Ok(val)
+    }
+
+    fn parse_f64_pair(flag: &str, value: &str) -> Result<(f64, f64), KError> {
+        let Some((x, y)) = value.split_once(',') else {
+            return Err(KError::InvalidInput(format!(
+                "invalid value '{value}' for {flag}, expected X,Y"
+            )));
+        };
+        let x = parse_finite_f64(flag, x.trim())?;
+        let y = parse_finite_f64(flag, y.trim())?;
+        Ok((x, y))
     }
 
     fn parse_positive_finite_f64(flag: &str, value: &str) -> Result<f64, KError> {
@@ -3099,6 +3186,8 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         ny: usize,
         alpha: f64,
         beta: f64,
+        convection_x: f64,
+        convection_y: f64,
     ) -> Result<Problem, KError> {
         if nx == 0 || ny == 0 {
             return Err(KError::InvalidInput(
@@ -3115,7 +3204,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             )));
         }
 
-        let csr_sparse = build_shifted_poisson_csr(nx, ny, alpha, beta);
+        let csr_sparse = build_shifted_poisson_csr(nx, ny, alpha, beta, convection_x, convection_y);
         let solution_reference = solution_reference_diagnostics(&csr_sparse);
         let row_part = DistCsrOp::partition_rows_balanced(n, comm);
         let row_start = row_part[comm.rank()];
@@ -3151,7 +3240,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
             comm: comm.clone(),
             backend,
             backend_descr: format!(
-                "Generated shifted Poisson CSR ({}x{} grid, shift={alpha:.3}+{beta:.3}i)",
+                "Generated shifted Poisson CSR ({}x{} grid, shift={alpha:.3}+{beta:.3}i, convection=({convection_x:.3},{convection_y:.3}))",
                 nx, ny
             ),
             generated_case: true,
@@ -3163,6 +3252,8 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         ny: usize,
         alpha: f64,
         beta: f64,
+        convection_x: f64,
+        convection_y: f64,
     ) -> SparseCsrMatrix<S> {
         let n = nx * ny;
         let shift = S::from_parts(alpha, beta);
@@ -3176,17 +3267,17 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
                 let row = iy * nx + ix;
                 let mut entries = Vec::with_capacity(5);
                 if iy > 0 {
-                    entries.push((row - nx, S::from_real(-1.0)));
+                    entries.push((row - nx, S::from_real(-1.0 - 0.5 * convection_y)));
                 }
                 if ix > 0 {
-                    entries.push((row - 1, S::from_real(-1.0)));
+                    entries.push((row - 1, S::from_real(-1.0 - 0.5 * convection_x)));
                 }
                 entries.push((row, S::from_real(4.0) + shift));
                 if ix + 1 < nx {
-                    entries.push((row + 1, S::from_real(-1.0)));
+                    entries.push((row + 1, S::from_real(-1.0 + 0.5 * convection_x)));
                 }
                 if iy + 1 < ny {
-                    entries.push((row + nx, S::from_real(-1.0)));
+                    entries.push((row + nx, S::from_real(-1.0 + 0.5 * convection_y)));
                 }
                 entries.sort_by_key(|&(col, _)| col);
                 for (col, val) in entries {
@@ -3351,13 +3442,10 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         None
     }
 
-    #[test]
-    fn shifted_poisson_generated_matrix_dimensions_and_diagonal_are_valid() {
-        let matrix = build_shifted_poisson_csr(4, 3, 1.0, 0.25);
-        assert_eq!(matrix.nrows(), 12);
-        assert_eq!(matrix.ncols(), 12);
-        assert_eq!(matrix.row_ptr().len(), 13);
-        assert!(matrix.values().len() >= 12);
+    fn assert_shifted_poisson_valid_nonzero_diagonal(matrix: &SparseCsrMatrix<S>) {
+        assert_eq!(matrix.nrows(), matrix.ncols());
+        assert_eq!(matrix.row_ptr().len(), matrix.nrows() + 1);
+        assert!(matrix.values().len() >= matrix.nrows());
 
         for row in 0..matrix.nrows() {
             let start = matrix.row_ptr()[row];
@@ -3373,8 +3461,42 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
     }
 
     #[test]
+    fn shifted_poisson_generated_easy_and_hard_matrices_are_valid() {
+        for (alpha, beta) in [(1.0, 0.25), (0.01, 0.25)] {
+            let matrix = build_shifted_poisson_csr(4, 3, alpha, beta, 0.0, 0.0);
+            assert_eq!(matrix.nrows(), 12);
+            assert_eq!(matrix.ncols(), 12);
+            assert_shifted_poisson_valid_nonzero_diagonal(&matrix);
+        }
+    }
+
+    #[test]
+    fn shifted_poisson_zero_convection_preserves_existing_stencil() {
+        let matrix = build_shifted_poisson_csr(3, 3, 1.0, 0.25, 0.0, 0.0);
+        let row = 4;
+        let start = matrix.row_ptr()[row];
+        let end = matrix.row_ptr()[row + 1];
+        let entries = (start..end)
+            .map(|nz| (matrix.col_idx()[nz], matrix.values()[nz]))
+            .collect::<Vec<_>>();
+
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0].0, 1);
+        assert_eq!(entries[0].1.real(), -1.0);
+        assert_eq!(entries[1].0, 3);
+        assert_eq!(entries[1].1.real(), -1.0);
+        assert_eq!(entries[2].0, 4);
+        assert_eq!(entries[2].1.real(), 5.0);
+        assert_eq!(entries[2].1.imag(), 0.25);
+        assert_eq!(entries[3].0, 5);
+        assert_eq!(entries[3].1.real(), -1.0);
+        assert_eq!(entries[4].0, 7);
+        assert_eq!(entries[4].1.real(), -1.0);
+    }
+
+    #[test]
     fn shifted_poisson_partition_has_nonzero_local_rows_for_typical_rank_counts() {
-        let matrix = build_shifted_poisson_csr(4, 4, 1.0, 0.25);
+        let matrix = build_shifted_poisson_csr(4, 4, 1.0, 0.25, 0.0, 0.0);
         for size in [1usize, 2, 3, 4, 8] {
             let part = partition_rows_balanced_for_size(matrix.nrows(), size);
             for rank in 0..size {
@@ -3404,7 +3526,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         let ny = 7usize;
         let alpha = 1.0;
         let beta = 0.25;
-        let global_csr = build_shifted_poisson_csr(nx, ny, alpha, beta);
+        let global_csr = build_shifted_poisson_csr(nx, ny, alpha, beta, 0.0, 0.0);
         let global_n = global_csr.nrows();
         if global_n < comm.size() {
             eprintln!(
@@ -3491,9 +3613,9 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         let ny = 4usize;
         let alpha = 1.0;
         let beta = 0.25;
-        let problem = build_shifted_poisson_case(&comm, nx, ny, alpha, beta)
+        let problem = build_shifted_poisson_case(&comm, nx, ny, alpha, beta, 0.0, 0.0)
             .expect("build generated shifted Poisson problem");
-        let matrix = build_shifted_poisson_csr(nx, ny, alpha, beta);
+        let matrix = build_shifted_poisson_csr(nx, ny, alpha, beta, 0.0, 0.0);
         let ones = vec![S::one(); matrix.ncols()];
         let mut expected_global = vec![S::zero(); matrix.nrows()];
         matrix.spmv(&ones, &mut expected_global);
@@ -3514,7 +3636,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         #[cfg(not(feature = "mpi"))]
         let comm = UniverseComm::NoComm(NoComm);
 
-        let problem = build_shifted_poisson_case(&comm, 4, 4, 1.0, 0.25)
+        let problem = build_shifted_poisson_case(&comm, 4, 4, 1.0, 0.25, 0.0, 0.0)
             .expect("build generated shifted Poisson problem");
         let cfg = BenchmarkConfig {
             restarts: vec![20],
@@ -3647,7 +3769,7 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         #[cfg(not(feature = "mpi"))]
         let comm = UniverseComm::NoComm(NoComm);
 
-        let problem = build_shifted_poisson_case(&comm, 5, 5, 1.0, 0.25)
+        let problem = build_shifted_poisson_case(&comm, 5, 5, 1.0, 0.25, 0.0, 0.0)
             .expect("build generated shifted Poisson problem");
         assert_eq!(problem.global_n, 25);
         assert_eq!(
@@ -4468,6 +4590,37 @@ Defaults: --dist-policy is off for correctness and robustness, auto for scalabil
         ])
         .expect("parse explicit dist policy");
         assert_eq!(cfg.dist_policy, DistPolicyMode::Off);
+    }
+
+    #[test]
+    fn benchmark_config_parses_poisson_shift_and_convection_flags() {
+        let cfg = BenchmarkConfig::from_args(vec![
+            "--poisson-shift-real".to_string(),
+            "0.01".to_string(),
+            "--poisson-shift-imag".to_string(),
+            "-0.5".to_string(),
+            "--poisson-convection".to_string(),
+            "1.25,-2.5".to_string(),
+        ])
+        .expect("parse shifted Poisson overrides");
+
+        assert_eq!(cfg.poisson_shift_real, 0.01);
+        assert_eq!(cfg.poisson_shift_imag, -0.5);
+        assert_eq!(cfg.poisson_convection_x, 1.25);
+        assert_eq!(cfg.poisson_convection_y, -2.5);
+    }
+
+    #[test]
+    fn benchmark_config_rejects_invalid_poisson_convection_flag() {
+        let err = BenchmarkConfig::from_args(vec![
+            "--poisson-convection".to_string(),
+            "1.0;2.0".to_string(),
+        ])
+        .expect_err("invalid convection pair should be rejected");
+        match err {
+            KError::InvalidInput(msg) => assert!(msg.contains("--poisson-convection")),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 
     #[test]
