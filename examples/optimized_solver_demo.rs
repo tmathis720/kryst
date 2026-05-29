@@ -1,5 +1,5 @@
 //! Optimized solver demonstration using benchmark-proven configurations.
-//!
+//! cargo mpirun -n 3 --example optimized_solver_demo --features mpi,rayon,simd,logging,backend-faer
 //! This example analyzes matrices from the Matrix Market collection and applies
 //! the best solver/preconditioner combinations based on extensive benchmark results.
 //! The configurations are chosen to minimize solve time while maintaining accuracy.
