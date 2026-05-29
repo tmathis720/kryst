@@ -3,6 +3,7 @@
 use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
+use crate::parallel::Comm;
 use crate::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
 use nalgebra::{DMatrix, DVector, Dynamic};
 

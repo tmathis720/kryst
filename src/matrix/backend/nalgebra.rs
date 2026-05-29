@@ -7,6 +7,7 @@ use crate::error::KError;
 use crate::matrix::backend::SparseBackend;
 use crate::matrix::format::{BackendFormatSupport, OpFormat};
 use crate::matrix::op::LinOp;
+use crate::parallel::Comm;
 
 /// Marker type for the nalgebra backend.
 pub struct NalgebraBackend;
