@@ -6,7 +6,7 @@
 //! the `AsFormat` implementations cover the advertised formats.
 //! NOTE: Every conversion cache key includes the operator's [`StructureId`]
 //! and [`ValuesId`]. A value of `0` indicates "unknown" and disables precise
-//! invalidation, so wrappers like [`DenseOp`] / [`CsrOp`] are recommended when
+//! invalidation, so wrappers like [`DenseOp`](crate::matrix::op::DenseOp) / [`CsrOp`](crate::matrix::op::CsrOp) are recommended when
 //! you mutate matrices in-place and need cache stability.
 use std::any::Any;
 use std::collections::HashMap;
@@ -116,8 +116,8 @@ pub trait AsFormat<S: KrystScalar, B: SparseBackend<S>> {
     /// Identifier for structure-driven cache invalidation.
     ///
     /// Returning `StructureId(0)` means "unknown" and falls back to pointer identity
-    /// based caches. Wrap your matrices with [`DenseOp`] / [`CsrOp`] and call
-    /// [`mark_structure_changed`] when mutating the sparsity pattern if you need
+    /// based caches. Wrap your matrices with [`DenseOp`](crate::matrix::op::DenseOp) / [`CsrOp`](crate::matrix::op::CsrOp) and call
+    /// [`mark_structure_changed`](crate::matrix::op::DenseOp::mark_structure_changed) when mutating the sparsity pattern if you need
     /// accurate cache keys.
     fn structure_id_for_cache(&self) -> StructureId {
         StructureId(0)
@@ -125,7 +125,7 @@ pub trait AsFormat<S: KrystScalar, B: SparseBackend<S>> {
 
     /// Identifier for value-driven cache invalidation.
     ///
-    /// Value changes should bump the ID via [`mark_values_changed`] to keep
+    /// Value changes should bump the ID via [`mark_values_changed`](crate::matrix::op::DenseOp::mark_values_changed) to keep
     /// cached conversions valid. A `ValuesId(0)` disables precise invalidation
     /// (e.g., raw `faer::Mat` without `mat-values-fingerprint`).
     fn values_id_for_cache(&self) -> ValuesId {

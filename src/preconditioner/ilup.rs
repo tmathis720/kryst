@@ -4,15 +4,15 @@
 //! (Saad §10.3). It is useful when the operator does not expose a CSR format or when you want to
 //! keep the factorization lightweight for a local preconditioner.
 //!
-//! Compared to [`IluType::ILUK`] in `ilu.rs`:
-//! - [`Ilup`] uses simple dense working arrays plus sparse per-row storage.
-//! - [`Ilu`] uses the HYPRE-inspired configuration, richer logging, and pivot safeguards.
+//! Compared to [`IluType::ILUK`](crate::preconditioner::ilu::IluType::ILUK) in `ilu.rs`:
+//! - [`Ilup`](crate::preconditioner::ilup::Ilup) uses simple dense working arrays plus sparse per-row storage.
+//! - [`Ilu`](crate::preconditioner::ilu::Ilu) uses the HYPRE-inspired configuration, richer logging, and pivot safeguards.
 //! - `Ilup` is a common choice for block-Jacobi or domain-decomposition methods where each block
 //!   factorization must stay explicit and local.
 //!
 //! # Real vs complex
 //! Factorization is performed in real arithmetic (`S = f64`). When the `complex` feature is
-//! enabled, [`Ilup`] implements [`KPreconditioner`] via a [`BridgeScratch`] bridge:
+//! enabled, [`Ilup`](crate::preconditioner::ilup::Ilup) implements [`KPreconditioner`](crate::ops::kpc::KPreconditioner) via a [`BridgeScratch`](crate::algebra::bridge::BridgeScratch) bridge:
 //! complex vectors are copied into real scratch buffers, the real preconditioner is applied,
 //! and the result is copied back.
 
@@ -88,8 +88,8 @@ impl IlupWorkspace {
 /// - `u`: Upper triangular factor (sparse row format)
 /// - `n`: Matrix size
 ///
-/// For `feature = "complex"`, [`KPreconditioner`] is implemented via a real-valued factorization
-/// plus a [`BridgeScratch`] bridge.
+/// For `feature = "complex"`, [`KPreconditioner`](crate::ops::kpc::KPreconditioner) is implemented via a real-valued factorization
+/// plus a [`BridgeScratch`](crate::algebra::bridge::BridgeScratch) bridge.
 pub struct Ilup {
     pub fill: usize,
     pub l: Vec<SparseRow>,

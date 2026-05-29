@@ -43,7 +43,7 @@ impl<T> BufferPool<T> {
     /// # Safety
     ///
     /// The caller must fill the first `self.len` entries before any call to
-    /// [`initialized_slice`] or [`initialized_slice_mut`].
+    /// `initialized_slice` or `initialized_slice_mut`.
     pub unsafe fn uninit_slice_mut(&mut self) -> &mut [MaybeUninit<T>] {
         &mut self.buf[..self.len]
     }

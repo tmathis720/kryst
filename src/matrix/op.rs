@@ -85,7 +85,7 @@ pub struct ValuesId(pub u64);
 /// - Returning `StructureId(0)` or `ValuesId(0)` means "unknown" and causes
 ///   downstream caches (format/PC conversions) to fall back to pointer identity.
 ///   Wrappers that mutate matrices in place should call
-///   [`mark_structure_changed`] / [`mark_values_changed`] to keep caches valid.
+///   `mark_structure_changed` / `mark_values_changed` to keep caches valid.
 pub trait LinOp: Send + Sync + Any {
     type S: KrystScalar;
 
@@ -133,9 +133,9 @@ pub trait LinOp: Send + Sync + Any {
     /// and solvers. Local/dense operators return [`UniverseComm::NoComm`].
     ///
     /// # Invariants
-    /// - `A.comm()` and `P.comm()` must be congruent; enforced by [`KspContext::try_set_operators`]
+    /// - `A.comm()` and `P.comm()` must be congruent; enforced by [`crate::context::ksp_context::KspContext::try_set_operators`]
     ///   (and `set_operators` panics on mismatch).
-    /// - PCs obtain their communicator from the operator passed to [`Preconditioner::setup`].
+    /// - PCs obtain their communicator from the operator passed to [`crate::preconditioner::Preconditioner::setup`].
     fn comm(&self) -> UniverseComm {
         UniverseComm::NoComm(NoComm)
     }
@@ -181,7 +181,7 @@ impl ChangeIds {
 ///
 /// This wrapper tracks [`StructureId`]/[`ValuesId`] so callers can mutate the
 /// owned matrix and keep format caches valid. After any in-place edits,
-/// call [`mark_structure_changed`] or [`mark_values_changed`] before reusing
+/// call [`mark_structure_changed`](crate::matrix::op::GenericCsrOp::mark_structure_changed) or [`mark_values_changed`](crate::matrix::op::GenericCsrOp::mark_values_changed) before reusing
 /// the operator in cached conversions.
 ///
 /// The operator wires the scalar-polymorphic sparse matrix storage into the
@@ -392,7 +392,7 @@ use faer::Mat;
 /// `StructureId`/`ValuesId` so conversions and preconditioner reuse can be cached.
 ///
 /// Callers that modify the underlying matrix in place must invoke
-/// [`mark_structure_changed`] or [`mark_values_changed`] as appropriate so
+/// [`mark_structure_changed`](crate::matrix::op::DenseOp::mark_structure_changed) or [`mark_values_changed`](crate::matrix::op::DenseOp::mark_values_changed) as appropriate so
 /// cached conversions/preconditioners can detect the new contents.
 #[cfg(feature = "backend-faer")]
 pub struct DenseOp<S: KrystScalar> {
@@ -403,8 +403,8 @@ pub struct DenseOp<S: KrystScalar> {
 }
 #[cfg(feature = "backend-faer")]
 impl<S: KrystScalar> DenseOp<S> {
-    /// Wrap a dense matrix so changes can be tracked via [`mark_structure_changed`] and
-    /// [`mark_values_changed`]. This enables correct caching and preconditioner reuse across
+    /// Wrap a dense matrix so changes can be tracked via [`mark_structure_changed`](crate::matrix::op::DenseOp::mark_structure_changed) and
+    /// [`mark_values_changed`](crate::matrix::op::DenseOp::mark_values_changed). This enables correct caching and preconditioner reuse across
     /// nonlinear or time-stepping updates.
     pub fn new(mat: Arc<Mat<S>>) -> Self {
         let ids = ChangeIds::default();
@@ -551,7 +551,7 @@ impl<S: KrystScalar> LinOp for DenseOp<S> {
 ///   the canonical [`crate::matrix::spmv`] entry points.
 /// - See [`crate::parallel::threads`] for details on Rayon pool sizing.
 /// - After any in-place update to the wrapped CSR matrix, call
-///   [`mark_structure_changed`] or [`mark_values_changed`] so caches keyed on
+///   [`mark_structure_changed`](crate::matrix::op::CsrOp::mark_structure_changed) or [`mark_values_changed`](crate::matrix::op::CsrOp::mark_values_changed) so caches keyed on
 ///   [`StructureId`] / [`ValuesId`] stay valid.
 #[cfg(feature = "backend-faer")]
 pub struct CsrOp<Scalar = S> {

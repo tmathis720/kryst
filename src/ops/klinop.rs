@@ -29,7 +29,7 @@ pub trait KLinOp: Send + Sync {
     /// Perform `y <- A^T x` (or `A^H x` in complex builds).
     ///
     /// Default implementation panics unless overridden by operators that
-    /// advertise transpose support via [`supports_t_matvec_s`].
+    /// advertise transpose support via [`supports_t_matvec_s`](crate::ops::klinop::KLinOp::supports_t_matvec_s).
     fn t_matvec_s(
         &self,
         _x: &[Self::Scalar],

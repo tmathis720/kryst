@@ -8,12 +8,12 @@
 //! - does **not** perform pivoting or sophisticated pivot handling, so it is best suited as a
 //!   lightweight local preconditioner for moderately well-conditioned problems.
 //!
-//! For a more feature-complete ILUT (pivoting, ParILU-like logging, etc.) see [`Ilu`] with
-//! [`IluType::ILUT`].
+//! For a more feature-complete ILUT (pivoting, ParILU-like logging, etc.) see [`Ilu`](crate::preconditioner::ilu::Ilu) with
+//! [`IluType::ILUT`](crate::preconditioner::ilu::IluType::ILUT).
 //!
 //! # Real vs complex
 //! This preconditioner always works in real arithmetic (`S = f64`). When the `complex` feature is
-//! enabled, [`KPreconditioner`] is implemented via a [`BridgeScratch`] bridge that copies complex
+//! enabled, [`KPreconditioner`](crate::ops::kpc::KPreconditioner) is implemented via a [`BridgeScratch`](crate::algebra::bridge::BridgeScratch) bridge that copies complex
 //! vectors into real scratch buffers and back.
 
 #[cfg(feature = "complex")]

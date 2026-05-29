@@ -1,7 +1,7 @@
 //! Invariant helpers for cheap runtime validation.
 //!
 //! When the `invariants` feature is enabled, violations return
-//! [`KError::InvalidInput`], making test failures easier to diagnose.
+//! [`crate::error::KError::InvalidInput`], making test failures easier to diagnose.
 //! Without the feature, invariants degrade to `debug_assert!` checks so
 //! release builds stay lean.
 

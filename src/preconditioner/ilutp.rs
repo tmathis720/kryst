@@ -15,10 +15,10 @@
 //!
 //! # Real vs complex
 //! Factorization is always performed in real arithmetic (`f64`), and complex Krylov solvers depend
-//! on the [`KPreconditioner`] bridge that copies into real scratch buffers, applies ILUTP, and
+//! on the [`KPreconditioner`](crate::ops::kpc::KPreconditioner) bridge that copies into real scratch buffers, applies ILUTP, and
 //! copies back.
 //!
-//! For non-pivoting ILUT on `faer::Mat<f64>`, prefer [`Ilu`] with [`IluType::ILUT`].
+//! For non-pivoting ILUT on `faer::Mat<f64>`, prefer [`Ilu`](crate::preconditioner::ilu::Ilu) with [`IluType::ILUT`](crate::preconditioner::ilu::IluType::ILUT).
 //!
 //! The algorithm follows Saad's *Iterative Methods for Sparse Linear Systems* with stability
 //! safeguards tailored for pragmatic use.

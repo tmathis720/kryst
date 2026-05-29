@@ -4,7 +4,7 @@ use crate::matrix::sparse_api::CsrMatRef;
 /// Compressed Sparse Row matrix with scalar entries of type `S`.
 ///
 /// # Invariants
-/// - Same CSR structure invariants as [`matrix::sparse::CsrMatrix`], i.e.
+/// - Same CSR structure invariants as [`matrix::sparse::CsrMatrix`](crate::matrix::csr::CsrMatrix), i.e.
 ///   `rowptr.len() == nrows + 1`, non-decreasing `rowptr`, matching
 ///   `colind`/`values` lengths, and strictly-bounded column indices.
 /// - Rows are expected to have sorted `colind[rowptr[i]..rowptr[i+1]]`.

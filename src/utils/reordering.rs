@@ -48,7 +48,7 @@ pub enum ScalingMethod {
 /// Result of matrix preprocessing (reordering + scaling).
 #[derive(Debug, Clone)]
 pub struct MatrixPreprocessing {
-    /// Permutation mapping: permutation[new_index] = old_index (with cached inverse).
+    /// Permutation mapping: permutation\[new_index\] = old_index (with cached inverse).
     pub permutation: Permutation,
     /// Left scaling factors (if any)
     pub left_scaling: Option<Vec<f64>>,

@@ -34,7 +34,7 @@ pub trait SparseMatrix {
 /// - `col_idx.len() == values.len()`.
 /// - Within each row, `col_idx[row_ptr[i]..row_ptr[i + 1]]` is sorted ascending.
 ///   Sorted rows are required for:
-///   - `diag_pos` lookups in [`build_diag_pos`],
+///   - `diag_pos` lookups in [`build_diag_pos`](crate::matrix::sparse::CsrMatrix::build_diag_pos),
 ///   - some SpGEMM / SpMV algorithms, and
 ///   - interop with backend caches (Faer, format conversions).
 /// - Column indices satisfy `col_idx[*] < ncols`.
@@ -67,7 +67,7 @@ impl<T> CsrMatrix<T> {
     /// - All of the invariants documented on [`CsrMatrix`] hold.
     /// - Debug builds will assert the structure matches those requirements,
     ///   including per-row sortedness and column bounds.
-    /// - Diagonal positions are cached via [`build_diag_pos`] before returning.
+    /// - Diagonal positions are cached via [`build_diag_pos`](crate::matrix::sparse::CsrMatrix::build_diag_pos) before returning.
     pub fn from_csr(
         nrows: usize,
         ncols: usize,

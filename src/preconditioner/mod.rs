@@ -9,18 +9,18 @@
 //!   Side is forwarded so PCs *with internal sweep order* (e.g. SOR/SSOR) can choose
 //!   the appropriate triangular traversal. Most PCs ignore side.
 //! - [`Preconditioner::apply_mut`] is used by flexible solvers (FGMRES) to allow
-//!   iteration-varying behavior. Default forwards to [`apply`].
+//!   iteration-varying behavior. Default forwards to [`apply`](crate::preconditioner::Preconditioner::apply).
 //! - [`Preconditioner::on_restart`] is an optional hook invoked at solver restarts
 //!   (e.g., by FGMRES) to allow adaptive tuning. Default is a no-op.
-//! - Direct methods may implement [`direct_solve`] and will be used by `PREONLY`.
+//! - Direct methods may implement [`direct_solve`](crate::preconditioner::Preconditioner::direct_solve) and will be used by `PREONLY`.
 //!
 //! ## Reuse semantics
-//! Callers may invoke [`update_numeric`] when structure is unchanged; otherwise
-//! use [`update_symbolic`]. Report truthfully via [`supports_numeric_update`].
+//! Callers may invoke [`update_numeric`](crate::preconditioner::Preconditioner::update_numeric) when structure is unchanged; otherwise
+//! use [`update_symbolic`](crate::preconditioner::Preconditioner::update_symbolic). Report truthfully via [`supports_numeric_update`](crate::preconditioner::Preconditioner::supports_numeric_update).
 //!
 //! ## Parallelism
 //! Preconditioners obtain the communicator via [`LinOp::comm()`] from the operator
-//! provided to [`setup`]. **Do not** thread communicators manually.
+//! provided to [`setup`](crate::preconditioner::Preconditioner::setup). **Do not** thread communicators manually.
 //!
 //! ## Side semantics (solver-enforced)
 //! Solvers place `M^{-1}`:
@@ -150,10 +150,10 @@ impl PcReusePolicy {
 
 /// Object-safe preconditioner operating on `S` slices and [`LinOp`] matrices.
 ///
-/// Preconditioners may optionally implement [`direct_solve`], allowing the
+/// Preconditioners may optionally implement [`direct_solve`](crate::preconditioner::Preconditioner::direct_solve), allowing the
 /// preconditioner to act as a stand-alone direct solver (e.g. LU, QR). Only
 /// implementations that are true direct methods should override it. The default
-/// implementation returns a clear [`KError`], so existing preconditioners
+/// implementation returns a clear [`KError`](crate::error::KError), so existing preconditioners
 /// continue to work unchanged.
 ///
 /// # SPD contract
@@ -184,7 +184,7 @@ pub trait Preconditioner: Send + Sync {
 
     /// Apply `M^{-op}` where the operation (`op`) specifies transpose handling.
     ///
-    /// The default implementation routes all operation variants through [`apply`].
+    /// The default implementation routes all operation variants through [`Preconditioner::apply`].
     /// Implementations overriding this
     /// method should ignore the [`PcSide`] argument entirely and instead allow
     /// callers to decide left/right placement by where they invoke the method.
@@ -219,7 +219,7 @@ pub trait Preconditioner: Send + Sync {
 
     /// Mutable application (flexible/nonlinear preconditioners).
     ///
-    /// By default, delegates to [`apply`], so existing preconditioners
+    /// By default, delegates to [`apply`](crate::preconditioner::Preconditioner::apply), so existing preconditioners
     /// remain immutable unless they explicitly override this method.
     fn apply_mut(&mut self, side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
         self.apply(side, x, y)
@@ -309,7 +309,7 @@ pub trait LocalPreconditioner<T: KrystScalar = S>: Send + Sync {
     }
 }
 
-/// Marker trait: any [`Preconditioner`] can be treated as flexible via [`apply_mut`].
+/// Marker trait: any [`Preconditioner`] can be treated as flexible via [`apply_mut`](crate::preconditioner::Preconditioner::apply_mut).
 pub trait FlexiblePreconditioner: Preconditioner {}
 impl<T: Preconditioner + ?Sized> FlexiblePreconditioner for T {}
 

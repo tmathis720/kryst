@@ -5,9 +5,9 @@ use std::collections::VecDeque;
 /// Permutation with cached inverse mapping.
 #[derive(Clone, Debug)]
 pub struct Permutation {
-    /// Maps new index -> old index (p[i] = old index of new position i)
+    /// Maps new index -> old index (p\[i\] = old index of new position i)
     pub p: Vec<usize>,
-    /// Maps old index -> new index (pinv[old] = new position of old index)
+    /// Maps old index -> new index (pinv\[old\] = new position of old index)
     pub pinv: Vec<usize>,
 }
 
@@ -25,14 +25,14 @@ impl Permutation {
         self.p.len()
     }
 
-    /// Apply permutation to a vector: y(new) = x(old)[p[new]]
+    /// Apply permutation to a vector: `y(new) = x(old)[p[new]]`
     pub fn apply_vec<S: KrystScalar>(&self, x_old: &[S], y_new: &mut [S]) {
         for (i, y) in y_new.iter_mut().enumerate() {
             *y = x_old[self.p[i]];
         }
     }
 
-    /// Apply transpose permutation to a vector: y(old) = x(new)[pinv[old]]
+    /// Apply transpose permutation to a vector: `y(old) = x(new)[pinv[old]]`
     pub fn apply_vec_t<S: KrystScalar>(&self, x_new: &[S], y_old: &mut [S]) {
         for (i, y) in y_old.iter_mut().enumerate() {
             *y = x_new[self.pinv[i]];

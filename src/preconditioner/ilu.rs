@@ -15,9 +15,9 @@
 //! - `IluType::ILUT`: threshold-based ILU with dropping and optional per-row fill limiting
 //!   via [`IluConfig::drop_tolerance`] and [`IluConfig::max_fill_per_row`].
 //! - `BlockJacobi` / `GmresIluk` / `GmresIlut`: HYPRE-style aliases. These builders defer to
-//!   [`Ilup`] or [`Ilut`] for performance when it makes sense while keeping the same configuration
+//!   [`Ilup`](crate::preconditioner::ilup::Ilup) or [`Ilut`](crate::preconditioner::ilut::Ilut) for performance when it makes sense while keeping the same configuration
 //!   story. They currently dispatch to the unified [`Ilu`] implementation unless
-//!   [`Ilu::create_specialized`] routes `IluType::ILUT` to the simpler [`crate::preconditioner::ilut::Ilut`].
+//!   [`Ilu::create_specialized`](crate::preconditioner::ilu::Ilu::create_specialized) routes `IluType::ILUT` to the simpler [`crate::preconditioner::ilut::Ilut`].
 //!
 //! # Real vs complex
 //! `Ilu` exposes native complex-capable setup/apply entry points when complex scalars are
@@ -147,11 +147,11 @@ pub struct IluConfig {
     pub level_of_fill: usize,
     /// Maximum nonzeros per row (HYPRE: maxRowNnz)
     pub max_fill_per_row: usize,
-    /// Drop tolerance for ILUT (HYPRE: droptol[0])
+    /// Drop tolerance for ILUT (HYPRE: droptol\[0\])
     pub drop_tolerance: Real,
-    /// Drop tolerance for off-diagonal blocks (HYPRE: droptol[1])
+    /// Drop tolerance for off-diagonal blocks (HYPRE: droptol\[1\])
     pub offdiag_drop_tolerance: Real,
-    /// Drop tolerance for Schur complement (HYPRE: droptol[2])
+    /// Drop tolerance for Schur complement (HYPRE: droptol\[2\])
     pub schur_drop_tolerance: Real,
     /// Reordering strategy (HYPRE: reordering_type)
     pub reordering_type: ReorderingType,

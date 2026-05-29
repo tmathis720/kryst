@@ -148,7 +148,7 @@ impl<S: KrystScalar> SpmvPlan<S> {
     }
 }
 
-/// Tuning knobs influencing how [`SpmvPlan::build`] selects a kernel.
+/// Tuning knobs influencing how `SpmvPlan::build` selects a kernel.
 #[derive(Clone, Debug)]
 pub struct SpmvTuning {
     pub allow_simd: bool,

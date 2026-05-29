@@ -1517,7 +1517,8 @@ impl FgmresSolver {
             }
             if true_res <= thr {
                 stats.reason = if happy_breakdown_candidate {
-                    stats.residual_override_note = Some("happy_breakdown_candidate_validated".into());
+                    stats.residual_override_note =
+                        Some("happy_breakdown_candidate_validated".into());
                     ConvergedReason::ConvergedHappyBreakdown
                 } else if true_res <= self.atol {
                     ConvergedReason::ConvergedAtol

@@ -1,15 +1,11 @@
 //! # KSP context
 //!
 //! ## Operator/PC lifecycle
-//! 1. [`set_operators`] stores `A` and `P` (or `A` if `P` is `None`).
+//! 1. [`set_operators`](crate::context::ksp_context::KspContext::set_operators) stores `A` and `P` (or `A` if `P` is `None`).
 //! 2. Enforces communicator congruence via [`LinOp::comm()`]. Prefer
-//!    [`try_set_operators`] in library code: it returns an error on mismatch, while
-//!    [`set_operators`] panics for backward compatibility.
-//! 3. [`setup`] resolves any deferred PC specs (including chains), then calls
-//!    [`Preconditioner::setup`] followed by reuse logic:
-//!    - If structure id changed → [`update_symbolic`]
-//!    - Else if values id changed and numeric reuse allowed → [`update_numeric`]
-//!    - Else unchanged.
+//!    [`try_set_operators`](crate::context::ksp_context::KspContext::try_set_operators) in library code: it returns an error on mismatch, while
+//!    [`set_operators`](crate::context::ksp_context::KspContext::set_operators) panics for backward compatibility.
+//! 3. [`setup`](crate::context::ksp_context::KspContext::setup) resolves any deferred PC specs (including chains), then calls
 //!
 //! For efficient reuse across nonlinear iterations or time steps, wrap matrices in
 //! [`DenseOp`](crate::matrix::op::DenseOp) or [`CsrOp`](crate::matrix::op::CsrOp) and call
@@ -34,7 +30,7 @@
 //! ## Deferred PCs / Chaining
 //! [`PcFactory::create_deferred_pc`] stores type+options without a matrix.
 //! [`PcFactory::construct_deferred_preconditioner`] materializes it once `P` is known.
-//! [`PcChain`] composes multiple PCs: `y = P_k(...P_1(x))`.
+//! [`PcChain`](crate::preconditioner::chain::PcChain) composes multiple PCs: `y = P_k(...P_1(x))`.
 //!
 //! ## Monitors
 //! Iteration monitors receive `(iter, residual)` where the residual is solver-specific
@@ -59,9 +55,9 @@ use crate::algebra::parallel_cfg::{parallel_tune, set_parallel_tune};
 use crate::algebra::prelude::*;
 use crate::config::options::{CgVariant, KspOptions, KspType, PcOptions};
 #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
-use crate::context::ksp_context::distcsr_capability::resolve_distcsr_capability;
-#[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
 use crate::context::ksp_context::distcsr_capability::DistCsrCapabilityKey;
+#[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
+use crate::context::ksp_context::distcsr_capability::resolve_distcsr_capability;
 use crate::context::pc_context::{DeferredPcInfo, PcFactory, PcType};
 use crate::error::KError;
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
@@ -117,9 +113,7 @@ mod execution;
 mod workspace;
 pub use crate::core::block::BlockVec;
 #[cfg(feature = "backend-faer")]
-use distcsr_capability::{
-    DistCsrCapabilityEntry, build_dist_route_decision_report,
-};
+use distcsr_capability::{DistCsrCapabilityEntry, build_dist_route_decision_report};
 use execution::KrylovVariant;
 pub use execution::{
     AdaptiveExecutionDecision, ExecutionPolicy, NestedPolicyContext, OverlapStrategy,
@@ -2250,7 +2244,7 @@ impl KspContext {
     /// ## Communicator binding
     /// `KspContext` becomes bound to the operator communicator once operators
     /// are set. To override or wrap operator communicators, use
-    /// [`try_set_operators_with_comm`].
+    /// [`try_set_operators_with_comm`](crate::context::ksp_context::KspContext::try_set_operators_with_comm).
     ///
     /// On success, invalidates any prior setup (PC reuse and workspace).
     pub fn try_set_operators(

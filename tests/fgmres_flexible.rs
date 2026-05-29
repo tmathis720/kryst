@@ -225,7 +225,6 @@ fn fgmres_reports_singular_reduced_system_on_zero_operator() {
     assert_eq!(stats.reason, ConvergedReason::DivergedReducedSystemSingular);
 }
 
-
 #[test]
 fn fgmres_happy_breakdown_candidate_validated_transition() {
     let a = faer::Mat::<f64>::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 0.0 });

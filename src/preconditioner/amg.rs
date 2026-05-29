@@ -256,7 +256,7 @@ pub enum RowScaleMode {
     /// For scalar or when near-nullspace is provided: enforce per-row reproduction
     /// target by scaling the subset of columns for each function α.
     ToNearNullspace,
-    /// Fallback for scalar r=1 without NNS: enforce ∑ P[i,*] = 1.
+    /// Fallback for scalar r=1 without NNS: enforce ∑ P\[i,*\] = 1.
     SumToOne,
     /// Make each row’s α-slice unit L2 norm (robust when T is noisy).
     L2Unit,

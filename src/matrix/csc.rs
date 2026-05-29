@@ -139,7 +139,7 @@ where
     /// Transpose sparse matrix-vector multiply: `y = A^T * x`.
     /// Uses `A^H` in complex builds.
     ///
-    /// Sequential implementation mirroring [`spmv`]. The output slice is fully
+    /// Sequential implementation mirroring [`spmv`](CscMatrix::spmv). The output slice is fully
     /// overwritten, so callers do not need to zero-initialize it before calling
     /// this routine.
     pub fn t_matvec(&self, x: &[T], y: &mut [T]) {

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use crate::matrix::sparse::CsrMatrix;
 
-/// Extract adjacency list from a matrix pattern: adj[i] = { j | A[i,j] ≠ 0 or A[j,i] ≠ 0 }
+/// Extract adjacency list from a matrix pattern: adj\[i\] = { j | A\[i,j\] ≠ 0 or A\[j,i\] ≠ 0 }
 pub fn extract_adjacency<F>(n: usize, is_nz: F) -> Vec<Vec<usize>>
 where
     F: Fn(usize, usize) -> bool,
@@ -21,7 +21,7 @@ where
     adj
 }
 
-/// Build distance-2 neighbor sets: dist2[i] = adj[i] ∪ (⋃_{j∈adj[i]} adj[j])
+/// Build distance-2 neighbor sets: dist2\[i\] = adj\[i\] ∪ (⋃_{j∈adj\[i\]} adj\[j\])
 pub fn distance2_neighbors(adj: &[Vec<usize>]) -> Vec<HashSet<usize>> {
     let n = adj.len();
     let mut dist2 = vec![HashSet::new(); n];
@@ -37,7 +37,7 @@ pub fn distance2_neighbors(adj: &[Vec<usize>]) -> Vec<HashSet<usize>> {
     dist2
 }
 
-/// Greedy distance-2 coloring. Returns colors[i] = color assigned to node i.
+/// Greedy distance-2 coloring. Returns colors\[i\] = color assigned to node i.
 pub fn greedy_distance2_coloring(dist2: &[HashSet<usize>]) -> Vec<usize> {
     let n = dist2.len();
     let mut color_of = vec![None; n];
@@ -65,7 +65,7 @@ where
     greedy_distance2_coloring(&dist2)
 }
 
-/// Build blocks from a color assignment: blocks[c] = indices with color c
+/// Build blocks from a color assignment: blocks\[c\] = indices with color c
 pub fn build_blocks_from_colors(colors: &[usize]) -> Vec<Vec<usize>> {
     let num_colors = colors.iter().copied().max().map(|c| c + 1).unwrap_or(0);
     let mut blocks = vec![Vec::new(); num_colors];

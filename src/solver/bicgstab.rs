@@ -1124,7 +1124,7 @@ impl BiCgStabSolver {
     ///
     /// In `feature = "complex"` builds this bridge maps `f64 -> S` and projects
     /// the final iterate back to `f64` (real part). For genuine complex solves,
-    /// prefer [`Self::solve_k`] or [`Self::solve_c64`].
+    /// prefer `Self::solve_k` or `Self::solve_c64`.
     pub fn solve_f64<A>(
         &mut self,
         a: &A,

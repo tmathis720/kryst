@@ -348,7 +348,6 @@ impl DistCsrOp {
     /// Build a distributed operator from a [`ParCsrMatrix`].
     ///
     /// This merges the diagonal and off-process blocks into a single local CSR
-    /// with global column indices before delegating to [`from_local_rows`].
     pub fn from_parcsr(par: &ParCsrMatrix) -> Result<Self, KError> {
         let n_local = par.local_n();
         let n_global = par.global_m;

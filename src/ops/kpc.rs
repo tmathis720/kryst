@@ -45,7 +45,7 @@ pub trait KPreconditioner: Send {
 
     /// Apply the preconditioner in a mutable/flexible mode.
     ///
-    /// By default this delegates to [`apply_s`], preserving backwards compatibility for
+    /// By default this delegates to `apply_s`, preserving backwards compatibility for
     /// immutable preconditioners while allowing flexible algorithms (e.g., FGMRES) to
     /// request a mutable handle when available.
     fn apply_mut_s(
