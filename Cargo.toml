@@ -13,12 +13,17 @@ categories = ["science", "mathematics", "algorithms"]
 keywords = ["krylov", "gmres", "linear-solver", "parallel", "mpi"]
 exclude = [
     "examples/*/e*.mtx",
-    "references/*.pdf",
+    "examples/mtx/*",
+    "references/*",
     "target/*",
     ".git/*",
     "*.png",
     "*.jpg",
     "*.jpeg",
+    ".continue",
+    ".github",
+    ".vscode",
+    "docs/*"
 ]
 
 [package.metadata.docs.rs]
