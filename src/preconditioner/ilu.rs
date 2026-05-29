@@ -2395,7 +2395,24 @@ impl Ilu {
             }
         }
     }
+}
 
+#[cfg(feature = "complex")]
+impl Ilu {
+    /// Create specialized ILU preconditioners that leverage existing implementations.
+    ///
+    /// In complex builds, the real-valued ILUP implementation is not compatible with
+    /// the `Ilu` trait object type here, so we fall back to the canonical `Ilu`
+    /// implementation for all variants.
+    pub fn create_specialized(
+        config: IluConfig,
+    ) -> Result<Box<dyn Preconditioner<Mat<S>, Vec<S>>>, KError> {
+        let ilu = Ilu::new_with_config(config)?;
+        Ok(Box::new(ilu))
+    }
+}
+
+impl Ilu {
     /// Quick factory method for common ILU configurations
     pub fn create_quick(ilu_type: IluType, fill_or_drop: Real) -> Result<Self, KError> {
         let mut config = IluConfig::default();
