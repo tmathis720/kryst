@@ -1964,7 +1964,7 @@ impl Graph {
 /// Elimination tree structure
 #[derive(Debug, Clone)]
 pub struct EliminationTree {
-    /// Parent array (parent[i] = parent of node i, or n if root)
+    /// Parent array (parent\[i\] = parent of node i, or n if root)
     pub parent: Vec<usize>,
     /// Children lists for each node
     pub children: Vec<Vec<usize>>,
