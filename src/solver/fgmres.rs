@@ -1057,7 +1057,7 @@ impl FgmresSolver {
                 overlap_global_reductions: async_waits,
                 residual_replacements: async_waits,
             };
-            let stats = stats.with_counters(counters);
+            let mut stats = stats.with_counters(counters);
             #[cfg(feature = "metrics")]
             {
                 metrics.reductions = reductions;
@@ -1611,7 +1611,7 @@ impl FgmresSolver {
             overlap_global_reductions: async_waits,
             residual_replacements: async_waits,
         };
-        let stats = stats
+        let mut stats = stats
             .with_counters(counters)
             .with_fgmres_counters(FgmresCounters {
                 restart_count,
