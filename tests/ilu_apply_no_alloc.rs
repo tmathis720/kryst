@@ -1,11 +1,15 @@
 #![cfg(feature = "backend-faer")]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering::*};
+use std::sync::Mutex;
 
 use kryst::algebra::prelude::*;
 
 pub struct CountingAlloc;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+// The global allocation counter is process-wide, so keep these assertions isolated
+// even when the Rust test harness runs tests concurrently.
+static ALLOC_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -29,9 +33,10 @@ fn allocs() -> usize {
 #[cfg(not(feature = "complex"))]
 #[test]
 fn ilu_apply_has_no_allocations() {
-    use kryst::preconditioner::PcSide;
+    let _alloc_guard = ALLOC_TEST_LOCK.lock().unwrap();
     use kryst::preconditioner::ilu::{IluBuilder, IluType, TriSolveType};
     use kryst::preconditioner::legacy::Preconditioner;
+    use kryst::preconditioner::PcSide;
 
     let n = 32;
     let a = faer::Mat::from_fn(n, n, |i, j| {
@@ -63,6 +68,7 @@ fn ilu_apply_has_no_allocations() {
 #[cfg(all(feature = "complex", feature = "complex_ilu"))]
 #[test]
 fn ilu_csr_complex_native_apply_mut_has_no_allocations() {
+    let _alloc_guard = ALLOC_TEST_LOCK.lock().unwrap();
     use kryst::matrix::sparse::CsrMatrix;
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::{PcSide, Preconditioner};
@@ -111,6 +117,7 @@ fn ilu_csr_complex_native_apply_mut_has_no_allocations() {
 #[cfg(all(feature = "complex", feature = "complex_ilu"))]
 #[test]
 fn ilu_csr_complex_degraded_apply_mut_has_no_allocations() {
+    let _alloc_guard = ALLOC_TEST_LOCK.lock().unwrap();
     use kryst::matrix::sparse::CsrMatrix;
     use kryst::preconditioner::ilu_csr::{IluCsr, IluCsrConfig, IluKind};
     use kryst::preconditioner::{PcSide, Preconditioner};
