@@ -1,7 +1,7 @@
 #![cfg(feature = "backend-faer")]
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering::*};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering::*};
 
 use kryst::algebra::prelude::*;
 
@@ -30,13 +30,39 @@ fn allocs() -> usize {
     ALLOCS.load(SeqCst)
 }
 
+#[test]
+fn permutation_identity_apply_vec_into_has_no_allocations() {
+    let _alloc_guard = ALLOC_TEST_LOCK.lock().unwrap();
+    use kryst::utils::permutation::Permutation;
+
+    let n = 32;
+    let perm = Permutation::identity(n);
+    let x: Vec<_> = (0..n).map(|i| i as f64 + 0.5).collect();
+    let mut y = vec![0.0; n];
+
+    let before = allocs();
+    perm.apply_vec_into(&x, &mut y);
+    let after_apply = allocs();
+    perm.apply_vec_t_into(&x, &mut y);
+    let after_apply_t = allocs();
+
+    assert_eq!(
+        before, after_apply,
+        "identity apply_vec_into() performed heap allocations"
+    );
+    assert_eq!(
+        before, after_apply_t,
+        "identity apply_vec_t_into() performed heap allocations"
+    );
+}
+
 #[cfg(not(feature = "complex"))]
 #[test]
 fn ilu_apply_has_no_allocations() {
     let _alloc_guard = ALLOC_TEST_LOCK.lock().unwrap();
+    use kryst::preconditioner::PcSide;
     use kryst::preconditioner::ilu::{IluBuilder, IluType, TriSolveType};
     use kryst::preconditioner::legacy::Preconditioner;
-    use kryst::preconditioner::PcSide;
 
     let n = 32;
     let a = faer::Mat::from_fn(n, n, |i, j| {
