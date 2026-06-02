@@ -1,3 +1,5 @@
+#![cfg(feature = "backend-faer")]
+
 use kryst::utils::matrix_market::read_matrix_market;
 use kryst::utils::matrix_screening::{
     SYMMETRY_MAX_ASYMMETRY_RATE, assess_symmetry, cg_compatibility_screen,

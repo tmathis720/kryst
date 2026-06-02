@@ -44,6 +44,7 @@ use log::trace;
 enum RealDispatchRoute {
     DistCsrBorrowed,
     CsrBorrowed,
+    #[cfg(feature = "backend-faer")]
     CsrMaterialized,
     Generic,
 }
@@ -308,6 +309,7 @@ impl BiCgStabSolver {
         let pc_wants_csr = pc
             .map(|p| p.required_format() == OpFormat::Csr)
             .unwrap_or(false);
+        #[cfg(feature = "backend-faer")]
         if a.format() == OpFormat::Csr
             && pc_wants_csr
             && any_op
@@ -1168,6 +1170,7 @@ impl BiCgStabSolver {
                         .solve_csr(csr, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
                         .map(|stats| stats.with_reduction_model(self.reduction_model()));
                 }
+                #[cfg(feature = "backend-faer")]
                 RealDispatchRoute::CsrMaterialized => {
                     let generic = a
                         .as_any()

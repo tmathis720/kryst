@@ -15,6 +15,7 @@ pub mod metrics;
 pub mod monitor;
 pub mod partition;
 pub mod permutation;
+#[cfg(feature = "backend-faer")]
 pub mod preconditioning_pipeline;
 pub mod profiling;
 pub mod reduction;
