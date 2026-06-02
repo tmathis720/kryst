@@ -42,10 +42,10 @@ use kryst::solver::superlu_dist::{
     SuperLuDistBuilder,
 };
 
-#[cfg(not(feature = "mpi"))]
-use kryst::parallel::NoComm;
 #[cfg(feature = "mpi")]
 use kryst::Comm;
+#[cfg(not(feature = "mpi"))]
+use kryst::parallel::NoComm;
 use std::env;
 
 #[cfg(feature = "mpi")]
