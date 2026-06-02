@@ -25,18 +25,50 @@ impl Permutation {
         self.p.len()
     }
 
-    /// Apply permutation to a vector: `y(new) = x(old)[p[new]]`
-    pub fn apply_vec<S: KrystScalar>(&self, x_old: &[S], y_new: &mut [S]) {
-        for (i, y) in y_new.iter_mut().enumerate() {
-            *y = x_old[self.p[i]];
+    /// Returns true if this is the identity permutation.
+    #[inline]
+    pub fn is_identity(&self) -> bool {
+        self.p.iter().enumerate().all(|(i, &p_i)| i == p_i)
+    }
+
+    /// Apply permutation to a vector: `y(new) = x(old)[p[new]]`.
+    pub fn apply_vec_into<T: Copy>(&self, x: &[T], y: &mut [T]) {
+        debug_assert_eq!(x.len(), self.len());
+        debug_assert_eq!(y.len(), self.len());
+
+        if self.is_identity() {
+            y.copy_from_slice(x);
+            return;
+        }
+
+        for i in 0..self.len() {
+            y[i] = x[self.p[i]];
         }
     }
 
-    /// Apply transpose permutation to a vector: `y(old) = x(new)[pinv[old]]`
-    pub fn apply_vec_t<S: KrystScalar>(&self, x_new: &[S], y_old: &mut [S]) {
-        for (i, y) in y_old.iter_mut().enumerate() {
-            *y = x_new[self.pinv[i]];
+    /// Apply transpose/inverse permutation to a vector: `y(old) = x(new)[pinv[old]]`.
+    pub fn apply_vec_t_into<T: Copy>(&self, x: &[T], y: &mut [T]) {
+        debug_assert_eq!(x.len(), self.len());
+        debug_assert_eq!(y.len(), self.len());
+
+        if self.is_identity() {
+            y.copy_from_slice(x);
+            return;
         }
+
+        for i in 0..self.len() {
+            y[self.p[i]] = x[i];
+        }
+    }
+
+    /// Apply permutation to a vector: `y(new) = x(old)[p[new]]`.
+    pub fn apply_vec<S: KrystScalar>(&self, x_old: &[S], y_new: &mut [S]) {
+        self.apply_vec_into(x_old, y_new);
+    }
+
+    /// Apply transpose permutation to a vector: `y(old) = x(new)[pinv[old]]`.
+    pub fn apply_vec_t<S: KrystScalar>(&self, x_new: &[S], y_old: &mut [S]) {
+        self.apply_vec_t_into(x_new, y_old);
     }
 }
 
@@ -244,7 +276,45 @@ pub(crate) fn cuthill_mckee_from_adj(adj: &mut [Vec<usize>]) -> Vec<usize> {
 mod tests {
     use super::*;
     use crate::matrix::sparse::CsrMatrix;
-    use faer::Mat;
+    #[test]
+    fn apply_vec_into_uses_destination_buffer() {
+        let perm = Permutation {
+            p: vec![2, 0, 1],
+            pinv: vec![1, 2, 0],
+        };
+        let x = [10, 20, 30];
+        let mut y = [0; 3];
+
+        perm.apply_vec_into(&x, &mut y);
+
+        assert_eq!(y, [30, 10, 20]);
+    }
+
+    #[test]
+    fn apply_vec_t_into_uses_destination_buffer() {
+        let perm = Permutation {
+            p: vec![2, 0, 1],
+            pinv: vec![1, 2, 0],
+        };
+        let x = [30, 10, 20];
+        let mut y = [0; 3];
+
+        perm.apply_vec_t_into(&x, &mut y);
+
+        assert_eq!(y, [10, 20, 30]);
+    }
+
+    #[test]
+    fn identity_apply_vec_into_copies_input() {
+        let perm = Permutation::identity(3);
+        let x = [1.5, 2.5, 3.5];
+        let mut y = [0.0; 3];
+
+        perm.apply_vec_into(&x, &mut y);
+
+        assert_eq!(y, x);
+    }
+
     #[test]
     fn permute_csr_symmetric_matches_dense() {
         // 3x3 matrix
