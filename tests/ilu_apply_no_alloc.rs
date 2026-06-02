@@ -120,6 +120,9 @@ fn ilu_csr_real_apply_mut_has_no_allocations() {
 
     let mut cfg = IluCsrConfig::default();
     cfg.kind = IluKind::Ilu0;
+    // Guard the serial triangular solve no-allocation contract; the
+    // level-scheduled path needs separate scratch-buffer work first
+    // before this assertion can cover it too.
     cfg.level_sched = false;
     let mut ilu = IluCsr::new_with_config(cfg);
     ilu.setup(&a).unwrap();
@@ -169,6 +172,9 @@ fn ilu_csr_complex_native_apply_mut_has_no_allocations() {
 
     let mut cfg = IluCsrConfig::default();
     cfg.kind = IluKind::Ilu0;
+    // Guard the serial triangular solve no-allocation contract; the
+    // level-scheduled path needs separate scratch-buffer work first
+    // before this assertion can cover it too.
     cfg.level_sched = false;
     let mut ilu = IluCsr::new_with_config(cfg);
     ilu.setup(&a).unwrap();
@@ -206,6 +212,9 @@ fn ilu_csr_complex_degraded_apply_mut_has_no_allocations() {
 
     let mut cfg = IluCsrConfig::default();
     cfg.kind = IluKind::Ilu0;
+    // Guard the serial triangular solve no-allocation contract; the
+    // level-scheduled path needs separate scratch-buffer work first
+    // before this assertion can cover it too.
     cfg.level_sched = false;
     let mut ilu = IluCsr::new_with_config(cfg);
     ilu.set_complex_force_degraded(true);
