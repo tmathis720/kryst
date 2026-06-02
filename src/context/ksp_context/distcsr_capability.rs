@@ -6,6 +6,7 @@ use crate::preconditioner::dist::{
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub struct DistCsrCapabilityKey {
     pub solver_type: Option<SolverType>,
     pub global_pc: GlobalPcKind,
@@ -29,6 +30,7 @@ pub struct DistCsrCapabilityEntry {
     pub registry_rule: &'static str,
 }
 
+#[allow(dead_code)]
 pub fn resolve_distcsr_capability(key: DistCsrCapabilityKey) -> DistCsrCapabilityEntry {
     let global_supports_native = matches!(
         key.global_pc,
@@ -107,6 +109,7 @@ pub fn resolve_distcsr_capability(key: DistCsrCapabilityKey) -> DistCsrCapabilit
     }
 }
 
+#[allow(dead_code)]
 pub fn build_dist_route_decision_report(
     mpi_opts: &MpiPcOptions,
     selected: DistRouteSelection,

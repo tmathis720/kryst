@@ -4,7 +4,8 @@ mod alloc;
 mod datasets;
 
 use alloc::{alloc_counts, reset_alloc_counts};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use kryst::matrix::op::LinOp; // for trait bounds
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::preconditioner::{Jacobi, PcSide, Preconditioner};

@@ -318,6 +318,7 @@ pub struct KspContext {
     pc: Option<Box<dyn Preconditioner>>,
     pub(crate) pending_pc: Option<DeferredPcInfo>,
     pc_spec: Option<DeferredPcInfo>,
+    #[allow(private_interfaces)]
     pub(crate) pc_chain_plan: Option<PcChainPlan>,
     amat: Option<Arc<dyn LinOp<S = S>>>,
     pmat: Option<Arc<dyn LinOp<S = S>>>,
@@ -444,6 +445,7 @@ struct PendingBiCgStab {
 #[cfg(feature = "backend-faer")]
 struct PendingMpiPc {
     mpi_opts: MpiPcOptions,
+    #[allow(dead_code)]
     pc_opts: PcOptions,
 }
 
@@ -463,6 +465,7 @@ struct DistRouteDiagnosticsState {
 #[derive(Clone, Debug)]
 #[cfg(feature = "backend-faer")]
 struct DistRoutePreflightState {
+    #[allow(dead_code)]
     probe_key: String,
     outcome: String,
     reason_codes: Vec<String>,
@@ -3516,21 +3519,25 @@ impl KspContext {
     }
 
     #[cfg(feature = "backend-faer")]
+    #[allow(dead_code)]
     fn set_dist_route_selected(&mut self, route: impl Into<String>) {
         self.dist_route_diag.selected_route = Some(route.into());
     }
 
     #[cfg(feature = "backend-faer")]
+    #[allow(dead_code)]
     fn set_dist_route_capability_entry(&mut self, entry: DistCsrCapabilityEntry) {
         self.dist_route_diag.capability_entry = Some(entry);
     }
 
     #[cfg(feature = "backend-faer")]
+    #[allow(dead_code)]
     fn set_dist_route_decision_report(&mut self, report: DistRouteDecisionReport) {
         self.dist_route_diag.decision_report = Some(report);
     }
 
     #[cfg(feature = "backend-faer")]
+    #[allow(dead_code)]
     fn push_dist_route_fallback(&mut self, reason: DistRouteFallbackReason) {
         let key = reason.as_str().to_string();
         self.dist_route_diag.fallback_chain.push(key.clone());
@@ -3542,11 +3549,13 @@ impl KspContext {
     }
 
     #[cfg(feature = "backend-faer")]
+    #[allow(dead_code)]
     fn set_dist_route_fallback_reason(&mut self, reason: impl Into<String>) {
         self.dist_route_diag.fallback_reason = Some(reason.into());
     }
 
     #[cfg(feature = "backend-faer")]
+    #[allow(dead_code)]
     fn refresh_and_validate_dist_route_report(
         &mut self,
         pending: &PendingMpiPc,
@@ -3593,6 +3602,7 @@ impl KspContext {
     }
 
     #[cfg(feature = "backend-faer")]
+    #[allow(dead_code)]
     fn maybe_reuse_dist_preflight(&mut self, probe_key: &str) -> Option<DistRoutePreflightState> {
         let state = self.dist_route_diag.preflight.as_mut()?;
         if state.probe_key != probe_key {
@@ -3603,6 +3613,7 @@ impl KspContext {
     }
 
     #[cfg(feature = "backend-faer")]
+    #[allow(dead_code)]
     fn store_dist_preflight(&mut self, state: DistRoutePreflightState) {
         self.dist_route_diag.preflight = Some(state);
     }

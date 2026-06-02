@@ -1,4 +1,5 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use kryst::config::options::{CgVariant, KspOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::op::{CsrOp, LinOp};
@@ -62,7 +63,7 @@ fn bench_local(c: &mut Criterion) {
                 let mut x = vec![0.0f64; n];
 
                 let stats = ksp.solve(&rhs, &mut x).unwrap();
-                black_box(stats);
+                let _ =black_box(stats);
             });
         });
     }

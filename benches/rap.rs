@@ -1,4 +1,5 @@
-use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::matrix::utils::{rap_btree, rap_opt};
 use rand::{RngExt, SeedableRng};
@@ -91,7 +92,7 @@ fn bench_rap_powerlaw(c: &mut Criterion) {
     for i in 0..nc {
         counts[i + 1] += counts[i];
     }
-    let mut r_rp = counts.clone();
+    let r_rp = counts.clone();
     let mut r_cj = vec![0usize; p.col_idx().len()];
     let mut r_vv = vec![0.0f64; p.values().len()];
     let mut next = r_rp.clone();
@@ -140,7 +141,7 @@ fn bench_rap_powerlaw(c: &mut Criterion) {
             for i in 0..nc_small {
                 counts[i + 1] += counts[i];
             }
-            let mut r_rp = counts.clone();
+            let r_rp = counts.clone();
             let mut r_cj = vec![0usize; p.col_idx().len()];
             let mut r_vv = vec![0.0f64; p.values().len()];
             let mut next = r_rp.clone();

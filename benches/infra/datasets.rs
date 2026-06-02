@@ -3,6 +3,7 @@ use rand::{RngExt, SeedableRng, rngs::StdRng};
 use std::collections::BTreeSet;
 
 /// 5-point Poisson on an n x n grid with Dirichlet BCs.
+#[allow(dead_code)]
 pub fn poisson2d_csr(n: usize) -> CsrMatrix<f64> {
     let nn = n * n;
     let mut row_ptr = Vec::with_capacity(nn + 1);
@@ -53,6 +54,7 @@ pub fn poisson2d_csr(n: usize) -> CsrMatrix<f64> {
 
 /// Build a simple injection prolongator for 2x coarsening and its transpose restriction.
 /// Fine grid n x n (n must be even). Each fine node maps to one coarse node.
+#[allow(dead_code)]
 pub fn poisson2d_prolong_restrict(n: usize) -> (CsrMatrix<f64>, CsrMatrix<f64>) {
     assert!(n % 2 == 0, "poisson2d_prolong_restrict: n must be even");
     let nf = n * n;
@@ -83,7 +85,7 @@ pub fn poisson2d_prolong_restrict(n: usize) -> (CsrMatrix<f64>, CsrMatrix<f64>) 
     for i in 0..nc {
         counts[i + 1] += counts[i];
     }
-    let mut r_row_ptr = counts.clone();
+    let r_row_ptr = counts.clone();
     let mut r_col_idx = vec![0usize; p.col_idx().len()];
     let mut r_vals = vec![0.0f64; p.values().len()];
     let mut next = r_row_ptr.clone();
@@ -101,6 +103,7 @@ pub fn poisson2d_prolong_restrict(n: usize) -> (CsrMatrix<f64>, CsrMatrix<f64>) 
 }
 
 /// Provide (A, P, R) triplet for RAP benchmarks on 2D Poisson.
+#[allow(dead_code)]
 pub fn rap_triplet_poisson2d(n: usize) -> (CsrMatrix<f64>, CsrMatrix<f64>, CsrMatrix<f64>) {
     let a = poisson2d_csr(n);
     let (p, r) = poisson2d_prolong_restrict(n);
@@ -109,6 +112,7 @@ pub fn rap_triplet_poisson2d(n: usize) -> (CsrMatrix<f64>, CsrMatrix<f64>, CsrMa
 
 /// Random sparse matrix with average degree ~avg_deg and deterministic seed.
 /// Not strictly power-law, but skewed degrees with duplicates removed and CSR sorted.
+#[allow(dead_code)]
 pub fn random_powerlaw_like(n: usize, avg_deg: usize, seed: u64) -> CsrMatrix<f64> {
     let mut rng = StdRng::seed_from_u64(seed);
     let mut row_ptr = Vec::with_capacity(n + 1);
@@ -148,6 +152,7 @@ pub fn random_powerlaw_like(n: usize, avg_deg: usize, seed: u64) -> CsrMatrix<f6
 
 /// Block-diagonal with light overlap between neighboring blocks.
 /// Returns (A, blocks) where blocks is a list of index sets.
+#[allow(dead_code)]
 pub fn blocky_csr(
     n_blocks: usize,
     block_size: usize,
