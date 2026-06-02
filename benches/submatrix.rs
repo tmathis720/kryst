@@ -1,7 +1,7 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use kryst::core::traits::SubmatrixExtract;
 use kryst::matrix::sparse::CsrMatrix;
+use std::hint::black_box;
 
 #[path = "infra/datasets.rs"]
 mod datasets;

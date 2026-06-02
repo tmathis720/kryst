@@ -214,17 +214,23 @@ where
                 // This is safe because we've verified that Scalar == f64
                 #[allow(unsafe_code)]
                 unsafe {
-                    Ok(std::mem::transmute::<Arc<dyn LinOp<S = f64>>, Arc<dyn LinOp<S = Scalar>>>(result))
+                    Ok(std::mem::transmute::<
+                        Arc<dyn LinOp<S = f64>>,
+                        Arc<dyn LinOp<S = Scalar>>,
+                    >(result))
                 }
-            },
+            }
             OpFormat::Dense => {
                 let dense = <SprsBackend as SparseBackend<f64>>::dense_from_csr(csr)?;
                 let result = Arc::new(dense) as Arc<dyn LinOp<S = f64>>;
                 #[allow(unsafe_code)]
                 unsafe {
-                    Ok(std::mem::transmute::<Arc<dyn LinOp<S = f64>>, Arc<dyn LinOp<S = Scalar>>>(result))
+                    Ok(std::mem::transmute::<
+                        Arc<dyn LinOp<S = f64>>,
+                        Arc<dyn LinOp<S = Scalar>>,
+                    >(result))
                 }
-            },
+            }
             OpFormat::Csc | OpFormat::BlockCsr | OpFormat::Any => Err(KError::Unsupported(
                 "sprs backend cannot materialize the requested format",
             )),
@@ -232,20 +238,27 @@ where
     } else if let Some(dense) = op.as_any().downcast_ref::<SprsDenseMat>() {
         match want {
             OpFormat::Csr => {
-                let csr = <SprsBackend as SparseBackend<f64>>::csr_from_dense(dense, drop_tol.into())?;
+                let csr =
+                    <SprsBackend as SparseBackend<f64>>::csr_from_dense(dense, drop_tol.into())?;
                 let result = Arc::new(csr) as Arc<dyn LinOp<S = f64>>;
                 #[allow(unsafe_code)]
                 unsafe {
-                    Ok(std::mem::transmute::<Arc<dyn LinOp<S = f64>>, Arc<dyn LinOp<S = Scalar>>>(result))
+                    Ok(std::mem::transmute::<
+                        Arc<dyn LinOp<S = f64>>,
+                        Arc<dyn LinOp<S = Scalar>>,
+                    >(result))
                 }
-            },
+            }
             OpFormat::Dense => {
                 let result = Arc::new(dense.clone()) as Arc<dyn LinOp<S = f64>>;
                 #[allow(unsafe_code)]
                 unsafe {
-                    Ok(std::mem::transmute::<Arc<dyn LinOp<S = f64>>, Arc<dyn LinOp<S = Scalar>>>(result))
+                    Ok(std::mem::transmute::<
+                        Arc<dyn LinOp<S = f64>>,
+                        Arc<dyn LinOp<S = Scalar>>,
+                    >(result))
                 }
-            },
+            }
             OpFormat::Csc | OpFormat::BlockCsr | OpFormat::Any => Err(KError::Unsupported(
                 "sprs backend cannot materialize the requested format",
             )),
@@ -291,17 +304,23 @@ where
                 let result = Arc::new(csr.clone()) as Arc<dyn LinOp<S = f64>>;
                 #[allow(unsafe_code)]
                 unsafe {
-                    Ok(std::mem::transmute::<Arc<dyn LinOp<S = f64>>, Arc<dyn LinOp<S = Scalar>>>(result))
+                    Ok(std::mem::transmute::<
+                        Arc<dyn LinOp<S = f64>>,
+                        Arc<dyn LinOp<S = Scalar>>,
+                    >(result))
                 }
-            },
+            }
             OpFormat::Dense => {
                 let dense = <SprsBackend as SparseBackend<f64>>::dense_from_csr(csr)?;
                 let result = Arc::new(dense) as Arc<dyn LinOp<S = f64>>;
                 #[allow(unsafe_code)]
                 unsafe {
-                    Ok(std::mem::transmute::<Arc<dyn LinOp<S = f64>>, Arc<dyn LinOp<S = Scalar>>>(result))
+                    Ok(std::mem::transmute::<
+                        Arc<dyn LinOp<S = f64>>,
+                        Arc<dyn LinOp<S = Scalar>>,
+                    >(result))
                 }
-            },
+            }
             OpFormat::Csc | OpFormat::BlockCsr | OpFormat::Any => Err(KError::Unsupported(
                 "sprs backend cannot materialize the requested format",
             )),
@@ -309,20 +328,27 @@ where
     } else if let Some(dense) = op.as_any().downcast_ref::<SprsDenseMat>() {
         match want {
             OpFormat::Csr => {
-                let csr = <SprsBackend as SparseBackend<f64>>::csr_from_dense(dense, drop_tol.into())?;
+                let csr =
+                    <SprsBackend as SparseBackend<f64>>::csr_from_dense(dense, drop_tol.into())?;
                 let result = Arc::new(csr) as Arc<dyn LinOp<S = f64>>;
                 #[allow(unsafe_code)]
                 unsafe {
-                    Ok(std::mem::transmute::<Arc<dyn LinOp<S = f64>>, Arc<dyn LinOp<S = Scalar>>>(result))
+                    Ok(std::mem::transmute::<
+                        Arc<dyn LinOp<S = f64>>,
+                        Arc<dyn LinOp<S = Scalar>>,
+                    >(result))
                 }
-            },
+            }
             OpFormat::Dense => {
                 let result = Arc::new(dense.clone()) as Arc<dyn LinOp<S = f64>>;
                 #[allow(unsafe_code)]
                 unsafe {
-                    Ok(std::mem::transmute::<Arc<dyn LinOp<S = f64>>, Arc<dyn LinOp<S = Scalar>>>(result))
+                    Ok(std::mem::transmute::<
+                        Arc<dyn LinOp<S = f64>>,
+                        Arc<dyn LinOp<S = Scalar>>,
+                    >(result))
                 }
-            },
+            }
             OpFormat::Csc | OpFormat::BlockCsr | OpFormat::Any => Err(KError::Unsupported(
                 "sprs backend cannot materialize the requested format",
             )),

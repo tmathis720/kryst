@@ -208,6 +208,7 @@ impl BddcPc {
             .collect()
     }
 
+    #[allow(dead_code)]
     fn extract_dense_operator(op: &dyn LinOp<S = S>, n: usize) -> Result<Vec<Vec<S>>, KError> {
         let mut a = vec![vec![S::zero(); n]; n];
         let mut ej = vec![S::zero(); n];

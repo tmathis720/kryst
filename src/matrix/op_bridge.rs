@@ -27,11 +27,13 @@ where
     A: LinOp<S = f64> + ?Sized,
 {
     let (mut rows, mut cols) = a.dims();
+    #[allow(unused_assignments)]
     if rows == 0 {
         rows = y.len();
     } else {
         debug_assert_eq!(y.len(), rows);
     }
+    #[allow(unused_assignments)]
     if cols == 0 {
         cols = x.len();
     } else {

@@ -1,5 +1,4 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use kryst::config::options::{CgVariant, KspOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::op::{CsrOp, LinOp};
@@ -7,6 +6,7 @@ use kryst::matrix::sparse::CsrMatrix;
 use kryst::parallel::NoComm;
 use kryst::parallel::UniverseComm;
 use kryst::preconditioner::PcSide;
+use std::hint::black_box;
 use std::sync::Arc;
 
 #[cfg(feature = "rayon")]
@@ -63,7 +63,7 @@ fn bench_local(c: &mut Criterion) {
                 let mut x = vec![0.0f64; n];
 
                 let stats = ksp.solve(&rhs, &mut x).unwrap();
-                let _ =black_box(stats);
+                let _ = black_box(stats);
             });
         });
     }

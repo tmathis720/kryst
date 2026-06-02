@@ -470,6 +470,7 @@ pub fn classical_pattern(
 }
 
 /// For F-neighbor j, distribute influence over its strong C neighbors.
+#[allow(non_snake_case)]
 fn neighbor_distribution_over_C_of(
     j: usize,
     a: &CsrMatrix<f64>,

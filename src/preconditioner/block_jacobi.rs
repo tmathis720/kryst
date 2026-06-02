@@ -488,10 +488,8 @@ mod tests {
     #[cfg(feature = "complex")]
     use crate::algebra::bridge::BridgeScratch;
     use crate::core::traits::{Indexing, MatVec, MatrixGet, RowPattern};
-    use crate::error::KError;
     #[cfg(feature = "complex")]
     use crate::ops::kpc::KPreconditioner;
-    use crate::preconditioner::PcSide;
 
     struct TestDiagMatrix {
         diag: Vec<S>,

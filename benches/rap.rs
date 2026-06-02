@@ -1,8 +1,8 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::matrix::utils::{rap_btree, rap_opt};
 use rand::{RngExt, SeedableRng};
+use std::hint::black_box;
 
 #[path = "infra/datasets.rs"]
 mod datasets;

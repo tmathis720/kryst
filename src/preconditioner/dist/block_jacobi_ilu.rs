@@ -435,6 +435,7 @@ where
         }
 
         debug_assert!(matches!(side, PcSide::Left));
+        #[allow(unused_variables)]
         let x_global_len = x.global_len();
         x.with_scratch_input_local_output(|x_local, y_local| {
             #[cfg(all(feature = "mpi", feature = "backend-faer", not(feature = "complex")))]

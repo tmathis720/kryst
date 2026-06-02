@@ -1,6 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use kryst::matrix::sparse::CsrMatrix;
+use std::hint::black_box;
 
 #[path = "infra/datasets.rs"]
 mod datasets;

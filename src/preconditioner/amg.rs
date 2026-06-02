@@ -4031,8 +4031,7 @@ impl AMG {
 
     fn apply_with_hierarchy(
         &self,
-        #[allow(unused_variables)]
-        side: PcSide,
+        #[allow(unused_variables)] side: PcSide,
         r: &[f64],
         z: &mut [f64],
         h: &AmgHierarchy,
@@ -4285,6 +4284,7 @@ impl AMG {
                 "AMG superlu_dist route requires feature superlu_dist".into(),
             ));
         }
+        #[allow(unreachable_code)]
         if let (Some(stats), Some(t0)) = (stats.as_mut(), t_local) {
             stats.local_apply = toc(t0);
         }
@@ -7919,6 +7919,7 @@ fn build_hierarchy(
         enforce_oc_target(&mut levels, cfg)?;
     }
 
+    #[allow(non_snake_case)]
     let L = levels.len() - 1;
     if matches!(cfg.coarse_solve, CoarseSolve::ILU) {
         let n = levels[L].a.nrows();
@@ -8377,6 +8378,7 @@ fn diag_inv_from_csr_cfg_fallback(
 ) -> Result<Vec<f64>, KError> {
     match diag_inv_from_csr_cfg(a, cfg) {
         Ok(v) => Ok(v),
+        #[allow(unused_variables)]
         Err(err) if allow_safeguard && !cfg.require_spd => Ok(diag_inv_from_csr_safeguarded(a)),
         Err(err) => Err(err),
     }
@@ -10223,7 +10225,7 @@ mod tests {
     }
 
     fn identity_level() -> AMGLevel {
-        let mut level = AMGLevel {
+        let level = AMGLevel {
             a: CsrMatrix::identity(1),
             p: CsrMatrix::identity(1),
             r: CsrMatrix::identity(1),
@@ -10269,7 +10271,7 @@ mod tests {
 
     fn level_from_matrix(a: &CsrMatrix<f64>) -> AMGLevel {
         let n = a.nrows();
-        let mut level = AMGLevel {
+        let level = AMGLevel {
             a: a.clone(),
             p: CsrMatrix::identity(n),
             r: CsrMatrix::identity(n),
@@ -11086,10 +11088,10 @@ mod tests {
             vals: vec![1.0, 2.0, 3.0, 4.0, -1.0, 5.0, 6.0],
         };
         let (rr, rc, _, p2r) = transpose_csr_with_pos(&p);
-        let mut r = CsrMatrix::from_csr(p.n, p.m, rr.clone(), rc.clone(), vec![0.0; p.vals.len()]);
+        let r = CsrMatrix::from_csr(p.n, p.m, rr.clone(), rc.clone(), vec![0.0; p.vals.len()]);
         #[cfg(debug_assertions)]
         debug_check_csr(&r, "test keep transpose");
-        let mut updated_rc = r.col_idx().to_vec();
+        let updated_rc = r.col_idx().to_vec();
         let mut updated_vals = vec![0.0; p.vals.len()];
         for (pi, &ri) in p2r.iter().enumerate() {
             updated_vals[ri] = p.vals[pi] * 2.0;

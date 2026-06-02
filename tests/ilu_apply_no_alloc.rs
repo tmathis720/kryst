@@ -1,7 +1,7 @@
 #![cfg(feature = "backend-faer")]
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering::*};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering::*};
 
 use kryst::algebra::prelude::*;
 
@@ -60,9 +60,9 @@ fn permutation_identity_apply_vec_into_has_no_allocations() {
 #[test]
 fn ilu_apply_has_no_allocations() {
     let _alloc_guard = ALLOC_TEST_LOCK.lock().unwrap();
+    use kryst::preconditioner::PcSide;
     use kryst::preconditioner::ilu::{IluBuilder, IluType, TriSolveType};
     use kryst::preconditioner::legacy::Preconditioner;
-    use kryst::preconditioner::PcSide;
 
     let n = 32;
     let a = faer::Mat::from_fn(n, n, |i, j| {

@@ -2,7 +2,7 @@ use super::super::AMGBuilder;
 use super::super::prolong::{
     TentativeNodal, TentativeP, smooth_tentative_sa_mf, smooth_tentative_sa_multi,
 };
-use crate::matrix::sparse::{CsrMatrix, SparseMatrix};
+use crate::matrix::sparse::CsrMatrix;
 use crate::preconditioner::Preconditioner;
 use faer::Mat;
 
