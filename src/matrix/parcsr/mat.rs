@@ -275,7 +275,7 @@ mod tests {
     #[cfg(all(feature = "complex", feature = "mpi"))]
     #[test]
     fn spmv_complex_simple_halo_exchange() {
-        use crate::parallel::MpiComm;
+        use crate::parallel::{Comm, MpiComm};
 
         let comm = MpiComm::new();
         let rank = comm.rank();

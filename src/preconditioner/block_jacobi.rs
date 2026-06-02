@@ -570,18 +570,15 @@ mod tests {
         let a = TestDiagMatrix::new(vec![S::from_real(4.0), S::from_real(9.0)]);
         pc.setup(&a);
 
-        let rhs_real = vec![S::from_real(8.0), S::from_real(18.0)];
-        let mut out_real = vec![R::default(); rhs_real.len()];
-        pc.apply(&rhs_real, &mut out_real);
-
-        let rhs_s: Vec<S> = rhs_real.iter().copied().collect();
-        let mut out_s = vec![S::zero(); rhs_real.len()];
+        let rhs_s = vec![S::from_real(8.0), S::from_real(18.0)];
+        let expected = vec![R::from(2.0), R::from(2.0)];
+        let mut out_s = vec![S::zero(); rhs_s.len()];
         let mut scratch = BridgeScratch::default();
         pc.apply_s(PcSide::Left, &rhs_s, &mut out_s, &mut scratch)
             .expect("block jacobi apply_s");
 
-        for (ys, yr) in out_s.iter().zip(out_real.iter()) {
-            assert!((ys.real() - yr).abs() < 1e-12);
+        for (ys, yr) in out_s.iter().zip(expected.iter()) {
+            assert!((ys.real() - *yr).abs() < 1e-12);
         }
     }
 }

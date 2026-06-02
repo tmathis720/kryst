@@ -1,22 +1,22 @@
-#![cfg(feature = "superlu_dist")]
-#[cfg(feature = "mpi")]
+#![cfg(all(feature = "superlu_dist", not(feature = "complex")))]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 use kryst::matrix::dist_csr::DistCsrOp;
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 use kryst::matrix::op::LinOp;
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 use kryst::matrix::sparse::CsrMatrix;
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 use kryst::parallel::{Comm, MpiComm, NoComm, UniverseComm};
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 use kryst::solver::api::Solver;
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 use kryst::solver::superlu_dist::SuperLuDistSolver;
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 use std::env;
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 use std::sync::Arc;
 
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 fn mpi_comm() -> Option<UniverseComm> {
     if env::var("KRYST_ENABLE_MPI_TESTS").as_deref() != Ok("1") {
         eprintln!("skipping MPI tests: KRYST_ENABLE_MPI_TESTS not set");
@@ -30,7 +30,7 @@ fn mpi_comm() -> Option<UniverseComm> {
 }
 
 #[test]
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 fn superlu_dist_solver_matches_diagonal_solution() {
     let Some(comm) = mpi_comm() else {
         return;
@@ -70,7 +70,7 @@ fn superlu_dist_solver_matches_diagonal_solution() {
 }
 
 #[test]
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 fn dist_csr_halo_exchange_matches_tridiagonal() {
     let Some(comm) = mpi_comm() else {
         return;
@@ -131,7 +131,7 @@ fn dist_csr_halo_exchange_matches_tridiagonal() {
 }
 
 #[test]
-#[cfg(feature = "mpi")]
+#[cfg(all(feature = "mpi", not(feature = "complex")))]
 fn superlu_dist_matches_serial_tridiagonal() {
     let Some(comm) = mpi_comm() else {
         return;

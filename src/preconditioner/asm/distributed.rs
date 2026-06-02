@@ -949,11 +949,10 @@ impl SubdomainSolver {
                     {
                         Ok(SubdomainSolver::Dense(pc))
                     }
-                    #[cfg(not(all(
-                        feature = "backend-faer",
-                        feature = "legacy-pc-bridge",
-                        not(feature = "complex")
-                    )))]
+                    #[cfg(any(
+                        feature = "complex",
+                        not(all(feature = "backend-faer", feature = "legacy-pc-bridge"))
+                    ))]
                     {
                         let _ = pc;
                         Err(KError::Unsupported(

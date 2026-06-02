@@ -34,7 +34,7 @@ fn no_backend_gmres_pcnone_solves_identity() {
     assert!(stats.final_residual.is_finite());
 }
 
-#[cfg(feature = "backend-nalgebra")]
+#[cfg(all(feature = "backend-nalgebra", not(feature = "complex")))]
 #[test]
 fn nalgebra_preonly_lu_solves() {
     let a = nalgebra::DMatrix::<S>::from_row_slice(
