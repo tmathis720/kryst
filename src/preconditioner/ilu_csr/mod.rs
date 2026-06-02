@@ -1835,13 +1835,37 @@ impl IluCsr {
             let mut xi = std::mem::take(&mut self.c_xi);
             let mut yr = std::mem::take(&mut self.c_yr);
             let mut yi = std::mem::take(&mut self.c_yi);
+            let mut x_perm = std::mem::take(&mut self.tmp);
+            let mut y_perm = std::mem::take(&mut self.tmp2);
+            let mut right_tmp = std::mem::take(&mut self.tmp3);
             let result = (|| {
+                let xr = &mut xr[..n];
+                let xi = &mut xi[..n];
+                let yr = &mut yr[..n];
+                let yi = &mut yi[..n];
+                let x_perm = &mut x_perm[..n];
+                let y_perm = &mut y_perm[..n];
+                let right_tmp = &mut right_tmp[..n];
                 for i in 0..n {
                     xr[i] = x[i].real();
                     xi[i] = x[i].imag();
                 }
-                self.apply_op_scalar_mut(Op::NoTrans, &xr[..n], &mut yr[..n])?;
-                self.apply_op_scalar_mut(Op::NoTrans, &xi[..n], &mut yi[..n])?;
+                self.apply_op_scalar_with_workspace(
+                    Op::NoTrans,
+                    xr,
+                    yr,
+                    x_perm,
+                    y_perm,
+                    right_tmp,
+                )?;
+                self.apply_op_scalar_with_workspace(
+                    Op::NoTrans,
+                    xi,
+                    yi,
+                    x_perm,
+                    y_perm,
+                    right_tmp,
+                )?;
                 for i in 0..n {
                     y[i] = S::from_parts(yr[i], yi[i]);
                 }
@@ -1851,6 +1875,9 @@ impl IluCsr {
             self.c_xi = xi;
             self.c_yr = yr;
             self.c_yi = yi;
+            self.tmp = x_perm;
+            self.tmp2 = y_perm;
+            self.tmp3 = right_tmp;
             result
         }
     }
