@@ -91,6 +91,7 @@ fn ilu_apply_has_no_allocations() {
     assert_eq!(before, after, "apply() performed heap allocations");
 }
 
+#[cfg(not(feature = "complex"))]
 #[test]
 fn ilu_csr_real_apply_mut_has_no_allocations() {
     let _alloc_guard = ALLOC_TEST_LOCK.lock().unwrap();
