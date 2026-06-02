@@ -96,6 +96,7 @@ impl LinOp for ParCsrOp {
 }
 
 impl ParCsrMatrix {
+    #[allow(deprecated)]
     #[deprecated(
         since = "1.1.0",
         note = "Legacy diag/off constructor is compatibility-only; use DistCsrOp::from_local_rows and canonical distributed APIs. Planned removal after 2026-12-31"
@@ -132,6 +133,55 @@ impl ParCsrMatrix {
         self.row_end - self.row_start
     }
 
+    /// Merge legacy diagonal/off-process storage into canonical local rows with
+    /// global column indices.
+    ///
+    /// This adapter centralizes compatibility access to the deprecated
+    /// `ParCsrMatrix` split storage so callers can construct/use `DistCsrOp`
+    /// without touching legacy fields directly.
+    #[allow(deprecated)]
+    pub(crate) fn canonical_local_rows_csr(&self) -> Result<CsrMatrix<S>, KError> {
+        let n_local = self.local_n();
+        let n_global = self.global_m;
+
+        let mut row_ptr = Vec::with_capacity(n_local + 1);
+        let mut col_idx = Vec::new();
+        let mut vals = Vec::new();
+        row_ptr.push(0);
+
+        for i in 0..n_local {
+            let (diag_cols, diag_vals) = self.a_diag.row(i);
+            let (off_cols, off_vals) = self.a_off.row(i);
+            let mut entries = Vec::with_capacity(diag_cols.len() + off_cols.len());
+
+            for (&local_j, &v) in diag_cols.iter().zip(diag_vals.iter()) {
+                let gcol = *self
+                    .colmap_owned
+                    .get(local_j)
+                    .ok_or_else(|| KError::InvalidInput("diag colmap missing entry".into()))?;
+                entries.push((gcol, v));
+            }
+            for (&ghost_j, &v) in off_cols.iter().zip(off_vals.iter()) {
+                let gcol = *self
+                    .colmap_ghost
+                    .get(ghost_j)
+                    .ok_or_else(|| KError::InvalidInput("ghost colmap missing entry".into()))?;
+                entries.push((gcol, v));
+            }
+
+            entries.sort_unstable_by_key(|(c, _)| *c);
+            for (c, v) in entries {
+                col_idx.push(c);
+                vals.push(v);
+            }
+            row_ptr.push(col_idx.len());
+        }
+
+        Ok(CsrMatrix::from_csr(
+            n_local, n_global, row_ptr, col_idx, vals,
+        ))
+    }
+
     /// Canonical distributed operator backing this legacy wrapper.
     pub fn canonical_dist_op(&self) -> Result<&DistCsrOp, KError> {
         if let Some(op) = self.canonical.get() {
@@ -146,6 +196,7 @@ impl ParCsrMatrix {
             .as_ref())
     }
 
+    #[allow(deprecated)]
     #[deprecated(
         since = "1.1.0",
         note = "ParCsr halo internals are legacy compatibility only; prefer canonical_dist_op(). Planned removal after 2026-12-31"
@@ -154,6 +205,7 @@ impl ParCsrMatrix {
         &self.halo
     }
 
+    #[allow(deprecated)]
     #[deprecated(
         since = "1.1.0",
         note = "Legacy diag block access is compatibility-only; prefer canonical_dist_op().local_block_csr(). Planned removal after 2026-12-31"
@@ -162,6 +214,7 @@ impl ParCsrMatrix {
         &self.a_diag
     }
 
+    #[allow(deprecated)]
     #[deprecated(
         since = "1.1.0",
         note = "Legacy off block access is compatibility-only; prefer canonical_dist_op().local_matrix()/layout metadata. Planned removal after 2026-12-31"
@@ -199,10 +252,13 @@ impl ParCsrMatrix {
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
+
     use super::*;
 
     use crate::matrix::sparse::CsrMatrix;
     use crate::parallel::{NoComm, UniverseComm};
+    #[cfg(all(feature = "complex", feature = "mpi"))]
     use std::sync::Arc;
 
     #[test]
