@@ -17,7 +17,8 @@ use crate::matrix::op::CsrOp;
 #[cfg(all(
     feature = "mpi",
     feature = "backend-faer",
-    feature = "legacy-pc-bridge"
+    feature = "legacy-pc-bridge",
+    not(feature = "complex")
 ))]
 use crate::matrix::op::DenseOp;
 use crate::matrix::op::{DistLayout, LinOp, StructureId, ValuesId};
@@ -819,7 +820,11 @@ fn dense_solve_with_diagonal_shift(
 #[cfg(feature = "mpi")]
 enum SubdomainSolver {
     Csr(Box<dyn Preconditioner>),
-    #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+    #[cfg(all(
+        feature = "backend-faer",
+        feature = "legacy-pc-bridge",
+        not(feature = "complex")
+    ))]
     Dense(Box<dyn Preconditioner>),
 }
 
@@ -831,7 +836,11 @@ impl std::fmt::Debug for SubdomainSolver {
                 .debug_struct("SubdomainSolver")
                 .field("backend", &"csr")
                 .finish(),
-            #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+            #[cfg(all(
+                feature = "backend-faer",
+                feature = "legacy-pc-bridge",
+                not(feature = "complex")
+            ))]
             SubdomainSolver::Dense(_) => f
                 .debug_struct("SubdomainSolver")
                 .field("backend", &"dense")
@@ -849,11 +858,18 @@ impl SubdomainSolver {
                 let pc = build_jacobi()?;
                 Ok(match block_solver {
                     AsmBlockSolver::LuDense => {
-                        #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+                        #[cfg(all(
+                            feature = "backend-faer",
+                            feature = "legacy-pc-bridge",
+                            not(feature = "complex")
+                        ))]
                         {
                             SubdomainSolver::Dense(pc)
                         }
-                        #[cfg(not(all(feature = "backend-faer", feature = "legacy-pc-bridge")))]
+                        #[cfg(any(
+                            feature = "complex",
+                            not(all(feature = "backend-faer", feature = "legacy-pc-bridge"))
+                        ))]
                         {
                             SubdomainSolver::Csr(pc)
                         }
@@ -925,11 +941,18 @@ impl SubdomainSolver {
                         None,
                         conditioning,
                     )?;
-                    #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+                    #[cfg(all(
+                        feature = "backend-faer",
+                        feature = "legacy-pc-bridge",
+                        not(feature = "complex")
+                    ))]
                     {
                         Ok(SubdomainSolver::Dense(pc))
                     }
-                    #[cfg(not(all(feature = "backend-faer", feature = "legacy-pc-bridge")))]
+                    #[cfg(any(
+                        feature = "complex",
+                        not(all(feature = "backend-faer", feature = "legacy-pc-bridge"))
+                    ))]
                     {
                         let _ = pc;
                         Err(KError::Unsupported(
@@ -948,7 +971,11 @@ impl SubdomainSolver {
                 let op = CsrOp::new(mat.clone());
                 pc.setup(&op)
             }
-            #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+            #[cfg(all(
+                feature = "backend-faer",
+                feature = "legacy-pc-bridge",
+                not(feature = "complex")
+            ))]
             SubdomainSolver::Dense(pc) => {
                 let dense = mat.to_dense()?;
                 let op = DenseOp::new(Arc::new(dense));
@@ -960,7 +987,11 @@ impl SubdomainSolver {
     fn solve(&self, rhs: &[S], x: &mut [S]) -> Result<(), KError> {
         match self {
             SubdomainSolver::Csr(pc) => pc.apply(PcSide::Left, rhs, x),
-            #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+            #[cfg(all(
+                feature = "backend-faer",
+                feature = "legacy-pc-bridge",
+                not(feature = "complex")
+            ))]
             SubdomainSolver::Dense(pc) => pc.apply(PcSide::Left, rhs, x),
         }
     }
@@ -971,7 +1002,11 @@ impl SubdomainSolver {
                 let op = CsrOp::new(mat.clone());
                 pc.update_numeric(&op)
             }
-            #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+            #[cfg(all(
+                feature = "backend-faer",
+                feature = "legacy-pc-bridge",
+                not(feature = "complex")
+            ))]
             SubdomainSolver::Dense(pc) => {
                 let dense = mat.to_dense()?;
                 let op = DenseOp::new(Arc::new(dense));
@@ -983,7 +1018,11 @@ impl SubdomainSolver {
     fn supports_numeric_update(&self) -> bool {
         match self {
             SubdomainSolver::Csr(pc) => pc.supports_numeric_update(),
-            #[cfg(all(feature = "backend-faer", feature = "legacy-pc-bridge"))]
+            #[cfg(all(
+                feature = "backend-faer",
+                feature = "legacy-pc-bridge",
+                not(feature = "complex")
+            ))]
             SubdomainSolver::Dense(pc) => pc.supports_numeric_update(),
         }
     }

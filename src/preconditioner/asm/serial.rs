@@ -865,7 +865,7 @@ impl AdditiveSchwarz<faer::Mat<f64>, Vec<f64>, f64> {
     }
 }
 
-#[cfg(all(test, feature = "dense-direct"))]
+#[cfg(all(test, feature = "dense-direct", not(feature = "complex")))]
 mod tests {
     use super::*;
     use crate::solver::direct_lu::LuSolver;

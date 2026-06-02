@@ -334,7 +334,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "complex")))]
 mod tests {
     use super::*;
     use crate::matrix::backend;
