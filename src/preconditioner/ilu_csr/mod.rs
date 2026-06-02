@@ -1805,7 +1805,7 @@ impl IluCsr {
             let result = (|| {
                 let w = &mut w[..n];
                 let y_perm = &mut y_perm[..n];
-                self.pipeline_meta.left_perm.apply_vec(x, w);
+                self.pipeline_meta.left_perm.apply_vec_into(x, w);
                 for i in 0..n {
                     let mut s = w[i];
                     for p in self.l_row[i]..self.l_row[i + 1] {
@@ -1823,7 +1823,7 @@ impl IluCsr {
                     }
                     w[i] = s / self.c_u_val[self.u_diag_ix[i]];
                 }
-                self.pipeline_meta.right_perm.apply_vec_t(w, y_perm);
+                self.pipeline_meta.right_perm.apply_vec_t_into(w, y_perm);
                 y.copy_from_slice(y_perm);
                 Ok(())
             })();
