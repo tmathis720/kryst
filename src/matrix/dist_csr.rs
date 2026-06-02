@@ -349,43 +349,8 @@ impl DistCsrOp {
     ///
     /// This merges the diagonal and off-process blocks into a single local CSR
     pub fn from_parcsr(par: &ParCsrMatrix) -> Result<Self, KError> {
-        let n_local = par.local_n();
         let n_global = par.global_m;
-
-        let mut row_ptr = Vec::with_capacity(n_local + 1);
-        let mut col_idx = Vec::new();
-        let mut vals = Vec::new();
-        row_ptr.push(0);
-
-        for i in 0..n_local {
-            let (diag_cols, diag_vals) = par.a_diag.row(i);
-            let (off_cols, off_vals) = par.a_off.row(i);
-            let mut entries = Vec::with_capacity(diag_cols.len() + off_cols.len());
-
-            for (&local_j, &v) in diag_cols.iter().zip(diag_vals.iter()) {
-                let gcol = *par
-                    .colmap_owned
-                    .get(local_j)
-                    .ok_or_else(|| KError::InvalidInput("diag colmap missing entry".into()))?;
-                entries.push((gcol, v));
-            }
-            for (&ghost_j, &v) in off_cols.iter().zip(off_vals.iter()) {
-                let gcol = *par
-                    .colmap_ghost
-                    .get(ghost_j)
-                    .ok_or_else(|| KError::InvalidInput("ghost colmap missing entry".into()))?;
-                entries.push((gcol, v));
-            }
-
-            entries.sort_unstable_by_key(|(c, _)| *c);
-            for (c, v) in entries {
-                col_idx.push(c);
-                vals.push(v);
-            }
-            row_ptr.push(col_idx.len());
-        }
-
-        let local_rows = CsrMatrix::from_csr(n_local, n_global, row_ptr, col_idx, vals);
+        let local_rows = par.canonical_local_rows_csr()?;
         let part_prefix = Self::partition_rows_balanced(n_global, &par.comm);
 
         Self::from_local_rows(
