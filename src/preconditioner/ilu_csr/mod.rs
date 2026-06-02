@@ -1935,7 +1935,7 @@ impl IluCsr {
     }
 
     fn pipeline_apply_left(&self, x: &[Real], y: &mut [Real]) {
-        self.pipeline_meta.left_perm.apply_vec(x, y);
+        self.pipeline_meta.left_perm.apply_vec_into(x, y);
         if let Some(scale) = &self.pipeline_meta.row_scaling {
             for i in 0..y.len() {
                 y[i] /= scale[i];
@@ -1944,7 +1944,7 @@ impl IluCsr {
     }
 
     fn pipeline_apply_right_inverse_with_tmp(&self, x: &[Real], tmp: &mut [Real], y: &mut [Real]) {
-        self.pipeline_meta.right_perm.apply_vec_t(x, tmp);
+        self.pipeline_meta.right_perm.apply_vec_t_into(x, tmp);
         if let Some(scale) = &self.pipeline_meta.col_scaling {
             for i in 0..y.len() {
                 y[i] = tmp[i] / scale[i];
