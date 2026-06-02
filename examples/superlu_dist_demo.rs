@@ -33,27 +33,18 @@ fn main() {
 }
 
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::matrix::sparse::SparseMatrix;
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::parallel::{Comm, UniverseComm};
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::preconditioner::PcSide;
+use kryst::parallel::UniverseComm;
 #[cfg(feature = "superlu_dist")]
 use kryst::solver::SuperLuDistSolver;
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::solver::legacy::LinearSolver;
 #[cfg(feature = "superlu_dist")]
 use kryst::solver::superlu_dist::{
     ColumnPermutation, IterativeRefinement, RefinementConfig, ResidualMethod, RowPermutation,
     SuperLuDistBuilder,
 };
-#[cfg(all(feature = "backend-faer", not(feature = "complex")))]
-use kryst::utils::matrix_market::read_matrix_market;
 
 #[cfg(not(feature = "mpi"))]
 use kryst::parallel::NoComm;
 use std::env;
-use std::time::Instant;
 
 #[cfg(feature = "mpi")]
 use kryst::parallel::MpiComm;
@@ -140,6 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[derive(Debug, Clone)]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[allow(dead_code)]
 struct MatrixInfo {
     name: String,
     matrix_file: String,
@@ -169,6 +161,7 @@ fn parse_flag(args: &[String], flag: &str) -> bool {
 /// Get available matrices for testing
 #[cfg(not(feature = "complex"))]
 #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
+#[allow(dead_code)]
 fn get_available_matrices() -> Vec<MatrixInfo> {
     vec![
         MatrixInfo {

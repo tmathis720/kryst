@@ -132,6 +132,7 @@ struct SelectionDecision {
     primary_solver: String,
     primary_pc: String,
     fallback_ladder: Vec<FallbackStep>,
+    #[allow(dead_code)]
     rationale: Vec<String>,
     contract_checks: Vec<String>,
     expected_iterations: usize,
@@ -680,6 +681,7 @@ fn test_optimal_solver(
     let mut best_iterative_iterations: Option<usize> = None;
     let mut best_iterative_rel_residual: Option<f64> = None;
     let mut attempts = Vec::<AttemptRecord>::new();
+    #[allow(unused_assignments)]
     let mut truth_reference: Option<TruthReference<DirectReferenceComparison>> = None;
     let solve_started = Instant::now();
     let result = ksp.solve(&rhs_vec, &mut solution);
