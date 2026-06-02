@@ -1963,6 +1963,8 @@ impl IluCsr {
                 y.len()
             )));
         }
+        // Immutable apply helper: it cannot borrow the cached scratch buffers, so
+        // this path may allocate temporary vectors for the permutation pipeline.
         let mut x_perm = vec![Real::zero(); self.n];
         let mut y_perm = vec![Real::zero(); self.n];
         let mut right_tmp = vec![Real::zero(); self.n];
@@ -1973,6 +1975,10 @@ impl IluCsr {
         if self.tmp.len() != self.n || self.tmp2.len() != self.n || self.tmp3.len() != self.n {
             self.resize_apply_workspace(self.n);
         }
+        // Mutable apply helper: keep this route on preallocated workspace.  The
+        // `std::mem::take` calls temporarily move out the scratch vectors so
+        // `apply_mut()` can preserve its no-allocation steady-state contract by
+        // routing through `apply_op_scalar_mut()` / `apply_op_scalar_with_workspace()`.
         let mut x_perm = std::mem::take(&mut self.tmp);
         let mut y_perm = std::mem::take(&mut self.tmp2);
         let mut right_tmp = std::mem::take(&mut self.tmp3);
