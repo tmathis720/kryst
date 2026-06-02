@@ -30,12 +30,14 @@ pub(crate) fn unpack_rr_to_scalar_s(rr: [R; 2]) -> S {
 }
 
 #[cfg(not(feature = "complex"))]
+#[allow(dead_code)]
 #[inline]
 pub(crate) fn pack_scalar_s_to_rr(v: S) -> [R; 1] {
     [v.real()]
 }
 
 #[cfg(not(feature = "complex"))]
+#[allow(dead_code)]
 #[inline]
 pub(crate) fn unpack_rr_to_scalar_s(rr: [R; 1]) -> S {
     S::from_real(rr[0])

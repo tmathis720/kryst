@@ -156,7 +156,9 @@ fn halo_slice_mut(buf: &mut [S]) -> &mut [R] {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "complex")]
     use super::*;
+    #[cfg(feature = "complex")]
     use crate::parallel::{NoComm, UniverseComm};
 
     #[cfg(feature = "complex")]

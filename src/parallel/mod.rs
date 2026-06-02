@@ -408,6 +408,7 @@ impl UniverseComm {
             (UniverseComm::Rayon(a), UniverseComm::Rayon(b)) => a.congruent(b),
             #[cfg(not(any(feature = "mpi", feature = "rayon")))]
             (UniverseComm::Serial, UniverseComm::Serial) => true,
+            #[allow(unreachable_patterns)]
             _ => false,
         }
     }

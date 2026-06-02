@@ -330,6 +330,7 @@ fn round_up_to_multiple(value: usize, multiple: usize) -> usize {
     ((value + multiple - 1) / multiple) * multiple
 }
 
+#[allow(dead_code)]
 fn microbench<F: FnMut()>(nsamples: usize, mut f: F) -> f64 {
     if nsamples == 0 {
         f();

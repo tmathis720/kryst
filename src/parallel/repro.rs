@@ -12,6 +12,7 @@ pub fn pack_scalar_s(value: S) -> [R; 2] {
 }
 
 #[cfg(not(feature = "complex"))]
+#[allow(dead_code)]
 #[inline]
 pub fn pack_scalar_s(value: S) -> [R; 1] {
     [value.real()]
@@ -24,6 +25,7 @@ pub fn unpack_scalar_s(parts: [R; 2]) -> S {
 }
 
 #[cfg(not(feature = "complex"))]
+#[allow(dead_code)]
 #[inline]
 pub fn unpack_scalar_s(parts: [R; 1]) -> S {
     S::from_real(parts[0])

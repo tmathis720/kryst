@@ -4031,6 +4031,7 @@ impl AMG {
 
     fn apply_with_hierarchy(
         &self,
+        #[allow(unused_variables)]
         side: PcSide,
         r: &[f64],
         z: &mut [f64],
@@ -4271,6 +4272,7 @@ impl AMG {
                 "AMG superlu_dist apply length mismatch".into(),
             ));
         }
+        #[allow(unused_variables)]
         let t_local = stats.as_ref().map(|_| tic());
         #[cfg(feature = "superlu_dist")]
         {
