@@ -4,7 +4,6 @@ use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::context::pc_context::PcType;
 use kryst::matrix::LinOp;
-use kryst::matrix::op::CsrOp;
 use kryst::matrix::sparse::CsrMatrix;
 use kryst::solver::MonitorAction;
 
@@ -110,8 +109,7 @@ fn gmres_sparse_no_pc_reports_true_residual_in_stats() {
     .map(S::from_real)
     .collect();
 
-    let csr = Arc::new(CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals));
-    let op = Arc::new(CsrOp::new(csr));
+    let op = Arc::new(CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals));
 
     let x_true: Vec<S> = (0..n)
         .map(|i| S::from_real(1.0 + (i as f64) * 0.2))
