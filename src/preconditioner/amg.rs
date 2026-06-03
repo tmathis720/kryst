@@ -2857,6 +2857,41 @@ fn csr_real_from_complex(csr: &CsrMatrix<S>) -> CsrMatrix<f64> {
     )
 }
 
+#[cfg(feature = "complex")]
+fn complex_diagonal_inverse(csr: &CsrMatrix<S>, drop_tol: R) -> Result<Option<Vec<S>>, KError> {
+    if csr.nrows() != csr.ncols() {
+        return Ok(None);
+    }
+    let n = csr.nrows();
+    let mut diag = vec![S::zero(); n];
+    let mut seen = vec![false; n];
+    for i in 0..n {
+        for p in csr.row_ptr()[i]..csr.row_ptr()[i + 1] {
+            let j = csr.col_idx()[p];
+            let v = csr.values()[p];
+            if j == i {
+                diag[i] = v;
+                seen[i] = true;
+            } else if v.abs() > drop_tol {
+                return Ok(None);
+            }
+        }
+    }
+    let mut inv = Vec::with_capacity(n);
+    for i in 0..n {
+        if !seen[i] {
+            return Ok(None);
+        }
+        if diag[i].abs() <= drop_tol {
+            return Err(KError::InvalidInput(format!(
+                "AMG: zero diagonal in complex diagonal fast path at row {i}"
+            )));
+        }
+        inv.push(diag[i].inv());
+    }
+    Ok(Some(inv))
+}
+
 #[cfg(not(feature = "complex"))]
 fn pack_message_u64(message: &str) -> (u64, Vec<u64>) {
     let bytes = message.as_bytes();
@@ -3392,6 +3427,8 @@ impl DistAmgInfo {
 
 pub struct AMG {
     csr: Option<Arc<CsrMatrix<f64>>>,
+    #[cfg(feature = "complex")]
+    complex_diag_inv: Option<Vec<S>>,
     state: AmgState,
     cycle_policy: Box<dyn CyclePolicy + Send + Sync>,
     cfg: AMGConfig,
@@ -3415,6 +3452,8 @@ impl Default for AMG {
         let cfg = AMGConfig::default();
         Self {
             csr: None,
+            #[cfg(feature = "complex")]
+            complex_diag_inv: None,
             state: AmgState::Uninitialized,
             cycle_policy: Self::make_cycle_policy(&cfg),
             cfg,
@@ -6905,7 +6944,17 @@ impl Preconditioner for AMG {
     fn distributed_support(&self) -> crate::preconditioner::PcDistributedSupport {
         if let Some(dist) = &self.dist {
             if dist.comm.size() > 1 {
-                return crate::preconditioner::PcDistributedSupport::Distributed;
+                let supported_route = match self.cfg.dist_coarse_solver_route {
+                    DistCoarseSolverRoute::Root | DistCoarseSolverRoute::SuperLuDist => true,
+                    DistCoarseSolverRoute::Local => false,
+                    DistCoarseSolverRoute::Auto => matches!(
+                        self.cfg.dist_coarse_strategy,
+                        DistCoarseStrategy::RootGather | DistCoarseStrategy::SuperLuDist
+                    ),
+                };
+                if supported_route {
+                    return crate::preconditioner::PcDistributedSupport::Distributed;
+                }
             }
         }
         crate::preconditioner::PcDistributedSupport::LocalOnly
@@ -6991,7 +7040,14 @@ impl Preconditioner for AMG {
         self.cfg.validate()?;
         self.dist = None;
         let csr_complex = csr_from_linop_complex(op, self.cfg.drop_tol)?;
+        self.complex_diag_inv = complex_diagonal_inverse(csr_complex.as_ref(), self.cfg.drop_tol)?;
         let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
+        if self.complex_diag_inv.is_some() {
+            self.csr = Some(csr_real);
+            self.state = AmgState::Uninitialized;
+            self.stats = None;
+            return Ok(());
+        }
         let sid = op.structure_id();
         let vid = op.values_id();
         self.setup_from_csr_real(csr_real, sid, vid)
@@ -7006,6 +7062,17 @@ impl Preconditioner for AMG {
             )));
         }
         let n = r.len();
+        if let Some(diag_inv) = self.complex_diag_inv.as_ref() {
+            if diag_inv.len() != n {
+                return Err(KError::InvalidInput(
+                    "AMG.apply: complex diagonal cache size mismatch".into(),
+                ));
+            }
+            for i in 0..n {
+                z[i] = diag_inv[i] * r[i];
+            }
+            return Ok(());
+        }
         let mut r_re = vec![0.0f64; n];
         let mut r_im = vec![0.0f64; n];
         for (i, &ri) in r.iter().enumerate() {

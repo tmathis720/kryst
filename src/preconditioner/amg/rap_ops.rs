@@ -66,6 +66,53 @@ pub fn rap_symbolic<T: KrystScalar>(
 }
 
 /// Numeric RAP using fixed pattern, writing values into out_vals (nnz = pat.col_idx.len()).
+fn rap_numeric_row<T: KrystScalar + std::ops::AddAssign>(
+    i: usize,
+    pat: &CsrPattern,
+    r: &CsrMatrix<T>,
+    a: &CsrMatrix<T>,
+    p: &CsrMatrix<T>,
+) -> Vec<T> {
+    let rp_r = r.row_ptr();
+    let cj_r = r.col_idx();
+    let vv_r = r.values();
+    let rp_a = a.row_ptr();
+    let cj_a = a.col_idx();
+    let vv_a = a.values();
+    let rp_p = p.row_ptr();
+    let cj_p = p.col_idx();
+    let vv_p = p.values();
+    let row_start = pat.row_ptr[i];
+    let row_end = pat.row_ptr[i + 1];
+    let len = row_end - row_start;
+    let cols = &pat.col_idx[row_start..row_end];
+    let mut vals = vec![T::zero(); len];
+
+    let rs_r = rp_r[i];
+    let re_r = rp_r[i + 1];
+    for rpos in rs_r..re_r {
+        let k = cj_r[rpos];
+        let r_ik = vv_r[rpos];
+        let rs_a = rp_a[k];
+        let re_a = rp_a[k + 1];
+        for apos in rs_a..re_a {
+            let j = cj_a[apos];
+            let a_kj = vv_a[apos];
+            let rs_p = rp_p[j];
+            let re_p = rp_p[j + 1];
+            for ppos in rs_p..re_p {
+                let c = cj_p[ppos];
+                let v = r_ik * a_kj * vv_p[ppos];
+                if let Ok(idx) = cols.binary_search(&c) {
+                    vals[idx] += v;
+                }
+            }
+        }
+    }
+
+    vals
+}
+
 pub fn rap_numeric<T: KrystScalar + std::ops::AddAssign>(
     pat: &CsrPattern,
     r: &CsrMatrix<T>,
@@ -76,56 +123,33 @@ pub fn rap_numeric<T: KrystScalar + std::ops::AddAssign>(
     assert_eq!(out_vals.len(), pat.col_idx.len());
     out_vals.fill(T::zero());
 
-    let rp_r = r.row_ptr();
-    let cj_r = r.col_idx();
-    let vv_r = r.values();
-    let rp_a = a.row_ptr();
-    let cj_a = a.col_idx();
-    let vv_a = a.values();
-    let rp_p = p.row_ptr();
-    let cj_p = p.col_idx();
-    let vv_p = p.values();
     let pr = &pat.row_ptr;
-    let pc = &pat.col_idx;
 
-    // Row-wise accumulation respecting pattern order
-    for i in 0..pat.nrows {
-        let row_start = pr[i];
-        let row_end = pr[i + 1];
-        if row_start == row_end {
-            continue;
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        let rows: Vec<(usize, Vec<T>)> = (0..pat.nrows)
+            .into_par_iter()
+            .map(|i| (i, rap_numeric_row(i, pat, r, a, p)))
+            .collect();
+        for (i, vals) in rows {
+            let row_start = pr[i];
+            let row_end = pr[i + 1];
+            out_vals[row_start..row_end].copy_from_slice(&vals);
         }
+    }
 
-        // scratch map: col -> value (we'll flush in pattern order)
-        // For simplicity and small rows, use Vec lookup
-        let len = row_end - row_start;
-        let cols: Vec<usize> = pc[row_start..row_end].to_vec();
-        let mut vals: Vec<T> = vec![T::zero(); len];
-
-        let rs_r = rp_r[i];
-        let re_r = rp_r[i + 1];
-        for rpos in rs_r..re_r {
-            let k = cj_r[rpos];
-            let r_ik = vv_r[rpos];
-            let rs_a = rp_a[k];
-            let re_a = rp_a[k + 1];
-            for apos in rs_a..re_a {
-                let j = cj_a[apos];
-                let a_kj = vv_a[apos];
-                let rs_p = rp_p[j];
-                let re_p = rp_p[j + 1];
-                for ppos in rs_p..re_p {
-                    let c = cj_p[ppos];
-                    let v = r_ik * a_kj * vv_p[ppos];
-                    // find c in cols (binary search since sorted)
-                    if let Ok(idx) = cols.binary_search(&c) {
-                        vals[idx] += v;
-                    }
-                }
+    #[cfg(not(feature = "rayon"))]
+    {
+        // Row-wise accumulation respecting pattern order
+        for i in 0..pat.nrows {
+            let row_start = pr[i];
+            let row_end = pr[i + 1];
+            if row_start == row_end {
+                continue;
             }
+            let vals = rap_numeric_row(i, pat, r, a, p);
+            out_vals[row_start..row_end].copy_from_slice(&vals);
         }
-
-        // Flush vals into out_vals in the same positions
-        out_vals[row_start..row_end].copy_from_slice(&vals);
     }
 }

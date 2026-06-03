@@ -24,6 +24,29 @@ fn amg_complex_setup_apply_small() {
 }
 
 #[test]
+fn amg_complex_diagonal_uses_complex_inverse() {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 1, 2],
+        vec![0, 1],
+        vec![S::from_parts(2.0, 1.0), S::from_parts(-1.0, 3.0)],
+    );
+    let op = CsrOp::new(Arc::new(csr.clone()));
+    let mut amg = AMG::default();
+    amg.setup(&op).unwrap();
+
+    let rhs = vec![S::from_parts(3.0, -4.0), S::from_parts(2.0, 5.0)];
+    let mut out = vec![S::zero(); rhs.len()];
+    amg.apply(PcSide::Left, &rhs, &mut out).unwrap();
+
+    let expected = vec![S::from_parts(0.4, -2.2), S::from_parts(1.3, -1.1)];
+    for (got, exp) in out.iter().zip(expected.iter()) {
+        assert!((*got - *exp).abs() < 1e-12, "got={got:?}, expected={exp:?}");
+    }
+}
+
+#[test]
 fn amg_complex_transfer_override_plumbing() {
     let csr = CsrMatrix::from_csr(
         2,

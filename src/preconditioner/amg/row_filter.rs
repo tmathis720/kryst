@@ -130,26 +130,66 @@ pub fn apply_filter_to_csr_values_in_place(
     vals: &mut [R],
     mut rf_for_row: impl FnMut(usize) -> RowFilter,
 ) {
-    for i in 0..nrows {
-        let rs = row_ptr[i];
-        let re = row_ptr[i + 1];
-        if rs == re {
-            continue;
-        }
-        let mut cols: Vec<usize> = col_idx[rs..re].to_vec();
-        let mut vs: Vec<R> = vals[rs..re].to_vec();
-        let rf = rf_for_row(i);
-        filter_row_by_truncation(&mut cols, &mut vs, rf);
-        let mut keep_pos = 0usize;
-        for p in rs..re {
-            let c = col_idx[p];
-            while keep_pos < cols.len() && cols[keep_pos] < c {
-                keep_pos += 1;
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
+        let row_filters: Vec<RowFilter> = (0..nrows).map(&mut rf_for_row).collect();
+        let filtered_rows: Vec<(usize, Vec<R>)> = (0..nrows)
+            .into_par_iter()
+            .map(|i| {
+                let rs = row_ptr[i];
+                let re = row_ptr[i + 1];
+                if rs == re {
+                    return (i, Vec::new());
+                }
+                let mut cols: Vec<usize> = col_idx[rs..re].to_vec();
+                let mut vs: Vec<R> = vals[rs..re].to_vec();
+                filter_row_by_truncation(&mut cols, &mut vs, row_filters[i]);
+                let mut out = vec![R::zero(); re - rs];
+                let mut keep_pos = 0usize;
+                for (local, &c) in col_idx[rs..re].iter().enumerate() {
+                    while keep_pos < cols.len() && cols[keep_pos] < c {
+                        keep_pos += 1;
+                    }
+                    if keep_pos < cols.len() && cols[keep_pos] == c {
+                        out[local] = vs[keep_pos];
+                    }
+                }
+                (i, out)
+            })
+            .collect();
+        for (i, out) in filtered_rows {
+            let rs = row_ptr[i];
+            let re = row_ptr[i + 1];
+            if rs != re {
+                vals[rs..re].copy_from_slice(&out);
             }
-            if keep_pos < cols.len() && cols[keep_pos] == c {
-                vals[p] = vs[keep_pos];
-            } else {
-                vals[p] = R::zero();
+        }
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        for i in 0..nrows {
+            let rs = row_ptr[i];
+            let re = row_ptr[i + 1];
+            if rs == re {
+                continue;
+            }
+            let mut cols: Vec<usize> = col_idx[rs..re].to_vec();
+            let mut vs: Vec<R> = vals[rs..re].to_vec();
+            let rf = rf_for_row(i);
+            filter_row_by_truncation(&mut cols, &mut vs, rf);
+            let mut keep_pos = 0usize;
+            for p in rs..re {
+                let c = col_idx[p];
+                while keep_pos < cols.len() && cols[keep_pos] < c {
+                    keep_pos += 1;
+                }
+                if keep_pos < cols.len() && cols[keep_pos] == c {
+                    vals[p] = vs[keep_pos];
+                } else {
+                    vals[p] = R::zero();
+                }
             }
         }
     }
