@@ -105,69 +105,147 @@ pub fn strength_csr<T: KrystScalar<Real = f64>>(
     let cj = a.col_idx();
     let vv = a.values();
 
-    let mut row_ptr = Vec::with_capacity(n + 1);
-    let mut col_idx: Vec<usize> = Vec::with_capacity(a.nnz());
-    row_ptr.push(0);
+    #[cfg(feature = "rayon")]
+    {
+        use rayon::prelude::*;
 
-    if normalize {
-        // |a_ij| / sqrt(|a_ii||a_jj|)
-        let mut diag = vec![0.0f64; n];
-        for i in 0..n {
-            let rs = rp[i];
-            let re = rp[i + 1];
-            let mut aii = 0.0;
-            for p in rs..re {
-                if cj[p] == i {
-                    aii = vv[p].abs();
-                    break;
-                }
-            }
-            diag[i] = aii;
+        let rows: Vec<Vec<usize>> = if normalize {
+            let diag: Vec<f64> = (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let rs = rp[i];
+                    let re = rp[i + 1];
+                    for p in rs..re {
+                        if cj[p] == i {
+                            return vv[p].abs();
+                        }
+                    }
+                    0.0
+                })
+                .collect();
+
+            (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let rs = rp[i];
+                    let re = rp[i + 1];
+                    let mut row = Vec::new();
+                    for p in rs..re {
+                        let j = cj[p];
+                        if j == i {
+                            continue;
+                        }
+                        let denom = (diag[i] * diag[j]).sqrt();
+                        if denom > 0.0 && vv[p].abs() / denom >= theta {
+                            row.push(j);
+                        }
+                    }
+                    row
+                })
+                .collect()
+        } else {
+            (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let rs = rp[i];
+                    let re = rp[i + 1];
+                    let mut max_off = 0.0f64;
+                    for p in rs..re {
+                        let j = cj[p];
+                        if j != i {
+                            max_off = max_off.max(vv[p].abs());
+                        }
+                    }
+                    let thr = theta * max_off;
+                    let mut row = Vec::new();
+                    for p in rs..re {
+                        let j = cj[p];
+                        if j != i && vv[p].abs() >= thr {
+                            row.push(j);
+                        }
+                    }
+                    row
+                })
+                .collect()
+        };
+
+        let nnz: usize = rows.iter().map(Vec::len).sum();
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        let mut col_idx = Vec::with_capacity(nnz);
+        row_ptr.push(0);
+        for row in rows {
+            col_idx.extend_from_slice(&row);
+            row_ptr.push(col_idx.len());
         }
-        for i in 0..n {
-            let rs = rp[i];
-            let re = rp[i + 1];
-            let mut count = 0usize;
-            for p in rs..re {
-                let j = cj[p];
-                if j == i {
-                    continue;
+        return Strength { row_ptr, col_idx };
+    }
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        let mut col_idx: Vec<usize> = Vec::with_capacity(a.nnz());
+        row_ptr.push(0);
+
+        if normalize {
+            // |a_ij| / sqrt(|a_ii||a_jj|)
+            let mut diag = vec![0.0f64; n];
+            for i in 0..n {
+                let rs = rp[i];
+                let re = rp[i + 1];
+                let mut aii = 0.0;
+                for p in rs..re {
+                    if cj[p] == i {
+                        aii = vv[p].abs();
+                        break;
+                    }
                 }
-                let denom = (diag[i] * diag[j]).sqrt();
-                if denom > 0.0 {
-                    let s = vv[p].abs() / denom;
-                    if s >= theta {
+                diag[i] = aii;
+            }
+            for i in 0..n {
+                let rs = rp[i];
+                let re = rp[i + 1];
+                let mut count = 0usize;
+                for p in rs..re {
+                    let j = cj[p];
+                    if j == i {
+                        continue;
+                    }
+                    let denom = (diag[i] * diag[j]).sqrt();
+                    if denom > 0.0 {
+                        let s = vv[p].abs() / denom;
+                        if s >= theta {
+                            col_idx.push(j);
+                            count += 1;
+                        }
+                    }
+                }
+                row_ptr.push(row_ptr.last().unwrap() + count);
+            }
+        } else {
+            // |a_ij| >= theta * max_off_i
+            for i in 0..n {
+                let rs = rp[i];
+                let re = rp[i + 1];
+                let mut max_off = 0.0f64;
+                for p in rs..re {
+                    let j = cj[p];
+                    if j != i {
+                        max_off = max_off.max(vv[p].abs());
+                    }
+                }
+                let thr = theta * max_off;
+                let mut count = 0usize;
+                for p in rs..re {
+                    let j = cj[p];
+                    if j != i && vv[p].abs() >= thr {
                         col_idx.push(j);
                         count += 1;
                     }
                 }
+                row_ptr.push(row_ptr.last().unwrap() + count);
             }
-            row_ptr.push(row_ptr.last().unwrap() + count);
         }
-    } else {
-        // |a_ij| >= theta * max_off_i
-        for i in 0..n {
-            let rs = rp[i];
-            let re = rp[i + 1];
-            let mut max_off = 0.0f64;
-            for p in rs..re {
-                let j = cj[p];
-                if j != i {
-                    max_off = max_off.max(vv[p].abs());
-                }
-            }
-            let thr = theta * max_off;
-            let mut count = 0usize;
-            for p in rs..re {
-                let j = cj[p];
-                if j != i && vv[p].abs() >= thr {
-                    col_idx.push(j);
-                    count += 1;
-                }
-            }
-            row_ptr.push(row_ptr.last().unwrap() + count);
-        }
-    }
 
-    Strength { row_ptr, col_idx }
+        Strength { row_ptr, col_idx }
+    }
 }

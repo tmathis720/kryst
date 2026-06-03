@@ -82,7 +82,7 @@ use prolong::{
     sample_low_modes, smooth_sa_values_only, smooth_sa_values_only_mf, smooth_sa_values_only_multi,
     smooth_tentative_sa_mf, smooth_tentative_sa_multi,
 };
-use rap_ops::{CsrPattern, rap_numeric, rap_symbolic};
+use rap_ops::{CsrPattern, adjoint_csr_with_pos, rap_numeric, rap_symbolic};
 use row_filter::{
     RowFilter, apply_filter_to_csr_values_in_place, compensate_nodal_diag, compensate_scalar_rows,
     restrict_trials,
@@ -3879,6 +3879,13 @@ impl AMG {
             pattern_hash,
         };
         self.csr = Some(Arc::new(fine));
+        if let Some(stats) = self.stats.as_mut() {
+            stats.selected_dist_coarse_route = Some(format!("{selected_route:?}"));
+            stats.dist_route_fallback = dist_route_fallback_order(selected_route, strategy)
+                .into_iter()
+                .map(|route| format!("{route:?}"))
+                .collect();
+        }
         if let Some(profile) = setup_profile
             && profile == "permissive"
             && self.cfg.print_level >= 1
@@ -10095,33 +10102,20 @@ where
 }
 
 fn transpose_csr_with_pos(p: &Pcsr) -> (Vec<usize>, Vec<usize>, Vec<f64>, Vec<usize>) {
-    // Compute transpose pattern and values, and mapping from P entry index -> R entry index
-    let (m, n) = (p.m, p.n);
-    let nnz = p.col_idx.len();
-    let mut r_row_counts = vec![0usize; n + 1];
-    for &cj in &p.col_idx {
-        r_row_counts[cj + 1] += 1;
-    }
-    for i in 0..n {
-        r_row_counts[i + 1] += r_row_counts[i];
-    }
-    let mut r_col_idx = vec![0usize; nnz];
-    let mut r_vals = vec![0.0f64; nnz];
-    let mut r_row_next = r_row_counts.clone();
-    let mut p2r_pos = vec![0usize; nnz];
-    for i in 0..m {
-        let rs = p.row_ptr[i];
-        let re = p.row_ptr[i + 1];
-        for pi in rs..re {
-            let cj = p.col_idx[pi];
-            let dest = r_row_next[cj];
-            r_col_idx[dest] = i;
-            r_vals[dest] = p.vals[pi];
-            p2r_pos[pi] = dest;
-            r_row_next[cj] += 1;
-        }
-    }
-    (r_row_counts, r_col_idx, r_vals, p2r_pos)
+    let p_csr = CsrMatrix::from_csr(
+        p.m,
+        p.n,
+        p.row_ptr.clone(),
+        p.col_idx.clone(),
+        p.vals.clone(),
+    );
+    let (pt, p2r_pos) = adjoint_csr_with_pos(&p_csr);
+    (
+        pt.row_ptr().to_vec(),
+        pt.col_idx().to_vec(),
+        pt.values().to_vec(),
+        p2r_pos,
+    )
 }
 
 #[cfg(all(test, not(feature = "complex")))]

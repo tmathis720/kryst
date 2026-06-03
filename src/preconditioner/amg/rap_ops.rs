@@ -12,6 +12,42 @@ pub struct CsrPattern {
     pub col_idx: Vec<usize>,
 }
 
+/// CSR adjoint transpose (`A^H`) with a forward-entry to transpose-entry map.
+///
+/// For real scalars this is the ordinary transpose. For complex scalars this
+/// conjugates values, matching kryst's transpose SpMV convention.
+pub fn adjoint_csr_with_pos<T: KrystScalar>(a: &CsrMatrix<T>) -> (CsrMatrix<T>, Vec<usize>) {
+    let (m, n) = (a.nrows(), a.ncols());
+    let nnz = a.nnz();
+    let mut row_ptr = vec![0usize; n + 1];
+    for &j in a.col_idx() {
+        row_ptr[j + 1] += 1;
+    }
+    for i in 0..n {
+        row_ptr[i + 1] += row_ptr[i];
+    }
+
+    let mut col_idx = vec![0usize; nnz];
+    let mut values = vec![T::zero(); nnz];
+    let mut next = row_ptr.clone();
+    let mut a2ah_pos = vec![0usize; nnz];
+    for i in 0..m {
+        for p in a.row_ptr()[i]..a.row_ptr()[i + 1] {
+            let j = a.col_idx()[p];
+            let dest = next[j];
+            col_idx[dest] = i;
+            values[dest] = a.values()[p].conj();
+            a2ah_pos[p] = dest;
+            next[j] += 1;
+        }
+    }
+
+    (
+        CsrMatrix::from_csr(n, m, row_ptr, col_idx, values),
+        a2ah_pos,
+    )
+}
+
 /// Symbolic RAP = R * A * P returns the pattern of the coarse operator.
 pub fn rap_symbolic<T: KrystScalar>(
     r: &CsrMatrix<T>,
@@ -63,6 +99,12 @@ pub fn rap_symbolic<T: KrystScalar>(
         row_ptr,
         col_idx,
     }
+}
+
+/// Symbolic Galerkin coarse pattern `P^H A P`.
+pub fn galerkin_symbolic<T: KrystScalar>(a: &CsrMatrix<T>, p: &CsrMatrix<T>) -> CsrPattern {
+    let (r, _) = adjoint_csr_with_pos(p);
+    rap_symbolic(&r, a, p)
 }
 
 /// Numeric RAP using fixed pattern, writing values into out_vals (nnz = pat.col_idx.len()).
@@ -151,5 +193,83 @@ pub fn rap_numeric<T: KrystScalar + std::ops::AddAssign>(
             let vals = rap_numeric_row(i, pat, r, a, p);
             out_vals[row_start..row_end].copy_from_slice(&vals);
         }
+    }
+}
+
+/// Numeric Galerkin coarse values `P^H A P` for the supplied pattern.
+pub fn galerkin_numeric<T: KrystScalar + std::ops::AddAssign>(
+    pat: &CsrPattern,
+    a: &CsrMatrix<T>,
+    p: &CsrMatrix<T>,
+    out_vals: &mut [T],
+) {
+    let (r, _) = adjoint_csr_with_pos(p);
+    rap_numeric(pat, &r, a, p, out_vals);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adjoint_transpose_conjugates_values() {
+        let p = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 3],
+            vec![0, 1, 1],
+            vec![
+                crate::S::from_parts(1.0, 2.0),
+                crate::S::from_parts(3.0, -4.0),
+                crate::S::from_parts(-2.0, 5.0),
+            ],
+        );
+        let (ph, p2ph) = adjoint_csr_with_pos(&p);
+        assert_eq!(ph.row_ptr(), &[0, 1, 3]);
+        assert_eq!(ph.col_idx(), &[0, 0, 1]);
+        assert_eq!(p2ph, vec![0, 1, 2]);
+        assert_eq!(ph.values()[0], crate::S::from_parts(1.0, -2.0));
+        assert_eq!(ph.values()[1], crate::S::from_parts(3.0, 4.0));
+        assert_eq!(ph.values()[2], crate::S::from_parts(-2.0, -5.0));
+    }
+
+    #[test]
+    fn galerkin_numeric_matches_dense_complex_reference() {
+        let a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![
+                crate::S::from_parts(4.0, 0.0),
+                crate::S::from_parts(1.0, 2.0),
+                crate::S::from_parts(1.0, -2.0),
+                crate::S::from_parts(3.0, 0.0),
+            ],
+        );
+        let p = CsrMatrix::from_csr(
+            2,
+            1,
+            vec![0, 1, 2],
+            vec![0, 0],
+            vec![
+                crate::S::from_parts(1.0, 1.0),
+                crate::S::from_parts(2.0, -1.0),
+            ],
+        );
+        let pat = galerkin_symbolic(&a, &p);
+        let mut vals = vec![crate::S::zero(); pat.col_idx.len()];
+        galerkin_numeric(&pat, &a, &p, &mut vals);
+
+        let p0 = p.values()[0];
+        let p1 = p.values()[1];
+        let expected = p0.conj() * a.values()[0] * p0
+            + p0.conj() * a.values()[1] * p1
+            + p1.conj() * a.values()[2] * p0
+            + p1.conj() * a.values()[3] * p1;
+        assert_eq!(pat.row_ptr, vec![0, 1]);
+        assert_eq!(pat.col_idx, vec![0]);
+        assert!((vals[0] - expected).abs() < 1e-12);
+        assert!(vals[0].imag().abs() < 1e-12);
     }
 }
