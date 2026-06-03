@@ -885,7 +885,9 @@ fn dist_route_fallback_order(
             routes.push(route);
         }
     };
-    push_unique(selected);
+    if selected != DistCoarseSolverRoute::Auto {
+        push_unique(selected);
+    }
     match strategy {
         DistCoarseStrategy::RootGather => {
             push_unique(DistCoarseSolverRoute::Root);
@@ -908,6 +910,30 @@ fn dist_route_fallback_order(
         }
     }
     routes
+}
+
+fn dist_route_label(route: DistCoarseSolverRoute, strategy: DistCoarseStrategy) -> &'static str {
+    match route {
+        DistCoarseSolverRoute::Root => "root_gather",
+        DistCoarseSolverRoute::Local => "local_prototype",
+        DistCoarseSolverRoute::SuperLuDist => "superlu_dist",
+        DistCoarseSolverRoute::Auto => match strategy {
+            DistCoarseStrategy::RootGather => "root_gather",
+            DistCoarseStrategy::LocalPrototype => "local_prototype",
+            DistCoarseStrategy::SuperLuDist => "superlu_dist",
+            DistCoarseStrategy::None => "none",
+        },
+    }
+}
+
+fn dist_route_fallback_labels(
+    selected: DistCoarseSolverRoute,
+    strategy: DistCoarseStrategy,
+) -> Vec<String> {
+    dist_route_fallback_order(selected, strategy)
+        .into_iter()
+        .map(|route| dist_route_label(route, strategy).to_string())
+        .collect()
 }
 
 fn amg_dist_route_reports_distributed(
@@ -1203,6 +1229,28 @@ mod config_mapping_tests {
                 DistCoarseSolverRoute::SuperLuDist,
                 DistCoarseSolverRoute::Root,
                 DistCoarseSolverRoute::Local
+            ]
+        );
+    }
+
+    #[test]
+    fn dist_route_fallback_order_omits_auto_placeholder() {
+        let chain =
+            dist_route_fallback_order(DistCoarseSolverRoute::Auto, DistCoarseStrategy::RootGather);
+        assert_eq!(
+            chain,
+            vec![
+                DistCoarseSolverRoute::Root,
+                DistCoarseSolverRoute::Local,
+                DistCoarseSolverRoute::SuperLuDist
+            ]
+        );
+        assert_eq!(
+            dist_route_fallback_labels(DistCoarseSolverRoute::Auto, DistCoarseStrategy::RootGather),
+            vec![
+                "root_gather".to_string(),
+                "local_prototype".to_string(),
+                "superlu_dist".to_string()
             ]
         );
     }
@@ -3915,11 +3963,9 @@ impl AMG {
         };
         self.csr = Some(Arc::new(fine));
         if let Some(stats) = self.stats.as_mut() {
-            stats.selected_dist_coarse_route = Some(format!("{selected_route:?}"));
-            stats.dist_route_fallback = dist_route_fallback_order(selected_route, strategy)
-                .into_iter()
-                .map(|route| format!("{route:?}"))
-                .collect();
+            stats.selected_dist_coarse_route =
+                Some(dist_route_label(selected_route, strategy).to_string());
+            stats.dist_route_fallback = dist_route_fallback_labels(selected_route, strategy);
         }
         if let Some(profile) = setup_profile
             && profile == "permissive"
@@ -4976,15 +5022,17 @@ impl AMG {
                 .iter()
                 .map(|l| l.pre_work_estimate + l.post_work_estimate)
                 .sum();
-            st.selected_dist_coarse_route =
-                Some(format!("{:?}", self.cfg.dist_coarse_solver_route));
-            st.dist_route_fallback = dist_route_fallback_order(
+            st.selected_dist_coarse_route = Some(
+                dist_route_label(
+                    self.cfg.dist_coarse_solver_route,
+                    self.cfg.dist_coarse_strategy,
+                )
+                .to_string(),
+            );
+            st.dist_route_fallback = dist_route_fallback_labels(
                 self.cfg.dist_coarse_solver_route,
                 self.cfg.dist_coarse_strategy,
-            )
-            .into_iter()
-            .map(|r| format!("{:?}", r))
-            .collect();
+            );
             st.diagnostics = diag_stats;
             self.stats = Some(st);
         }
@@ -7067,12 +7115,10 @@ impl Preconditioner for AMG {
 
     fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
         if matches!(self.cfg.coarse_solve, CoarseSolve::ILU) {
-            self.cfg.coarse_solve = if self.cfg.require_spd {
-                CoarseSolve::CG
-            } else {
-                self.cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()] = 0;
-                CoarseSolve::DirectDense
-            };
+            return Err(KError::InvalidInput(
+                "AMG complex setup does not support coarse_solve=ILU yet; use CG for HPD problems or DirectDense for nonsymmetric complex problems"
+                    .into(),
+            ));
         }
         self.cfg.validate()?;
         self.dist = None;
@@ -8055,12 +8101,11 @@ fn build_hierarchy(
             .iter()
             .map(|l| l.pre_work_estimate + l.post_work_estimate)
             .sum();
-        stats.selected_dist_coarse_route = Some(format!("{:?}", cfg.dist_coarse_solver_route));
+        stats.selected_dist_coarse_route = Some(
+            dist_route_label(cfg.dist_coarse_solver_route, cfg.dist_coarse_strategy).to_string(),
+        );
         stats.dist_route_fallback =
-            dist_route_fallback_order(cfg.dist_coarse_solver_route, cfg.dist_coarse_strategy)
-                .into_iter()
-                .map(|r| format!("{:?}", r))
-                .collect();
+            dist_route_fallback_labels(cfg.dist_coarse_solver_route, cfg.dist_coarse_strategy);
         stats.diagnostics = diag_stats;
         let mut setup = SetupTimings::default();
         setup.per_level = timings;
@@ -8210,11 +8255,11 @@ fn build_smoother_only_hierarchy(
             .iter()
             .map(|l| l.pre_work_estimate + l.post_work_estimate)
             .sum();
+        stats.selected_dist_coarse_route = Some(
+            dist_route_label(cfg.dist_coarse_solver_route, cfg.dist_coarse_strategy).to_string(),
+        );
         stats.dist_route_fallback =
-            dist_route_fallback_order(cfg.dist_coarse_solver_route, cfg.dist_coarse_strategy)
-                .into_iter()
-                .map(|r| format!("{:?}", r))
-                .collect();
+            dist_route_fallback_labels(cfg.dist_coarse_solver_route, cfg.dist_coarse_strategy);
         stats.diagnostics = vec![AmgLevelStats {
             p_min_col_norm: 0.0,
             p_cond_sketched: 0.0,

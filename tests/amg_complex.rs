@@ -5,7 +5,7 @@ use std::sync::Arc;
 use kryst::algebra::prelude::*;
 use kryst::matrix::op::CsrOp;
 use kryst::matrix::sparse::CsrMatrix;
-use kryst::preconditioner::amg::AMG;
+use kryst::preconditioner::amg::{AMG, AMGBuilder, CoarseSolve};
 use kryst::preconditioner::{PcSide, Preconditioner};
 
 #[test]
@@ -44,6 +44,35 @@ fn amg_complex_diagonal_uses_complex_inverse() {
     for (got, exp) in out.iter().zip(expected.iter()) {
         assert!((*got - *exp).abs() < 1e-12, "got={got:?}, expected={exp:?}");
     }
+}
+
+#[test]
+fn amg_complex_rejects_coarse_ilu_until_native_hierarchy_support() {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(2.0),
+            S::from_parts(-1.0, 0.25),
+            S::from_parts(-1.0, -0.25),
+            S::from_real(2.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let mut amg = AMGBuilder::new()
+        .coarse_solve(CoarseSolve::ILU)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("amg build");
+
+    let err = amg
+        .setup(&op)
+        .expect_err("complex coarse ILU should be rejected");
+    assert!(
+        err.to_string().contains("coarse_solve=ILU"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

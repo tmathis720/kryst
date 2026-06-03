@@ -78,14 +78,14 @@ fn amg_stats_include_dist_route_and_fallback_chain() {
     let stats = amg.stats().expect("stats");
     assert_eq!(
         stats.selected_dist_coarse_route.as_deref(),
-        Some("SuperLuDist")
+        Some("superlu_dist")
     );
     assert_eq!(
         stats.dist_route_fallback,
         vec![
-            "SuperLuDist".to_string(),
-            "Root".to_string(),
-            "Local".to_string()
+            "superlu_dist".to_string(),
+            "root_gather".to_string(),
+            "local_prototype".to_string()
         ]
     );
 }
