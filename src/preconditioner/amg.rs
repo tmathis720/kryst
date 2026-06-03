@@ -910,6 +910,17 @@ fn dist_route_fallback_order(
     routes
 }
 
+fn amg_dist_route_reports_distributed(
+    route: DistCoarseSolverRoute,
+    strategy: DistCoarseStrategy,
+) -> bool {
+    match route {
+        DistCoarseSolverRoute::SuperLuDist => true,
+        DistCoarseSolverRoute::Auto => matches!(strategy, DistCoarseStrategy::SuperLuDist),
+        DistCoarseSolverRoute::Root | DistCoarseSolverRoute::Local => false,
+    }
+}
+
 fn parse_dist_apply_mode(value: &str) -> Result<DistCoarseStrategy, KError> {
     DistCoarseStrategy::from_str(value)
         .map_err(|_| KError::InvalidInput(format!("invalid amg_dist_apply_mode: {value}")))
@@ -1194,6 +1205,30 @@ mod config_mapping_tests {
                 DistCoarseSolverRoute::Local
             ]
         );
+    }
+
+    #[test]
+    fn dist_route_support_reporting_excludes_fallback_prototypes() {
+        assert!(!amg_dist_route_reports_distributed(
+            DistCoarseSolverRoute::Root,
+            DistCoarseStrategy::RootGather
+        ));
+        assert!(!amg_dist_route_reports_distributed(
+            DistCoarseSolverRoute::Local,
+            DistCoarseStrategy::LocalPrototype
+        ));
+        assert!(!amg_dist_route_reports_distributed(
+            DistCoarseSolverRoute::Auto,
+            DistCoarseStrategy::RootGather
+        ));
+        assert!(amg_dist_route_reports_distributed(
+            DistCoarseSolverRoute::SuperLuDist,
+            DistCoarseStrategy::RootGather
+        ));
+        assert!(amg_dist_route_reports_distributed(
+            DistCoarseSolverRoute::Auto,
+            DistCoarseStrategy::SuperLuDist
+        ));
     }
 }
 
@@ -6950,18 +6985,13 @@ impl Preconditioner for AMG {
 
     fn distributed_support(&self) -> crate::preconditioner::PcDistributedSupport {
         if let Some(dist) = &self.dist {
-            if dist.comm.size() > 1 {
-                let supported_route = match self.cfg.dist_coarse_solver_route {
-                    DistCoarseSolverRoute::Root | DistCoarseSolverRoute::SuperLuDist => true,
-                    DistCoarseSolverRoute::Local => false,
-                    DistCoarseSolverRoute::Auto => matches!(
-                        self.cfg.dist_coarse_strategy,
-                        DistCoarseStrategy::RootGather | DistCoarseStrategy::SuperLuDist
-                    ),
-                };
-                if supported_route {
-                    return crate::preconditioner::PcDistributedSupport::Distributed;
-                }
+            if dist.comm.size() > 1
+                && amg_dist_route_reports_distributed(
+                    self.cfg.dist_coarse_solver_route,
+                    self.cfg.dist_coarse_strategy,
+                )
+            {
+                return crate::preconditioner::PcDistributedSupport::Distributed;
             }
         }
         crate::preconditioner::PcDistributedSupport::LocalOnly
