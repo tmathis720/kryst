@@ -13,12 +13,12 @@ pub(crate) struct NgRowFilter {
     pub lump_diag: bool,
 }
 
-pub(crate) fn non_galerkin_filter_coarse(
+pub(crate) fn non_galerkin_filter_coarse<T: KrystScalar<Real = f64>>(
     pat: &CsrPattern,
-    vals: &[f64],
+    vals: &[T],
     symmetry: NgSymmetry,
     rf: NgRowFilter,
-) -> (CsrPattern, Vec<f64>, Vec<Option<usize>>) {
+) -> (CsrPattern, Vec<T>, Vec<Option<usize>>) {
     let m = pat.nrows;
     let pr = &pat.row_ptr;
     let pc = &pat.col_idx;
@@ -165,7 +165,7 @@ pub(crate) fn non_galerkin_filter_coarse(
     for i in 0..m {
         let rs = pr[i];
         let re = pr[i + 1];
-        let mut diag_add = 0.0;
+        let mut diag_add = T::zero();
         for t in rs..re {
             let j = pc[t];
             if keep[t] {
@@ -173,15 +173,15 @@ pub(crate) fn non_galerkin_filter_coarse(
                 ng_col_idx.push(j);
                 ng_vals.push(vals[t]);
             } else if rf.lump_diag && j != i {
-                diag_add += vals[t];
+                diag_add = diag_add + vals[t];
             }
         }
-        if rf.lump_diag && diag_add != 0.0 {
+        if rf.lump_diag && diag_add != T::zero() {
             // find diagonal position
             let row_start = ng_row_ptr.last().copied().unwrap();
             if let Ok(pos) = ng_col_idx[row_start..].binary_search(&i) {
                 let idx = row_start + pos;
-                ng_vals[idx] += diag_add;
+                ng_vals[idx] = ng_vals[idx] + diag_add;
             } else {
                 // insert diag
                 let pos = match ng_col_idx[row_start..].binary_search(&i) {
@@ -231,5 +231,37 @@ mod tests {
         assert_eq!(ng_pat.col_idx, vec![0, 1, 2, 0, 1, 0, 2]);
         let expected_vals = vec![4.0, -0.1, 0.05, -0.1, 5.02, 0.05, 6.02];
         assert_eq!(ng_vals, expected_vals);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn complex_values_filter_by_magnitude_and_lump_complex_diag() {
+        let pat = CsrPattern {
+            nrows: 2,
+            ncols: 3,
+            row_ptr: vec![0, 3, 4],
+            col_idx: vec![0, 1, 2, 1],
+        };
+        let vals = vec![
+            crate::S::from_parts(4.0, 0.0),
+            crate::S::from_parts(0.01, 0.02),
+            crate::S::from_parts(-2.0, 1.0),
+            crate::S::from_parts(3.0, 0.0),
+        ];
+        let rf = NgRowFilter {
+            tau_abs: 0.1,
+            tau_rel: 0.0,
+            k_max: 0,
+            lump_diag: true,
+        };
+        let (ng_pat, ng_vals, full2ng) =
+            non_galerkin_filter_coarse(&pat, &vals, NgSymmetry::None, rf);
+
+        assert_eq!(ng_pat.row_ptr, vec![0, 2, 3]);
+        assert_eq!(ng_pat.col_idx, vec![0, 2, 1]);
+        assert_eq!(full2ng, vec![Some(0), None, Some(1), Some(2)]);
+        assert_eq!(ng_vals[0], crate::S::from_parts(4.01, 0.02));
+        assert_eq!(ng_vals[1], crate::S::from_parts(-2.0, 1.0));
+        assert_eq!(ng_vals[2], crate::S::from_parts(3.0, 0.0));
     }
 }

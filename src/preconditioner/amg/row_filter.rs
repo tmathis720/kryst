@@ -18,11 +18,15 @@ pub struct RowFilter {
 
 /// In-place filter of a single row according to absolute drop, relative truncation, and cap.
 /// `cols` and `vals` are parallel arrays. Upon return, they are sorted by column index.
-pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<R>, rf: RowFilter) {
+pub fn filter_row_by_truncation<T: KrystScalar<Real = f64>>(
+    cols: &mut Vec<usize>,
+    vals: &mut Vec<T>,
+    rf: RowFilter,
+) {
     debug_assert_eq!(cols.len(), vals.len());
 
     // 1) Absolute drop
-    if rf.tau_abs > R::zero() {
+    if rf.tau_abs > 0.0 {
         let mut w = 0usize;
         for i in 0..cols.len() {
             let keep = vals[i].abs() >= rf.tau_abs || rf.must_keep.is_some_and(|c| c == cols[i]);
@@ -37,15 +41,15 @@ pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<R>, rf: Ro
     }
 
     // 2) Relative truncation
-    if rf.tau_rel > R::zero() && !vals.is_empty() {
+    if rf.tau_rel > 0.0 && !vals.is_empty() {
         // sort indices by ascending |v| with column tiebreaker for determinism
         let mut idx: Vec<usize> = (0..vals.len()).collect();
         idx.sort_unstable_by(|&i, &j| match vals[i].abs().total_cmp(&vals[j].abs()) {
             Ordering::Equal => cols[i].cmp(&cols[j]),
             o => o,
         });
-        let total: R = vals.iter().map(|v| v.abs()).sum();
-        let mut dropped_sum = R::zero();
+        let total: f64 = vals.iter().map(|v| v.abs()).sum();
+        let mut dropped_sum = 0.0f64;
         let mut drop_mask = vec![false; vals.len()];
 
         for &i in &idx {
@@ -114,7 +118,7 @@ pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<R>, rf: Ro
     }
 
     // final sort by column index
-    let mut pairs: Vec<(usize, R)> = cols.iter().cloned().zip(vals.iter().cloned()).collect();
+    let mut pairs: Vec<(usize, T)> = cols.iter().cloned().zip(vals.iter().cloned()).collect();
     pairs.sort_unstable_by_key(|(c, _)| *c);
     for (i, (c, v)) in pairs.into_iter().enumerate() {
         cols[i] = c;
@@ -123,18 +127,18 @@ pub fn filter_row_by_truncation(cols: &mut Vec<usize>, vals: &mut Vec<R>, rf: Ro
 }
 
 /// Apply row-wise filtering to an existing CSR matrix values slice, zeroing dropped entries.
-pub fn apply_filter_to_csr_values_in_place(
+pub fn apply_filter_to_csr_values_in_place<T: KrystScalar<Real = f64>>(
     nrows: usize,
     row_ptr: &[usize],
     col_idx: &[usize],
-    vals: &mut [R],
+    vals: &mut [T],
     mut rf_for_row: impl FnMut(usize) -> RowFilter,
 ) {
     #[cfg(feature = "rayon")]
     {
         use rayon::prelude::*;
         let row_filters: Vec<RowFilter> = (0..nrows).map(&mut rf_for_row).collect();
-        let filtered_rows: Vec<(usize, Vec<R>)> = (0..nrows)
+        let filtered_rows: Vec<(usize, Vec<T>)> = (0..nrows)
             .into_par_iter()
             .map(|i| {
                 let rs = row_ptr[i];
@@ -143,9 +147,9 @@ pub fn apply_filter_to_csr_values_in_place(
                     return (i, Vec::new());
                 }
                 let mut cols: Vec<usize> = col_idx[rs..re].to_vec();
-                let mut vs: Vec<R> = vals[rs..re].to_vec();
+                let mut vs: Vec<T> = vals[rs..re].to_vec();
                 filter_row_by_truncation(&mut cols, &mut vs, row_filters[i]);
-                let mut out = vec![R::zero(); re - rs];
+                let mut out = vec![T::zero(); re - rs];
                 let mut keep_pos = 0usize;
                 for (local, &c) in col_idx[rs..re].iter().enumerate() {
                     while keep_pos < cols.len() && cols[keep_pos] < c {
@@ -176,7 +180,7 @@ pub fn apply_filter_to_csr_values_in_place(
                 continue;
             }
             let mut cols: Vec<usize> = col_idx[rs..re].to_vec();
-            let mut vs: Vec<R> = vals[rs..re].to_vec();
+            let mut vs: Vec<T> = vals[rs..re].to_vec();
             let rf = rf_for_row(i);
             filter_row_by_truncation(&mut cols, &mut vs, rf);
             let mut keep_pos = 0usize;
@@ -188,7 +192,7 @@ pub fn apply_filter_to_csr_values_in_place(
                 if keep_pos < cols.len() && cols[keep_pos] == c {
                     vals[p] = vs[keep_pos];
                 } else {
-                    vals[p] = R::zero();
+                    vals[p] = T::zero();
                 }
             }
         }
@@ -468,5 +472,40 @@ mod tests {
             }
         });
         assert_eq!(vals, vec![10.0, 0.0, 0.0, 3.0, 4.0]);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn complex_filter_uses_magnitude_and_preserves_values() {
+        let mut cols = vec![0, 1, 2];
+        let mut vals = vec![
+            crate::S::from_parts(0.01, 0.02),
+            crate::S::from_parts(2.0, -1.0),
+            crate::S::from_parts(0.2, 0.0),
+        ];
+        let rf = RowFilter {
+            tau_abs: 0.1,
+            tau_rel: 0.0,
+            k_max: 0,
+            must_keep: Some(0),
+        };
+        filter_row_by_truncation(&mut cols, &mut vals, rf);
+
+        assert_eq!(cols, vec![0, 1, 2]);
+        assert_eq!(vals[0], crate::S::from_parts(0.01, 0.02));
+        assert_eq!(vals[1], crate::S::from_parts(2.0, -1.0));
+        assert_eq!(vals[2], crate::S::from_parts(0.2, 0.0));
+
+        let row_ptr = vec![0, 3];
+        let col_idx = vec![0, 1, 2];
+        apply_filter_to_csr_values_in_place(1, &row_ptr, &col_idx, &mut vals, |_| RowFilter {
+            tau_abs: 0.25,
+            tau_rel: 0.0,
+            k_max: 0,
+            must_keep: Some(0),
+        });
+        assert_eq!(vals[0], crate::S::from_parts(0.01, 0.02));
+        assert_eq!(vals[1], crate::S::from_parts(2.0, -1.0));
+        assert_eq!(vals[2], crate::S::zero());
     }
 }
