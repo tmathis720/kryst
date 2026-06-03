@@ -6,7 +6,7 @@ use faer::Mat;
 use fixtures::csr_poisson_1d;
 use kryst::algebra::prelude::*;
 use kryst::assert_s_close;
-use kryst::preconditioner::amg::AMGBuilder;
+use kryst::preconditioner::amg::{AMGBuilder, DistApplyStats};
 use kryst::preconditioner::dist::{DistCoarseSolverRoute, DistCoarseStrategy};
 use kryst::preconditioner::gamg::{Gamg, GamgConfig};
 use kryst::preconditioner::{PcSide, Preconditioner};
@@ -88,6 +88,39 @@ fn amg_stats_include_dist_route_and_fallback_chain() {
             "local_prototype".to_string()
         ]
     );
+}
+
+#[test]
+fn dist_apply_stats_expose_stable_route_labels() {
+    let root = DistApplyStats {
+        mode: DistCoarseStrategy::RootGather,
+        coarse_solver_route: DistCoarseSolverRoute::Root,
+        ..Default::default()
+    };
+    assert_eq!(root.mode_label(), "root_gather");
+    assert_eq!(root.coarse_solver_route_label(), "root_gather");
+    assert!(root.uses_root_gather());
+    assert!(!root.reports_distributed_support());
+
+    let local = DistApplyStats {
+        mode: DistCoarseStrategy::LocalPrototype,
+        coarse_solver_route: DistCoarseSolverRoute::Local,
+        ..Default::default()
+    };
+    assert_eq!(local.mode_label(), "local_prototype");
+    assert_eq!(local.coarse_solver_route_label(), "local_prototype");
+    assert!(!local.uses_root_gather());
+    assert!(!local.reports_distributed_support());
+
+    let superlu = DistApplyStats {
+        mode: DistCoarseStrategy::SuperLuDist,
+        coarse_solver_route: DistCoarseSolverRoute::Auto,
+        ..Default::default()
+    };
+    assert_eq!(superlu.mode_label(), "superlu_dist");
+    assert_eq!(superlu.coarse_solver_route_label(), "superlu_dist");
+    assert!(!superlu.uses_root_gather());
+    assert!(superlu.reports_distributed_support());
 }
 
 #[test]

@@ -926,6 +926,15 @@ fn dist_route_label(route: DistCoarseSolverRoute, strategy: DistCoarseStrategy) 
     }
 }
 
+fn dist_strategy_label(strategy: DistCoarseStrategy) -> &'static str {
+    match strategy {
+        DistCoarseStrategy::RootGather => "root_gather",
+        DistCoarseStrategy::LocalPrototype => "local_prototype",
+        DistCoarseStrategy::SuperLuDist => "superlu_dist",
+        DistCoarseStrategy::None => "none",
+    }
+}
+
 fn dist_route_fallback_labels(
     selected: DistCoarseSolverRoute,
     strategy: DistCoarseStrategy,
@@ -7033,13 +7042,22 @@ impl Preconditioner for AMG {
 
     fn distributed_support(&self) -> crate::preconditioner::PcDistributedSupport {
         if let Some(dist) = &self.dist {
-            if dist.comm.size() > 1
-                && amg_dist_route_reports_distributed(
+            if dist.comm.size() > 1 {
+                if let Ok(rt) = self.runtime.lock()
+                    && let Some(last_dist) = rt.last_dist_apply.as_ref()
+                {
+                    return if last_dist.reports_distributed_support() {
+                        crate::preconditioner::PcDistributedSupport::Distributed
+                    } else {
+                        crate::preconditioner::PcDistributedSupport::LocalOnly
+                    };
+                }
+                if amg_dist_route_reports_distributed(
                     self.cfg.dist_coarse_solver_route,
                     self.cfg.dist_coarse_strategy,
-                )
-            {
-                return crate::preconditioner::PcDistributedSupport::Distributed;
+                ) {
+                    return crate::preconditioner::PcDistributedSupport::Distributed;
+                }
             }
         }
         crate::preconditioner::PcDistributedSupport::LocalOnly
@@ -9877,6 +9895,31 @@ impl Default for DistApplyStats {
             per_level_comm_bytes: Vec::new(),
             reductions: 0,
         }
+    }
+}
+
+impl DistApplyStats {
+    /// User-facing label for the distributed AMG apply/setup route.
+    ///
+    /// These labels are stable diagnostics strings and intentionally differ from
+    /// Rust enum debug names.
+    pub fn mode_label(&self) -> &'static str {
+        dist_strategy_label(self.mode)
+    }
+
+    /// User-facing label for the selected distributed coarse solver route.
+    pub fn coarse_solver_route_label(&self) -> &'static str {
+        dist_route_label(self.coarse_solver_route, self.mode)
+    }
+
+    /// True when the selected route is the non-scalable root gather path.
+    pub fn uses_root_gather(&self) -> bool {
+        matches!(self.mode, DistCoarseStrategy::RootGather)
+    }
+
+    /// True when this resolved route provides native distributed execution.
+    pub fn reports_distributed_support(&self) -> bool {
+        amg_dist_route_reports_distributed(self.coarse_solver_route, self.mode)
     }
 }
 
