@@ -2229,9 +2229,7 @@ fn build_r_from_p(lvl: &mut AMGLevel) -> CsrMatrix<f64> {
     let p2r = &lvl.p2r_pos;
     let pvals = lvl.p.values();
     let rvals = lvl.r_vals_scratch.as_mut().expect("missing R scratch");
-    for (pi, &ri) in p2r.iter().enumerate() {
-        rvals[ri] = pvals[pi];
-    }
+    sync_adjoint_values_from_forward(pvals, p2r, rvals);
     CsrMatrix::from_csr(
         lvl.p.ncols(),
         lvl.p.nrows(),
@@ -2246,6 +2244,22 @@ fn rap_numeric_with_pt(lvl: &mut AMGLevel, out_vals: &mut [f64]) -> Result<(), K
     let pat = lvl.a_next_pat.as_ref().expect("missing pattern").clone();
     rap_numeric(&pat, &r_tmp, &lvl.a, &lvl.p, out_vals);
     Ok(())
+}
+
+fn sync_adjoint_values_from_forward<T: KrystScalar>(
+    forward_values: &[T],
+    forward_to_adjoint_pos: &[usize],
+    adjoint_values: &mut [T],
+) {
+    debug_assert_eq!(
+        forward_values.len(),
+        forward_to_adjoint_pos.len(),
+        "forward/adjoin position length mismatch"
+    );
+    for (pi, &ri) in forward_to_adjoint_pos.iter().enumerate() {
+        debug_assert!(ri < adjoint_values.len(), "adjoint position out of bounds");
+        adjoint_values[ri] = forward_values[pi].conj();
+    }
 }
 
 fn make_trial_matrix(cfg: &AMGConfig, n: usize) -> Result<Option<Mat<f64>>, KError> {
@@ -4785,15 +4799,13 @@ impl AMG {
                 let pvals = h.levels[l].p.values().to_vec();
                 let p2r = h.levels[l].p2r_pos.clone();
                 let rvalsm = h.levels[l].r.values_mut();
-                for (pi, &ri) in p2r.iter().enumerate() {
-                    rvalsm[ri] = pvals[pi];
-                }
+                sync_adjoint_values_from_forward(&pvals, &p2r, rvalsm);
                 if cfg!(debug_assertions) {
                     let step = (pvals.len() / 7).max(1);
                     for s in (0..pvals.len()).step_by(step) {
                         let ri = p2r[s];
-                        let dv = (pvals[s] - rvalsm[ri]).abs();
-                        debug_assert!(dv <= 1e-12, "R != P^T at sample {s}");
+                        let dv = (pvals[s].conj() - rvalsm[ri]).abs();
+                        debug_assert!(dv <= 1e-12, "R != P^H at sample {s}");
                     }
                 }
             }
@@ -11418,7 +11430,7 @@ mod tests {
 mod tests_complex {
     use super::{
         RowScaleMode, csr_pattern_hash, eff_nnz, local_qr, max_row_sum_abs, p_column_norms2,
-        row_scaling,
+        row_scaling, sync_adjoint_values_from_forward,
     };
     use crate::algebra::prelude::*;
     use crate::matrix::sparse::CsrMatrix;
@@ -11549,5 +11561,22 @@ mod tests_complex {
         assert!((max_row_sum_abs(&a) - 7.0).abs() < 1e-12);
         assert_eq!(eff_nnz(&a, 2.0), 2);
         assert_eq!(csr_pattern_hash(&a), csr_pattern_hash(&same_pattern));
+    }
+
+    #[test]
+    fn restriction_value_sync_uses_adjoint_conjugates() {
+        let forward = vec![
+            S::from_parts(1.0, 2.0),
+            S::from_parts(-3.0, 0.5),
+            S::from_parts(0.0, -4.0),
+        ];
+        let p2r = vec![2, 0, 1];
+        let mut adjoint = vec![S::zero(); 3];
+
+        sync_adjoint_values_from_forward(&forward, &p2r, &mut adjoint);
+
+        assert_eq!(adjoint[0], forward[1].conj());
+        assert_eq!(adjoint[1], forward[2].conj());
+        assert_eq!(adjoint[2], forward[0].conj());
     }
 }
