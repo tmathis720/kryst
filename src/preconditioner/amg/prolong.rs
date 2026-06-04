@@ -359,7 +359,7 @@ fn build_cf_info(is_c: &[bool]) -> CFInfo {
 }
 
 /// Helper: get entry a[i,j] via binary search in row i.
-fn csr_get(a: &CsrMatrix<f64>, i: usize, j: usize) -> Option<f64> {
+fn csr_get<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>, i: usize, j: usize) -> Option<T> {
     let rp = a.row_ptr();
     let cj = a.col_idx();
     let vv = a.values();
@@ -473,7 +473,7 @@ pub fn classical_pattern(
 #[allow(non_snake_case)]
 fn neighbor_distribution_over_C_of(
     j: usize,
-    a: &CsrMatrix<f64>,
+    a: &CsrMatrix<impl KrystScalar<Real = f64>>,
     s_sym: &Strength,
     cf: &CFInfo,
     cols: &mut Vec<usize>,
@@ -490,11 +490,12 @@ fn neighbor_distribution_over_C_of(
         if cf.is_c[nbr] {
             let c = cf.coarse_of[nbr].unwrap();
             if let Some(v) = csr_get(a, j, nbr) {
-                tmp.push((c, v));
-                if v < 0.0 {
-                    sum_neg += -v;
+                let vr = v.real();
+                tmp.push((c, vr));
+                if vr < 0.0 {
+                    sum_neg += -vr;
                 } else {
-                    sum_pos += v;
+                    sum_pos += vr;
                 }
             }
         }
@@ -528,7 +529,7 @@ fn neighbor_distribution_over_C_of(
 
 /// Values-only refresh for classical interpolation.
 pub fn classical_values_only<T: KrystScalar<Real = f64>>(
-    a: &CsrMatrix<f64>,
+    a: &CsrMatrix<T>,
     s_sym: &Strength,
     cf: &CFInfo,
     params: &ClassicalParams,
@@ -563,7 +564,7 @@ pub fn classical_values_only<T: KrystScalar<Real = f64>>(
         }
 
         let mut contrib_cols: Vec<usize> = Vec::new();
-        let mut contrib_vals: Vec<f64> = Vec::new();
+        let mut contrib_vals: Vec<T> = Vec::new();
 
         let rs = s_sym.row_ptr[i];
         let re = s_sym.row_ptr[i + 1];
@@ -576,10 +577,11 @@ pub fn classical_values_only<T: KrystScalar<Real = f64>>(
                 && let Some(aij) = csr_get(a, i, j)
             {
                 if params.variant == ClassicalVariant::Direct {
-                    if aij < 0.0 {
-                        sum_neg += -aij;
+                    let aij_real = aij.real();
+                    if aij_real < 0.0 {
+                        sum_neg += -aij_real;
                     } else {
-                        sum_pos += aij;
+                        sum_pos += aij_real;
                     }
                 } else {
                     let col = cf.coarse_of[j].unwrap();
@@ -594,15 +596,20 @@ pub fn classical_values_only<T: KrystScalar<Real = f64>>(
                     && let Some(aij) = csr_get(a, i, j)
                 {
                     let col = cf.coarse_of[j].unwrap();
-                    let w = if aij < 0.0 {
-                        if sum_neg > 0.0 { (-aij) / sum_neg } else { 0.0 }
+                    let aij_real = aij.real();
+                    let w = if aij_real < 0.0 {
+                        if sum_neg > 0.0 {
+                            (-aij_real) / sum_neg
+                        } else {
+                            0.0
+                        }
                     } else if sum_pos > 0.0 {
-                        aij / sum_pos
+                        aij_real / sum_pos
                     } else {
                         0.0
                     };
                     contrib_cols.push(col);
-                    contrib_vals.push(w);
+                    contrib_vals.push(T::from_real(w));
                 }
             }
         }
@@ -619,7 +626,7 @@ pub fn classical_values_only<T: KrystScalar<Real = f64>>(
                     Some(v) => v,
                     None => continue,
                 };
-                if aij == 0.0 {
+                if aij == T::zero() {
                     continue;
                 }
                 neighbor_distribution_over_C_of(j, a, s_sym, cf, &mut buf_cols, &mut buf_wts);
@@ -637,13 +644,13 @@ pub fn classical_values_only<T: KrystScalar<Real = f64>>(
                         }
                     }
                     let denom = ajj.max(rowsum).max(1e-30);
-                    (-aij) / denom
+                    -aij * T::from_real(denom.recip())
                 } else {
                     -aij
                 };
                 for t in 0..buf_cols.len() {
                     contrib_cols.push(buf_cols[t]);
-                    contrib_vals.push(scale * buf_wts[t]);
+                    contrib_vals.push(scale * T::from_real(buf_wts[t]));
                 }
             }
 
@@ -651,13 +658,13 @@ pub fn classical_values_only<T: KrystScalar<Real = f64>>(
             let mut sum_neg_strong = 0.0;
             for &j in &s_sym.col_idx[rs..re] {
                 if let Some(aij) = csr_get(a, i, j)
-                    && aij < 0.0
+                    && aij.real() < 0.0
                 {
-                    sum_neg_strong += -aij;
+                    sum_neg_strong += -aij.real();
                 }
             }
-            let di = csr_get(a, i, i).unwrap_or(1.0);
-            let di_eff = di - sum_neg_strong;
+            let di = csr_get(a, i, i).unwrap_or_else(T::one);
+            let di_eff = di - T::from_real(sum_neg_strong);
             let denom = if di_eff.abs() >= 1e-14 * di.abs().max(1.0) {
                 di_eff
             } else {
@@ -670,12 +677,12 @@ pub fn classical_values_only<T: KrystScalar<Real = f64>>(
                 }
                 if s > 0.0 {
                     for v in &mut contrib_vals {
-                        *v /= s;
+                        *v = *v * T::from_real(s.recip());
                     }
                 }
             } else {
                 for v in &mut contrib_vals {
-                    *v /= denom;
+                    *v = *v / denom;
                 }
             }
         }
@@ -684,15 +691,15 @@ pub fn classical_values_only<T: KrystScalar<Real = f64>>(
             let mut idx: Vec<usize> = (0..contrib_cols.len()).collect();
             idx.sort_unstable_by(|&u, &v| contrib_cols[u].cmp(&contrib_cols[v]));
             let mut last = contrib_cols[idx[0]];
-            let mut acc = 0.0;
+            let mut acc = T::zero();
             let mut cols = Vec::new();
             let mut vals = Vec::new();
             for &id in &idx {
                 let c = contrib_cols[id];
                 if c == last {
-                    acc += contrib_vals[id];
+                    acc = acc + contrib_vals[id];
                 } else {
-                    if acc != 0.0 {
+                    if acc != T::zero() {
                         cols.push(last);
                         vals.push(acc);
                     }
@@ -700,7 +707,7 @@ pub fn classical_values_only<T: KrystScalar<Real = f64>>(
                     acc = contrib_vals[id];
                 }
             }
-            if acc != 0.0 {
+            if acc != T::zero() {
                 cols.push(last);
                 vals.push(acc);
             }
@@ -730,7 +737,7 @@ pub fn classical_values_only<T: KrystScalar<Real = f64>>(
             for k in rs_p..re_p {
                 let c = p_col_idx[k];
                 match cols.binary_search(&c) {
-                    Ok(pos) => out_vals[k] = T::from_real(vals[pos]),
+                    Ok(pos) => out_vals[k] = vals[pos],
                     Err(_) => out_vals[k] = T::zero(),
                 }
             }
@@ -1712,8 +1719,9 @@ mod tests {
         )
         .unwrap();
         let mut complex_vals = vec![S::zero(); p_col_idx.len()];
+        let a_complex = real_csr_as_complex(&a);
         classical_values_only(
-            &a,
+            &a_complex,
             &strength,
             &cf,
             &params,
@@ -1724,6 +1732,53 @@ mod tests {
         .unwrap();
 
         assert_complex_values_match_real(&complex_vals, &real_vals);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn classical_values_only_standard_preserves_complex_coefficients() {
+        let a = CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 1, 4, 6],
+            vec![0, 0, 1, 2, 0, 2],
+            vec![
+                S::from_parts(2.0, 0.0),
+                S::from_parts(-1.0, 1.0),
+                S::from_parts(4.0, 1.0),
+                S::from_parts(-2.0, 3.0),
+                S::from_parts(-1.0, 0.0),
+                S::from_parts(2.0, 0.0),
+            ],
+        );
+        let strength = Strength {
+            row_ptr: vec![0, 0, 2, 3],
+            col_idx: vec![0, 2, 0],
+        };
+        let cf = CFInfo {
+            is_c: vec![true, false, false],
+            coarse_of: vec![Some(0), None, None],
+        };
+        let params = ClassicalParams {
+            variant: ClassicalVariant::Standard,
+            extended: false,
+            drop_abs: 0.0,
+            trunc_rel: 0.0,
+            cap_row: 0,
+            keep_at_least_one: true,
+        };
+        let p_row_ptr = vec![0, 1, 2, 3];
+        let p_col_idx = vec![0, 0, 0];
+        let mut vals = vec![S::zero(); p_col_idx.len()];
+
+        classical_values_only(
+            &a, &strength, &cf, &params, &p_row_ptr, &p_col_idx, &mut vals,
+        )
+        .unwrap();
+
+        assert_eq!(vals[0], S::one());
+        assert!((vals[1] - S::from_parts(-0.5, -3.5)).abs() < 1e-12);
+        assert!((vals[2] - S::one()).abs() < 1e-12);
     }
 
     #[cfg(feature = "complex")]
