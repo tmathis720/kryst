@@ -1366,6 +1366,15 @@ mod tests {
         out
     }
 
+    #[cfg(feature = "complex")]
+    fn assert_complex_values_match_real(got: &[S], expected: &[f64]) {
+        assert_eq!(got.len(), expected.len());
+        for (got, expected) in got.iter().zip(expected.iter()) {
+            assert!((got.real() - expected).abs() < 1e-12);
+            assert!(got.imag().abs() < 1e-12);
+        }
+    }
+
     #[test]
     fn own_aggregate_kept() {
         let a = CsrMatrix::from_csr(
@@ -1602,10 +1611,139 @@ mod tests {
         )
         .unwrap();
 
-        for (got, expected) in complex_vals.iter().zip(real_vals.iter()) {
-            assert!((got.real() - expected).abs() < 1e-12);
-            assert!(got.imag().abs() < 1e-12);
-        }
+        assert_complex_values_match_real(&complex_vals, &real_vals);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn classical_values_only_accepts_complex_output_storage() {
+        let a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![4.0, -1.0, -1.0, 4.0],
+        );
+        let strength = Strength {
+            row_ptr: vec![0, 1, 2],
+            col_idx: vec![1, 0],
+        };
+        let cf = CFInfo {
+            is_c: vec![true, false],
+            coarse_of: vec![Some(0), None],
+        };
+        let params = ClassicalParams {
+            variant: ClassicalVariant::Direct,
+            extended: false,
+            drop_abs: 0.0,
+            trunc_rel: 0.0,
+            cap_row: 0,
+            keep_at_least_one: true,
+        };
+        let p_row_ptr = vec![0, 1, 2];
+        let p_col_idx = vec![0, 0];
+
+        let mut real_vals = vec![0.0; p_col_idx.len()];
+        classical_values_only(
+            &a,
+            &strength,
+            &cf,
+            &params,
+            &p_row_ptr,
+            &p_col_idx,
+            &mut real_vals,
+        )
+        .unwrap();
+        let mut complex_vals = vec![S::zero(); p_col_idx.len()];
+        classical_values_only(
+            &a,
+            &strength,
+            &cf,
+            &params,
+            &p_row_ptr,
+            &p_col_idx,
+            &mut complex_vals,
+        )
+        .unwrap();
+
+        assert_complex_values_match_real(&complex_vals, &real_vals);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn smooth_sa_values_only_multi_accepts_complex_output_storage() {
+        let a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![4.0, -1.0, -1.0, 4.0],
+        );
+        let tp = TentativeP {
+            agg_of: vec![0, 1],
+            n_coarse: 2,
+            num_functions: 2,
+            nns: Some(vec![vec![1.0, 0.0], vec![0.0, 1.0]]),
+            comp_of: None,
+        };
+        let d_inv = diag_inv(&a);
+        let p = smooth_tentative_sa_multi(&a, &d_inv, &tp, 0.5, 0.0, 0, 0.0);
+
+        let mut real_vals = vec![0.0; p.vals.len()];
+        smooth_sa_values_only_multi(&a, &d_inv, &tp, 0.5, &p.row_ptr, &p.col_idx, &mut real_vals)
+            .unwrap();
+        let mut complex_vals = vec![S::zero(); p.vals.len()];
+        smooth_sa_values_only_multi(
+            &a,
+            &d_inv,
+            &tp,
+            0.5,
+            &p.row_ptr,
+            &p.col_idx,
+            &mut complex_vals,
+        )
+        .unwrap();
+
+        assert_complex_values_match_real(&complex_vals, &real_vals);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn smooth_sa_values_only_mf_accepts_complex_output_storage() {
+        let a = CsrMatrix::from_csr(
+            4,
+            4,
+            vec![0, 3, 6, 9, 12],
+            vec![0, 1, 2, 0, 1, 3, 1, 2, 3, 0, 2, 3],
+            vec![
+                4.0, -1.0, 0.5, -1.0, 4.0, -0.5, 0.5, -1.0, 4.0, 0.5, -0.5, 4.0,
+            ],
+        );
+        let tn = TentativeNodal {
+            agg_of: vec![0, 0, 1, 1],
+            n_agg: 2,
+            mfun: 2,
+            row_basis: vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+        };
+        let d_inv = vec![1.0 / 4.0; 4];
+        let p = smooth_tentative_sa_mf(&a, &d_inv, &tn, 0.8, 0.0, 0);
+
+        let mut real_vals = vec![0.0; p.vals.len()];
+        smooth_sa_values_only_mf(&a, &d_inv, &tn, 0.8, &p.row_ptr, &p.col_idx, &mut real_vals)
+            .unwrap();
+        let mut complex_vals = vec![S::zero(); p.vals.len()];
+        smooth_sa_values_only_mf(
+            &a,
+            &d_inv,
+            &tn,
+            0.8,
+            &p.row_ptr,
+            &p.col_idx,
+            &mut complex_vals,
+        )
+        .unwrap();
+
+        assert_complex_values_match_real(&complex_vals, &real_vals);
     }
 
     #[cfg(feature = "complex")]
@@ -1652,9 +1790,6 @@ mod tests {
         )
         .unwrap();
 
-        for (got, expected) in complex_vals.iter().zip(real_vals.iter()) {
-            assert!((got.real() - expected).abs() < 1e-12);
-            assert!(got.imag().abs() < 1e-12);
-        }
+        assert_complex_values_match_real(&complex_vals, &real_vals);
     }
 }
