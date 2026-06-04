@@ -170,10 +170,10 @@ pub fn restrict_samples_to_coarse(
     u_c
 }
 
-pub fn adaptive_fit_values_only(
+pub fn adaptive_fit_values_only<T: KrystScalar<Real = f64>>(
     p_row_ptr: &[usize],
     p_col_idx: &[usize],
-    out_vals: &mut [f64],
+    out_vals: &mut [T],
     tp: &TentativeP,
     u_f: &Mat<f64>,
     u_c: &Mat<f64>,
@@ -213,7 +213,7 @@ pub fn adaptive_fit_values_only(
             continue;
         }
         if m == 1 {
-            out_vals[rs] = 1.0;
+            out_vals[rs] = T::one();
             continue;
         }
         let mut gram = Mat::<f64>::zeros(m, m);
@@ -309,7 +309,7 @@ pub fn adaptive_fit_values_only(
             }
         }
         for (local, idx) in (rs..re).enumerate() {
-            out_vals[idx] = best[local];
+            out_vals[idx] = T::from_real(best[local]);
         }
     }
     Ok(())
@@ -527,14 +527,14 @@ fn neighbor_distribution_over_C_of(
 }
 
 /// Values-only refresh for classical interpolation.
-pub fn classical_values_only(
+pub fn classical_values_only<T: KrystScalar<Real = f64>>(
     a: &CsrMatrix<f64>,
     s_sym: &Strength,
     cf: &CFInfo,
     params: &ClassicalParams,
     p_row_ptr: &[usize],
     p_col_idx: &[usize],
-    out_vals: &mut [f64],
+    out_vals: &mut [T],
 ) -> Result<(), crate::error::KError> {
     let n = a.nrows();
     assert_eq!(p_row_ptr.len(), n + 1);
@@ -549,12 +549,12 @@ pub fn classical_values_only(
         let re_p = p_row_ptr[i + 1];
         if cf.is_c[i] {
             for k in rs_p..re_p {
-                out_vals[k] = 0.0;
+                out_vals[k] = T::zero();
             }
             if let Some(kc) = cf.coarse_of[i] {
                 for k in rs_p..re_p {
                     if p_col_idx[k] == kc {
-                        out_vals[k] = 1.0;
+                        out_vals[k] = T::one();
                         break;
                     }
                 }
@@ -730,16 +730,16 @@ pub fn classical_values_only(
             for k in rs_p..re_p {
                 let c = p_col_idx[k];
                 match cols.binary_search(&c) {
-                    Ok(pos) => out_vals[k] = vals[pos],
-                    Err(_) => out_vals[k] = 0.0,
+                    Ok(pos) => out_vals[k] = T::from_real(vals[pos]),
+                    Err(_) => out_vals[k] = T::zero(),
                 }
             }
         } else {
             for k in rs_p..re_p {
-                out_vals[k] = 0.0;
+                out_vals[k] = T::zero();
             }
             if rs_p < re_p {
-                out_vals[rs_p] = 1.0;
+                out_vals[rs_p] = T::one();
             }
         }
     }
@@ -842,14 +842,14 @@ pub fn smooth_tentative_sa(
 }
 
 /// Values-only refresh for P using fixed pattern in `p`.
-pub fn smooth_sa_values_only(
+pub fn smooth_sa_values_only<T: KrystScalar<Real = f64>>(
     a: &CsrMatrix<f64>,
     d_inv: &[f64],
     tp: &TentativeP,
     omega: f64,
     p_row_ptr: &[usize],
     p_col_idx: &[usize],
-    out_vals: &mut [f64],
+    out_vals: &mut [T],
 ) -> Result<(), crate::error::KError> {
     let m = a.nrows();
     assert_eq!(p_row_ptr.len(), m + 1);
@@ -899,9 +899,9 @@ pub fn smooth_sa_values_only(
             let c = pc[k];
             // find in map
             if let Some(pos) = map_cols.iter().position(|&cc| cc == c) {
-                out_vals[k] = map_vals[pos];
+                out_vals[k] = T::from_real(map_vals[pos]);
             } else {
-                out_vals[k] = 0.0;
+                out_vals[k] = T::zero();
             }
         }
     }
@@ -1132,14 +1132,14 @@ pub fn smooth_tentative_sa_mf(
     }
 }
 
-pub fn smooth_sa_values_only_multi(
+pub fn smooth_sa_values_only_multi<T: KrystScalar<Real = f64>>(
     a: &CsrMatrix<f64>,
     d_inv: &[f64],
     tp: &TentativeP,
     omega: f64,
     p_row_ptr: &[usize],
     p_col_idx: &[usize],
-    out_vals: &mut [f64],
+    out_vals: &mut [T],
 ) -> Result<(), crate::error::KError> {
     let m = a.nrows();
     let r = tp.num_functions;
@@ -1205,23 +1205,23 @@ pub fn smooth_sa_values_only_multi(
         for k in rs_p..re_p {
             let c = pc[k];
             if let Some(pos) = map_cols.iter().position(|&cc| cc == c) {
-                out_vals[k] = map_vals[pos];
+                out_vals[k] = T::from_real(map_vals[pos]);
             } else {
-                out_vals[k] = 0.0;
+                out_vals[k] = T::zero();
             }
         }
     }
     Ok(())
 }
 
-pub fn smooth_sa_values_only_mf(
+pub fn smooth_sa_values_only_mf<T: KrystScalar<Real = f64>>(
     a: &CsrMatrix<f64>,
     d_inv: &[f64],
     tn: &TentativeNodal,
     omega: f64,
     p_row_ptr: &[usize],
     p_col_idx: &[usize],
-    out_vals: &mut [f64],
+    out_vals: &mut [T],
 ) -> Result<(), KError> {
     let n = a.nrows();
     let mfun = tn.mfun;
@@ -1279,7 +1279,7 @@ pub fn smooth_sa_values_only_mf(
                 }
             }
             value += -omega * di * sum;
-            out_vals[k] = value;
+            out_vals[k] = T::from_real(value);
         }
     }
 
@@ -1556,6 +1556,105 @@ mod tests {
         assert_eq!(refreshed.len(), p.vals.len());
         for (a, b) in refreshed.iter().zip(p.vals.iter()) {
             assert!((a - b).abs() < 1e-12);
+        }
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn values_only_refresh_accepts_complex_output_storage() {
+        let a = CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 2, 5, 7],
+            vec![0, 1, 0, 1, 2, 1, 2],
+            vec![4.0, -1.0, -1.0, 4.0, -0.5, -0.5, 3.0],
+        );
+        let tp = TentativeP {
+            agg_of: vec![0, 0, 1],
+            n_coarse: 2,
+            num_functions: 1,
+            nns: None,
+            comp_of: None,
+        };
+        let d_inv = diag_inv(&a);
+        let p = smooth_tentative_sa(&a, &d_inv, &tp, 0.75, 0.0, 0, 0.0);
+
+        let mut real_vals = vec![0.0; p.vals.len()];
+        smooth_sa_values_only(
+            &a,
+            &d_inv,
+            &tp,
+            0.75,
+            &p.row_ptr,
+            &p.col_idx,
+            &mut real_vals,
+        )
+        .unwrap();
+        let mut complex_vals = vec![S::zero(); p.vals.len()];
+        smooth_sa_values_only(
+            &a,
+            &d_inv,
+            &tp,
+            0.75,
+            &p.row_ptr,
+            &p.col_idx,
+            &mut complex_vals,
+        )
+        .unwrap();
+
+        for (got, expected) in complex_vals.iter().zip(real_vals.iter()) {
+            assert!((got.real() - expected).abs() < 1e-12);
+            assert!(got.imag().abs() < 1e-12);
+        }
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn adaptive_fit_accepts_complex_output_storage() {
+        let a = hetero_poisson_1d(6);
+        let tp = TentativeP {
+            agg_of: (0..6).map(|i| i / 2).collect(),
+            n_coarse: 3,
+            num_functions: 1,
+            nns: None,
+            comp_of: None,
+        };
+        let d_inv = diag_inv(&a);
+        let p_csr = smooth_tentative_sa_multi(&a, &d_inv, &tp, 2.0 / 3.0, 0.0, 0, 0.0);
+        let u_f = sample_low_modes(&a, &d_inv, 3, 2, 2.0 / 3.0, 0x4567).unwrap();
+        let u_c = restrict_samples_to_coarse(&a, &tp, &u_f, AdaptiveWeight::Diag);
+
+        let mut real_vals = p_csr.vals.clone();
+        adaptive_fit_values_only(
+            &p_csr.row_ptr,
+            &p_csr.col_idx,
+            &mut real_vals,
+            &tp,
+            &u_f,
+            &u_c,
+            1e-10,
+            true,
+            0.0,
+        )
+        .unwrap();
+
+        let mut complex_vals: Vec<S> = p_csr.vals.iter().map(|&v| S::from_real(v)).collect();
+        adaptive_fit_values_only(
+            &p_csr.row_ptr,
+            &p_csr.col_idx,
+            &mut complex_vals,
+            &tp,
+            &u_f,
+            &u_c,
+            1e-10,
+            true,
+            0.0,
+        )
+        .unwrap();
+
+        for (got, expected) in complex_vals.iter().zip(real_vals.iter()) {
+            assert!((got.real() - expected).abs() < 1e-12);
+            assert!(got.imag().abs() < 1e-12);
         }
     }
 }
