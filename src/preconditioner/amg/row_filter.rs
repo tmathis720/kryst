@@ -260,9 +260,9 @@ where
     Ok(())
 }
 
-pub fn compensate_nodal_diag(
-    a: &mut CsrMatrix<f64>,
-    trials: MatRef<'_, f64>,
+pub fn compensate_nodal_diag<T: KrystScalar<Real = f64>>(
+    a: &mut CsrMatrix<T>,
+    trials: MatRef<'_, T>,
     block_size: usize,
     omega: f64,
     min_diag: Option<f64>,
@@ -284,8 +284,6 @@ pub fn compensate_nodal_diag(
             "nodal compensation requires matrix rows divisible by block size".into(),
         ));
     }
-    let mut at = faer::Mat::<f64>::zeros(n, trials.ncols());
-    csr_spmm_dense(a, trials, at.as_mut())?;
     let nodes = n / block_size;
     let eps = 1e-12;
 
@@ -306,44 +304,48 @@ pub fn compensate_nodal_diag(
         if !active {
             continue;
         }
-        let mut gram = faer::Mat::<f64>::zeros(block_size, block_size);
-        let mut rhs = faer::Mat::<f64>::zeros(block_size, block_size);
+        let mut gram = vec![T::zero(); block_size * block_size];
+        let mut rhs_diag = vec![T::zero(); block_size];
         for p in 0..block_size {
             for q in 0..block_size {
-                let mut g = 0.0;
-                let mut f = 0.0;
+                let mut g = T::zero();
                 for alpha in 0..trials.ncols() {
                     let tp = trials[(row_start + p, alpha)];
                     let tq = trials[(row_start + q, alpha)];
-                    g += tp * tq;
-                    f += at[(row_start + p, alpha)] * tq;
+                    g = g + tp.conj() * tq;
                 }
                 if p == q {
-                    g += eps;
+                    g = g + T::from_real(eps);
                 }
-                gram[(p, q)] = g;
-                rhs[(p, q)] = f;
+                gram[p * block_size + q] = g;
             }
         }
-        let inv = invert_small_matrix(&gram)?;
-        let mut diag_updates = vec![0.0; block_size];
-        let mut rhs_diag = vec![0.0; block_size];
         for q in 0..block_size {
-            rhs_diag[q] = rhs[(q, q)];
+            let row = row_start + q;
+            let (cols, vals) = a.row(row);
+            for alpha in 0..trials.ncols() {
+                let mut at = T::zero();
+                for (&j, &v) in cols.iter().zip(vals.iter()) {
+                    at = at + v * trials[(j, alpha)];
+                }
+                rhs_diag[q] = rhs_diag[q] + trials[(row, alpha)].conj() * at;
+            }
         }
+        let inv = invert_small_matrix_generic(&gram, block_size)?;
+        let mut diag_updates = vec![T::zero(); block_size];
         for q in 0..block_size {
-            let mut sum = 0.0;
+            let mut sum = T::zero();
             for k in 0..block_size {
-                sum += inv[q * block_size + k] * rhs_diag[k];
+                sum = sum + inv[q * block_size + k] * rhs_diag[k];
             }
-            diag_updates[q] = omega * sum;
+            diag_updates[q] = T::from_real(omega) * sum;
         }
         for q in 0..block_size {
             let row = row_start + q;
             if let Some(diag) = a.diag_mut(row) {
                 let new_val = *diag - diag_updates[q];
                 if let Some(min_allowed) = min_diag
-                    && new_val <= min_allowed
+                    && new_val.real() <= min_allowed
                 {
                     continue;
                 }
@@ -417,6 +419,71 @@ fn invert_small_matrix(mat: &faer::Mat<f64>) -> Result<Vec<f64>, KError> {
     Ok(inv)
 }
 
+fn invert_small_matrix_generic<T: KrystScalar<Real = f64>>(
+    mat: &[T],
+    n: usize,
+) -> Result<Vec<T>, KError> {
+    if mat.len() != n * n {
+        return Err(KError::InvalidInput(
+            "trial compensation Gram matrix dimension mismatch".into(),
+        ));
+    }
+    let width = 2 * n;
+    let mut aug = vec![T::zero(); n * width];
+    for i in 0..n {
+        for j in 0..n {
+            aug[i * width + j] = mat[i * n + j];
+        }
+        for j in 0..n {
+            aug[i * width + n + j] = if i == j { T::one() } else { T::zero() };
+        }
+    }
+    for col in 0..n {
+        let mut pivot = col;
+        let mut max_val = aug[col * width + col].abs();
+        for row in (col + 1)..n {
+            let val = aug[row * width + col].abs();
+            if val > max_val {
+                max_val = val;
+                pivot = row;
+            }
+        }
+        if max_val <= 1e-18 {
+            return Err(KError::InvalidInput(
+                "trial compensation encountered singular Gram matrix".into(),
+            ));
+        }
+        if pivot != col {
+            for j in 0..width {
+                aug.swap(col * width + j, pivot * width + j);
+            }
+        }
+        let piv = aug[col * width + col];
+        for j in 0..width {
+            aug[col * width + j] = aug[col * width + j] / piv;
+        }
+        for row in 0..n {
+            if row == col {
+                continue;
+            }
+            let factor = aug[row * width + col];
+            if factor == T::zero() {
+                continue;
+            }
+            for j in 0..width {
+                aug[row * width + j] = aug[row * width + j] - factor * aug[col * width + j];
+            }
+        }
+    }
+    let mut inv = vec![T::zero(); n * n];
+    for i in 0..n {
+        for j in 0..n {
+            inv[i * n + j] = aug[i * width + n + j];
+        }
+    }
+    Ok(inv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,6 +547,27 @@ mod tests {
         assert_eq!(vals, vec![10.0, 0.0, 0.0, 3.0, 4.0]);
     }
 
+    #[test]
+    fn nodal_trial_compensation_updates_real_block_diagonal() {
+        let mut a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![4.0, 1.0, 1.0, 3.0],
+        );
+        let mut trials = faer::Mat::<f64>::zeros(2, 2);
+        trials[(0, 0)] = 1.0;
+        trials[(1, 1)] = 1.0;
+
+        compensate_nodal_diag(&mut a, trials.as_ref(), 2, 0.5, None).unwrap();
+
+        assert!((a.values()[0] - 2.0).abs() < 1e-10);
+        assert_eq!(a.values()[1], 1.0);
+        assert_eq!(a.values()[2], 1.0);
+        assert!((a.values()[3] - 1.5).abs() < 1e-10);
+    }
+
     #[cfg(feature = "complex")]
     #[test]
     fn complex_filter_uses_magnitude_and_preserves_values() {
@@ -513,6 +601,33 @@ mod tests {
         assert_eq!(vals[0], crate::S::from_parts(0.01, 0.02));
         assert_eq!(vals[1], crate::S::from_parts(2.0, -1.0));
         assert_eq!(vals[2], crate::S::zero());
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn nodal_trial_compensation_preserves_complex_block_diagonal_updates() {
+        let mut a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![
+                crate::S::from_parts(4.0, 1.0),
+                crate::S::from_parts(1.0, 1.0),
+                crate::S::from_parts(1.0, -1.0),
+                crate::S::from_parts(3.0, -2.0),
+            ],
+        );
+        let mut trials = faer::Mat::<crate::S>::zeros(2, 2);
+        trials[(0, 0)] = crate::S::one();
+        trials[(1, 1)] = crate::S::one();
+
+        compensate_nodal_diag(&mut a, trials.as_ref(), 2, 0.5, None).unwrap();
+
+        assert!((a.values()[0] - crate::S::from_parts(2.0, 0.5)).abs() < 1e-10);
+        assert_eq!(a.values()[1], crate::S::from_parts(1.0, 1.0));
+        assert_eq!(a.values()[2], crate::S::from_parts(1.0, -1.0));
+        assert!((a.values()[3] - crate::S::from_parts(1.5, -1.0)).abs() < 1e-10);
     }
 
     #[cfg(feature = "complex")]
