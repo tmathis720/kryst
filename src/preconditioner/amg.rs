@@ -2588,8 +2588,8 @@ enum RankFixOutcome {
     Unfixed,
 }
 
-fn p_column_norms2(p: &CsrMatrix<f64>) -> Vec<R> {
-    let mut n2 = vec![R::default(); p.ncols()];
+fn p_column_norms2<T: KrystScalar<Real = f64>>(p: &CsrMatrix<T>) -> Vec<f64> {
+    let mut n2 = vec![0.0; p.ncols()];
     let rp = p.row_ptr();
     let cj = p.col_idx();
     let vv = p.values();
@@ -2597,7 +2597,7 @@ fn p_column_norms2(p: &CsrMatrix<f64>) -> Vec<R> {
         let (rs, re) = (rp[i], rp[i + 1]);
         for k in rs..re {
             let j = cj[k];
-            n2[j] += vv[k] * vv[k];
+            n2[j] += vv[k].abs2();
         }
     }
     n2
@@ -2883,7 +2883,7 @@ fn galerkin_sample_check(
     Ok((worst <= tol, worst))
 }
 
-fn csr_pattern_hash(a: &CsrMatrix<f64>) -> u64 {
+fn csr_pattern_hash<T: KrystScalar>(a: &CsrMatrix<T>) -> u64 {
     let mut hasher = DefaultHasher::new();
     a.row_ptr().hash(&mut hasher);
     a.col_idx().hash(&mut hasher);
@@ -3426,7 +3426,7 @@ fn build_amg_halo_plan(
 }
 
 #[cfg(debug_assertions)]
-fn debug_check_csr(a: &CsrMatrix<f64>, name: &str) {
+fn debug_check_csr<T: KrystScalar>(a: &CsrMatrix<T>, name: &str) {
     let row_ptr = a.row_ptr();
     let nrows = a.nrows();
     let nnz = a.nnz();
@@ -3488,10 +3488,9 @@ fn debug_check_csr(a: &CsrMatrix<f64>, name: &str) {
             let val = vals[idx];
             debug_assert!(
                 val.is_finite(),
-                "{name}: non-finite value at row {} (idx {}): {}",
+                "{name}: non-finite value at row {} (idx {})",
                 row,
-                idx,
-                val
+                idx
             );
         }
     }
@@ -10196,7 +10195,7 @@ fn toc(t0: Instant) -> Duration {
     t0.elapsed()
 }
 
-fn max_row_sum_abs(a: &CsrMatrix<f64>) -> f64 {
+fn max_row_sum_abs<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>) -> f64 {
     let n = a.nrows();
     let rp = a.row_ptr();
     let vv = a.values();
@@ -10229,7 +10228,7 @@ fn max_row_sum_abs(a: &CsrMatrix<f64>) -> f64 {
     }
 }
 
-fn eff_nnz(a: &CsrMatrix<f64>, eps: f64) -> usize {
+fn eff_nnz<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>, eps: f64) -> usize {
     if eps <= 0.0 {
         return a.nnz();
     }
@@ -11417,7 +11416,10 @@ mod tests {
 
 #[cfg(all(test, feature = "complex"))]
 mod tests_complex {
-    use super::{RowScaleMode, local_qr, row_scaling};
+    use super::{
+        RowScaleMode, csr_pattern_hash, eff_nnz, local_qr, max_row_sum_abs, p_column_norms2,
+        row_scaling,
+    };
     use crate::algebra::prelude::*;
     use crate::matrix::sparse::CsrMatrix;
     use crate::preconditioner::approxinv_csr::{ApproxInvBuilder, ApproxInvKind};
@@ -11512,5 +11514,40 @@ mod tests_complex {
         );
         assert!((n0 - 1.0).abs() < 1e-12);
         assert!((n1 - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn csr_diagnostics_use_complex_magnitudes_and_pattern_only_hash() {
+        let a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![
+                S::from_parts(3.0, 4.0),
+                S::from_parts(0.0, 2.0),
+                S::from_parts(0.0, -1.0),
+                S::from_parts(1.0, 1.0),
+            ],
+        );
+        let same_pattern = CsrMatrix::from_csr(
+            2,
+            2,
+            a.row_ptr().to_vec(),
+            a.col_idx().to_vec(),
+            vec![
+                S::from_parts(10.0, -2.0),
+                S::from_parts(0.0, 0.25),
+                S::from_parts(7.0, 0.0),
+                S::from_parts(-1.0, -3.0),
+            ],
+        );
+
+        let col_norms = p_column_norms2(&a);
+        assert!((col_norms[0] - 26.0).abs() < 1e-12);
+        assert!((col_norms[1] - 6.0).abs() < 1e-12);
+        assert!((max_row_sum_abs(&a) - 7.0).abs() < 1e-12);
+        assert_eq!(eff_nnz(&a, 2.0), 2);
+        assert_eq!(csr_pattern_hash(&a), csr_pattern_hash(&same_pattern));
     }
 }
