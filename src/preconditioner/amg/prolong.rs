@@ -843,8 +843,8 @@ pub fn smooth_tentative_sa(
 
 /// Values-only refresh for P using fixed pattern in `p`.
 pub fn smooth_sa_values_only<T: KrystScalar<Real = f64>>(
-    a: &CsrMatrix<f64>,
-    d_inv: &[f64],
+    a: &CsrMatrix<T>,
+    d_inv: &[T],
     tp: &TentativeP,
     omega: f64,
     p_row_ptr: &[usize],
@@ -861,7 +861,8 @@ pub fn smooth_sa_values_only<T: KrystScalar<Real = f64>>(
 
     // row-local accumulator of values by coarse column
     let mut map_cols: Vec<usize> = Vec::new();
-    let mut map_vals: Vec<f64> = Vec::new();
+    let mut map_vals: Vec<T> = Vec::new();
+    let minus_omega = T::from_real(-omega);
 
     for i in 0..m {
         map_cols.clear();
@@ -869,7 +870,7 @@ pub fn smooth_sa_values_only<T: KrystScalar<Real = f64>>(
         // Start with 1 at own aggregate
         let myc = tp.agg_of[i];
         map_cols.push(myc);
-        map_vals.push(1.0);
+        map_vals.push(T::one());
         // Add neighbors contributions
         let di = d_inv[i];
         let rs = rp[i];
@@ -880,11 +881,11 @@ pub fn smooth_sa_values_only<T: KrystScalar<Real = f64>>(
                 continue;
             }
             let cjg = tp.agg_of[j];
-            let val = -omega * di * vv[pidx];
+            let val = minus_omega * di * vv[pidx];
             // find or insert
             match map_cols.iter().position(|&c| c == cjg) {
                 Some(pos) => {
-                    map_vals[pos] += val;
+                    map_vals[pos] = map_vals[pos] + val;
                 }
                 None => {
                     map_cols.push(cjg);
@@ -899,7 +900,7 @@ pub fn smooth_sa_values_only<T: KrystScalar<Real = f64>>(
             let c = pc[k];
             // find in map
             if let Some(pos) = map_cols.iter().position(|&cc| cc == c) {
-                out_vals[k] = T::from_real(map_vals[pos]);
+                out_vals[k] = map_vals[pos];
             } else {
                 out_vals[k] = T::zero();
             }
@@ -1133,8 +1134,8 @@ pub fn smooth_tentative_sa_mf(
 }
 
 pub fn smooth_sa_values_only_multi<T: KrystScalar<Real = f64>>(
-    a: &CsrMatrix<f64>,
-    d_inv: &[f64],
+    a: &CsrMatrix<T>,
+    d_inv: &[T],
     tp: &TentativeP,
     omega: f64,
     p_row_ptr: &[usize],
@@ -1150,7 +1151,8 @@ pub fn smooth_sa_values_only_multi<T: KrystScalar<Real = f64>>(
     let pr = p_row_ptr;
     let pc = p_col_idx;
     let mut map_cols: Vec<usize> = Vec::new();
-    let mut map_vals: Vec<f64> = Vec::new();
+    let mut map_vals: Vec<T> = Vec::new();
+    let minus_omega = T::from_real(-omega);
     for i in 0..m {
         map_cols.clear();
         map_vals.clear();
@@ -1166,7 +1168,7 @@ pub fn smooth_sa_values_only_multi<T: KrystScalar<Real = f64>>(
             } else {
                 0.0
             };
-            map_vals.push(v0);
+            map_vals.push(T::from_real(v0));
         }
         let di = d_inv[i];
         let rs = rp[i];
@@ -1177,7 +1179,7 @@ pub fn smooth_sa_values_only_multi<T: KrystScalar<Real = f64>>(
                 continue;
             }
             let gj = tp.agg_of[j] * r;
-            let s = -omega * di * vv[pidx];
+            let s = minus_omega * di * vv[pidx];
             for alpha in 0..r {
                 let t = if let Some(ref nns) = tp.nns {
                     nns[alpha][j]
@@ -1188,10 +1190,11 @@ pub fn smooth_sa_values_only_multi<T: KrystScalar<Real = f64>>(
                 } else {
                     0.0
                 };
+                let t = T::from_real(t);
                 let col = gj + alpha;
                 match map_cols.iter().position(|&c| c == col) {
                     Some(pos) => {
-                        map_vals[pos] += s * t;
+                        map_vals[pos] = map_vals[pos] + s * t;
                     }
                     None => {
                         map_cols.push(col);
@@ -1205,7 +1208,7 @@ pub fn smooth_sa_values_only_multi<T: KrystScalar<Real = f64>>(
         for k in rs_p..re_p {
             let c = pc[k];
             if let Some(pos) = map_cols.iter().position(|&cc| cc == c) {
-                out_vals[k] = T::from_real(map_vals[pos]);
+                out_vals[k] = map_vals[pos];
             } else {
                 out_vals[k] = T::zero();
             }
@@ -1215,8 +1218,8 @@ pub fn smooth_sa_values_only_multi<T: KrystScalar<Real = f64>>(
 }
 
 pub fn smooth_sa_values_only_mf<T: KrystScalar<Real = f64>>(
-    a: &CsrMatrix<f64>,
-    d_inv: &[f64],
+    a: &CsrMatrix<T>,
+    d_inv: &[T],
     tn: &TentativeNodal,
     omega: f64,
     p_row_ptr: &[usize],
@@ -1254,6 +1257,7 @@ pub fn smooth_sa_values_only_mf<T: KrystScalar<Real = f64>>(
     let rp = a.row_ptr();
     let cj = a.col_idx();
     let vv = a.values();
+    let minus_omega = T::from_real(-omega);
 
     for i in 0..n {
         let gi = tn.agg_of[i];
@@ -1267,19 +1271,19 @@ pub fn smooth_sa_values_only_mf<T: KrystScalar<Real = f64>>(
             let g_col = c / mfun;
             let f_col = c % mfun;
             let mut value = if g_col == gi {
-                tn.row_basis[i * mfun + f_col]
+                T::from_real(tn.row_basis[i * mfun + f_col])
             } else {
-                0.0
+                T::zero()
             };
-            let mut sum = 0.0;
+            let mut sum = T::zero();
             for p in rs..re {
                 let j = cj[p];
                 if j != i && tn.agg_of[j] == g_col {
-                    sum += vv[p] * tn.row_basis[j * mfun + f_col];
+                    sum = sum + vv[p] * T::from_real(tn.row_basis[j * mfun + f_col]);
                 }
             }
-            value += -omega * di * sum;
-            out_vals[k] = T::from_real(value);
+            value = value + minus_omega * di * sum;
+            out_vals[k] = value;
         }
     }
 
@@ -1373,6 +1377,33 @@ mod tests {
             assert!((got.real() - expected).abs() < 1e-12);
             assert!(got.imag().abs() < 1e-12);
         }
+    }
+
+    #[cfg(feature = "complex")]
+    fn complex_hermitian_2x2() -> CsrMatrix<S> {
+        CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![
+                S::from_parts(4.0, 0.0),
+                S::from_parts(-1.0, 2.0),
+                S::from_parts(-1.0, -2.0),
+                S::from_parts(4.0, 0.0),
+            ],
+        )
+    }
+
+    #[cfg(feature = "complex")]
+    fn real_csr_as_complex(a: &CsrMatrix<f64>) -> CsrMatrix<S> {
+        CsrMatrix::from_csr(
+            a.nrows(),
+            a.ncols(),
+            a.row_ptr().to_vec(),
+            a.col_idx().to_vec(),
+            a.values().iter().copied().map(S::from_real).collect(),
+        )
     }
 
     #[test]
@@ -1600,9 +1631,11 @@ mod tests {
         )
         .unwrap();
         let mut complex_vals = vec![S::zero(); p.vals.len()];
+        let a_complex = real_csr_as_complex(&a);
+        let d_inv_complex: Vec<S> = d_inv.iter().copied().map(S::from_real).collect();
         smooth_sa_values_only(
-            &a,
-            &d_inv,
+            &a_complex,
+            &d_inv_complex,
             &tp,
             0.75,
             &p.row_ptr,
@@ -1612,6 +1645,30 @@ mod tests {
         .unwrap();
 
         assert_complex_values_match_real(&complex_vals, &real_vals);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn smooth_sa_values_only_preserves_complex_matrix_values() {
+        let a = complex_hermitian_2x2();
+        let d_inv = vec![S::from_real(0.25); 2];
+        let tp = TentativeP {
+            agg_of: vec![0, 1],
+            n_coarse: 2,
+            num_functions: 1,
+            nns: None,
+            comp_of: None,
+        };
+        let p_row_ptr = vec![0, 2, 4];
+        let p_col_idx = vec![0, 1, 0, 1];
+        let mut vals = vec![S::zero(); p_col_idx.len()];
+
+        smooth_sa_values_only(&a, &d_inv, &tp, 0.5, &p_row_ptr, &p_col_idx, &mut vals).unwrap();
+
+        assert_eq!(vals[0], S::one());
+        assert!((vals[1] - S::from_parts(0.125, -0.25)).abs() < 1e-12);
+        assert!((vals[2] - S::from_parts(0.125, 0.25)).abs() < 1e-12);
+        assert_eq!(vals[3], S::one());
     }
 
     #[cfg(feature = "complex")]
@@ -1693,9 +1750,11 @@ mod tests {
         smooth_sa_values_only_multi(&a, &d_inv, &tp, 0.5, &p.row_ptr, &p.col_idx, &mut real_vals)
             .unwrap();
         let mut complex_vals = vec![S::zero(); p.vals.len()];
+        let a_complex = real_csr_as_complex(&a);
+        let d_inv_complex: Vec<S> = d_inv.iter().copied().map(S::from_real).collect();
         smooth_sa_values_only_multi(
-            &a,
-            &d_inv,
+            &a_complex,
+            &d_inv_complex,
             &tp,
             0.5,
             &p.row_ptr,
@@ -1705,6 +1764,35 @@ mod tests {
         .unwrap();
 
         assert_complex_values_match_real(&complex_vals, &real_vals);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn smooth_sa_values_only_multi_preserves_complex_matrix_values() {
+        let a = complex_hermitian_2x2();
+        let d_inv = vec![S::from_real(0.25); 2];
+        let tp = TentativeP {
+            agg_of: vec![0, 1],
+            n_coarse: 2,
+            num_functions: 2,
+            nns: Some(vec![vec![1.0, 0.0], vec![0.0, 1.0]]),
+            comp_of: None,
+        };
+        let p_row_ptr = vec![0, 4, 8];
+        let p_col_idx = vec![0, 1, 2, 3, 0, 1, 2, 3];
+        let mut vals = vec![S::zero(); p_col_idx.len()];
+
+        smooth_sa_values_only_multi(&a, &d_inv, &tp, 0.5, &p_row_ptr, &p_col_idx, &mut vals)
+            .unwrap();
+
+        assert_eq!(vals[0], S::one());
+        assert_eq!(vals[1], S::zero());
+        assert_eq!(vals[2], S::zero());
+        assert!((vals[3] - S::from_parts(0.125, -0.25)).abs() < 1e-12);
+        assert!((vals[4] - S::from_parts(0.125, 0.25)).abs() < 1e-12);
+        assert_eq!(vals[5], S::zero());
+        assert_eq!(vals[6], S::zero());
+        assert_eq!(vals[7], S::one());
     }
 
     #[cfg(feature = "complex")]
@@ -1732,9 +1820,11 @@ mod tests {
         smooth_sa_values_only_mf(&a, &d_inv, &tn, 0.8, &p.row_ptr, &p.col_idx, &mut real_vals)
             .unwrap();
         let mut complex_vals = vec![S::zero(); p.vals.len()];
+        let a_complex = real_csr_as_complex(&a);
+        let d_inv_complex: Vec<S> = d_inv.iter().copied().map(S::from_real).collect();
         smooth_sa_values_only_mf(
-            &a,
-            &d_inv,
+            &a_complex,
+            &d_inv_complex,
             &tn,
             0.8,
             &p.row_ptr,
@@ -1744,6 +1834,29 @@ mod tests {
         .unwrap();
 
         assert_complex_values_match_real(&complex_vals, &real_vals);
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn smooth_sa_values_only_mf_preserves_complex_matrix_values() {
+        let a = complex_hermitian_2x2();
+        let d_inv = vec![S::from_real(0.25); 2];
+        let tn = TentativeNodal {
+            agg_of: vec![0, 1],
+            n_agg: 2,
+            mfun: 1,
+            row_basis: vec![1.0, 1.0],
+        };
+        let p_row_ptr = vec![0, 2, 4];
+        let p_col_idx = vec![0, 1, 0, 1];
+        let mut vals = vec![S::zero(); p_col_idx.len()];
+
+        smooth_sa_values_only_mf(&a, &d_inv, &tn, 0.5, &p_row_ptr, &p_col_idx, &mut vals).unwrap();
+
+        assert_eq!(vals[0], S::one());
+        assert!((vals[1] - S::from_parts(0.125, -0.25)).abs() < 1e-12);
+        assert!((vals[2] - S::from_parts(0.125, 0.25)).abs() < 1e-12);
+        assert_eq!(vals[3], S::one());
     }
 
     #[cfg(feature = "complex")]

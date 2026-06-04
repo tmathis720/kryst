@@ -199,20 +199,23 @@ pub fn apply_filter_to_csr_values_in_place<T: KrystScalar<Real = f64>>(
     }
 }
 
-pub fn restrict_trials(
-    r: &CsrMatrix<f64>,
-    t_fine: MatRef<'_, f64>,
-    t_coarse: MatMut<'_, f64>,
+pub fn restrict_trials<T: KrystScalar>(
+    r: &CsrMatrix<T>,
+    t_fine: MatRef<'_, T>,
+    t_coarse: MatMut<'_, T>,
 ) -> Result<(), KError> {
     csr_spmm_dense(r, t_fine, t_coarse)
 }
 
-pub fn compensate_scalar_rows(
-    a: &mut CsrMatrix<f64>,
-    trials: MatRef<'_, f64>,
+pub fn compensate_scalar_rows<T>(
+    a: &mut CsrMatrix<T>,
+    trials: MatRef<'_, T>,
     omega: f64,
     min_diag: Option<f64>,
-) -> Result<(), KError> {
+) -> Result<(), KError>
+where
+    T: KrystScalar<Real = f64>,
+{
     let n = a.nrows();
     if trials.nrows() != n {
         return Err(KError::InvalidInput(
@@ -222,25 +225,28 @@ pub fn compensate_scalar_rows(
     if trials.ncols() == 0 {
         return Ok(());
     }
-    let mut at = faer::Mat::<f64>::zeros(n, trials.ncols());
-    csr_spmm_dense(a, trials, at.as_mut())?;
     let eps = 1e-30;
     for i in 0..n {
-        let mut num = 0.0f64;
+        let (cols, vals) = a.row(i);
+        let mut num = T::zero();
         let mut den = 0.0f64;
         for alpha in 0..trials.ncols() {
+            let mut at = T::zero();
+            for (&j, &v) in cols.iter().zip(vals.iter()) {
+                at = at + v * trials[(j, alpha)];
+            }
             let t = trials[(i, alpha)];
-            num += t * at[(i, alpha)];
-            den += t * t;
+            num = num + t.conj() * at;
+            den += t.abs2();
         }
         if den <= eps {
             continue;
         }
-        let corr = omega * (num / den);
+        let corr = num * T::from_real(omega / den);
         if let Some(diag) = a.diag_mut(i) {
             let new_val = *diag - corr;
             if let Some(min_allowed) = min_diag
-                && new_val <= min_allowed
+                && new_val.real() <= min_allowed
             {
                 continue;
             }
@@ -507,5 +513,32 @@ mod tests {
         assert_eq!(vals[0], crate::S::from_parts(0.01, 0.02));
         assert_eq!(vals[1], crate::S::from_parts(2.0, -1.0));
         assert_eq!(vals[2], crate::S::zero());
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn scalar_trial_compensation_uses_hermitian_products_for_complex_values() {
+        let mut a = CsrMatrix::from_csr(
+            2,
+            2,
+            vec![0, 2, 4],
+            vec![0, 1, 0, 1],
+            vec![
+                crate::S::from_parts(4.0, 0.0),
+                crate::S::from_parts(1.0, 1.0),
+                crate::S::from_parts(1.0, -1.0),
+                crate::S::from_parts(3.0, 0.0),
+            ],
+        );
+        let mut trials = faer::Mat::<crate::S>::zeros(2, 1);
+        trials[(0, 0)] = crate::S::from_parts(1.0, 1.0);
+        trials[(1, 0)] = crate::S::from_parts(2.0, -1.0);
+
+        compensate_scalar_rows(&mut a, trials.as_ref(), 0.5, None).unwrap();
+
+        assert!((a.values()[0] - crate::S::from_parts(1.0, 0.5)).abs() < 1e-12);
+        assert_eq!(a.values()[1], crate::S::from_parts(1.0, 1.0));
+        assert_eq!(a.values()[2], crate::S::from_parts(1.0, -1.0));
+        assert!((a.values()[3] - crate::S::from_parts(1.1, -0.2)).abs() < 1e-12);
     }
 }
