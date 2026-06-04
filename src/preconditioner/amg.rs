@@ -19,6 +19,8 @@ use crate::error::KError;
 #[cfg(not(feature = "complex"))]
 use crate::matrix::DistCsrOp;
 #[cfg(not(feature = "complex"))]
+use crate::matrix::convert::csr_from_linop;
+#[cfg(not(feature = "complex"))]
 use crate::matrix::dist::halo::HaloPlan;
 #[cfg(all(feature = "complex", feature = "backend-faer"))]
 use crate::matrix::op::{CsrOp, DenseOp, GenericCsrOp};
@@ -26,7 +28,6 @@ use crate::matrix::op::{LinOp, StructureId, ValuesId};
 #[cfg(feature = "complex")]
 use crate::matrix::parcsr::HaloPlan;
 use crate::matrix::{
-    convert::csr_from_linop,
     dense_api::DenseMatRef,
     sparse::CsrMatrix,
     spmv::{csr_spmm_dense, spmv_scaled_f32_on_pattern},
@@ -36,7 +37,9 @@ use crate::matrix::{spmv::SpmvTuning, utils};
 #[cfg(feature = "complex")]
 use crate::ops::kpc::KPreconditioner;
 use crate::parallel::{Comm, UniverseComm};
-use crate::preconditioner::asm::{Asm, AsmCombine, AsmConfig, AsmLocalSolver};
+use crate::preconditioner::asm::Asm;
+#[cfg(not(feature = "complex"))]
+use crate::preconditioner::asm::{AsmCombine, AsmConfig, AsmLocalSolver};
 #[cfg(feature = "complex")]
 use crate::preconditioner::bridge::{
     apply_pc_mut_s as bridge_apply_pc_mut_s, apply_pc_s as bridge_apply_pc_s,
@@ -46,9 +49,9 @@ use crate::preconditioner::deflation::{AmgCoarseSpace, DeflationOptions, ZSource
 use crate::preconditioner::dist::{
     DistCoarseRepartition, DistCoarseSolverRoute, DistCoarseStrategy,
 };
-use crate::preconditioner::ilu_csr::{
-    IluCsr, IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions,
-};
+use crate::preconditioner::ilu_csr::IluCsr;
+#[cfg(not(feature = "complex"))]
+use crate::preconditioner::ilu_csr::{IluCsrConfig, IluKind, PivotStrategy, ReorderingOptions};
 use crate::preconditioner::{PcCaps, PcSide, Preconditioner};
 #[cfg(all(not(feature = "complex"), feature = "superlu_dist"))]
 use crate::solver::superlu_dist;
@@ -2317,7 +2320,7 @@ struct LevelPostContext<'a> {
     d_inv: Option<&'a [f64]>,
 }
 
-pub(crate) fn row_scaling(
+pub(crate) fn row_scaling<T: KrystScalar<Real = f64>>(
     mode: RowScaleMode,
     r: usize,
     nns: Option<&[&[f64]]>,
@@ -2325,7 +2328,7 @@ pub(crate) fn row_scaling(
     d_inv: Option<&[f64]>,
     p_row_ptr: &[usize],
     p_col_idx: &[usize],
-    p_vals: &mut [f64],
+    p_vals: &mut [T],
 ) -> Result<(), KError> {
     let n = p_row_ptr.len() - 1;
     let eps = 1e-30;
@@ -2334,11 +2337,14 @@ pub(crate) fn row_scaling(
         let re = p_row_ptr[i + 1];
         match mode {
             RowScaleMode::SumToOne => {
-                let sum: f64 = p_vals[rs..re].iter().copied().sum();
+                let sum = p_vals[rs..re]
+                    .iter()
+                    .copied()
+                    .fold(T::zero(), |acc, v| acc + v);
                 if sum.abs() > eps {
-                    let s = 1.0 / sum;
+                    let s = T::one() / sum;
                     for k in rs..re {
-                        p_vals[k] *= s;
+                        p_vals[k] = p_vals[k] * s;
                     }
                 }
             }
@@ -2347,14 +2353,14 @@ pub(crate) fn row_scaling(
                     let mut n2 = 0.0;
                     for k in rs..re {
                         if p_col_idx[k] % r == alpha {
-                            n2 += p_vals[k] * p_vals[k];
+                            n2 += p_vals[k].abs2();
                         }
                     }
                     if n2 > eps {
-                        let s = 1.0 / n2.sqrt();
+                        let s = T::from_real(1.0 / n2.sqrt());
                         for k in rs..re {
                             if p_col_idx[k] % r == alpha {
-                                p_vals[k] *= s;
+                                p_vals[k] = p_vals[k] * s;
                             }
                         }
                     }
@@ -2366,15 +2372,15 @@ pub(crate) fn row_scaling(
                     let mut n2 = 0.0;
                     for k in rs..re {
                         if p_col_idx[k] % r == alpha {
-                            n2 += p_vals[k] * p_vals[k];
+                            n2 += p_vals[k].abs2();
                         }
                     }
                     let w = d[i].abs().recip().sqrt().max(1e-15);
                     if n2 > eps {
-                        let s = 1.0 / (w * n2.sqrt());
+                        let s = T::from_real(1.0 / (w * n2.sqrt()));
                         for k in rs..re {
                             if p_col_idx[k] % r == alpha {
-                                p_vals[k] *= s;
+                                p_vals[k] = p_vals[k] * s;
                             }
                         }
                     }
@@ -2383,18 +2389,18 @@ pub(crate) fn row_scaling(
             RowScaleMode::ToNearNullspace => {
                 let t = nns.expect("ToNearNullspace requires NNS basis");
                 for alpha in 0..r {
-                    let target = t[alpha][i];
-                    let mut sum = 0.0;
+                    let target = T::from_real(t[alpha][i]);
+                    let mut sum = T::zero();
                     for k in rs..re {
                         if p_col_idx[k] % r == alpha {
-                            sum += p_vals[k];
+                            sum = sum + p_vals[k];
                         }
                     }
                     if sum.abs() > eps {
                         let s = target / sum;
                         for k in rs..re {
                             if p_col_idx[k] % r == alpha {
-                                p_vals[k] *= s;
+                                p_vals[k] = p_vals[k] * s;
                             }
                         }
                     } else {
@@ -2413,12 +2419,12 @@ pub(crate) fn row_scaling(
     Ok(())
 }
 
-fn local_qr(
+fn local_qr<T: KrystScalar<Real = f64>>(
     r: usize,
     agg_of: &[usize],
     p_row_ptr: &[usize],
     p_col_idx: &[usize],
-    p_vals: &mut [f64],
+    p_vals: &mut [T],
 ) -> Result<(), KError> {
     let n = agg_of.len();
     let n_aggs = 1 + agg_of.iter().copied().max().unwrap_or(0);
@@ -2444,7 +2450,7 @@ fn local_qr(
             continue;
         }
         let m = rows.len();
-        let mut q = vec![vec![R::default(); r]; m];
+        let mut q = vec![vec![T::zero(); r]; m];
         for (ii, &i) in rows.iter().enumerate() {
             for alpha in 0..r {
                 let k = pos_alpha[i][alpha];
@@ -2455,22 +2461,22 @@ fn local_qr(
         }
         for alpha in 0..r {
             for beta in 0..alpha {
-                let mut dot = R::default();
+                let mut dot = T::zero();
                 for ii in 0..m {
-                    dot += q[ii][alpha] * q[ii][beta];
+                    dot = dot + q[ii][beta].conj() * q[ii][alpha];
                 }
                 for ii in 0..m {
-                    q[ii][alpha] -= dot * q[ii][beta];
+                    q[ii][alpha] = q[ii][alpha] - q[ii][beta] * dot;
                 }
             }
-            let mut n2 = R::default();
+            let mut n2 = 0.0;
             for ii in 0..m {
-                n2 += q[ii][alpha] * q[ii][alpha];
+                n2 += q[ii][alpha].abs2();
             }
             if n2 > 1e-30 {
-                let inv = 1.0 / n2.sqrt();
+                let inv = T::from_real(1.0 / n2.sqrt());
                 for ii in 0..m {
-                    q[ii][alpha] *= inv;
+                    q[ii][alpha] = q[ii][alpha] * inv;
                 }
             }
         }
@@ -11411,6 +11417,7 @@ mod tests {
 
 #[cfg(all(test, feature = "complex"))]
 mod tests_complex {
+    use super::{RowScaleMode, local_qr, row_scaling};
     use crate::algebra::prelude::*;
     use crate::matrix::sparse::CsrMatrix;
     use crate::preconditioner::approxinv_csr::{ApproxInvBuilder, ApproxInvKind};
@@ -11454,5 +11461,56 @@ mod tests_complex {
         fsai.setup(&a).unwrap();
         fsai.apply(PcSide::Left, &rhs, &mut y).unwrap();
         assert!(y.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn row_scaling_sum_to_one_preserves_complex_direction() {
+        let row_ptr = vec![0, 2];
+        let col_idx = vec![0, 1];
+        let mut vals = vec![S::from_parts(1.0, 1.0), S::from_parts(1.0, -1.0)];
+
+        row_scaling(
+            RowScaleMode::SumToOne,
+            1,
+            None,
+            &[0],
+            None,
+            &row_ptr,
+            &col_idx,
+            &mut vals,
+        )
+        .unwrap();
+
+        let sum = vals[0] + vals[1];
+        assert!((sum.real() - 1.0).abs() < 1e-12);
+        assert!(sum.imag().abs() < 1e-12);
+        assert!((vals[0].imag() - 0.5).abs() < 1e-12);
+        assert!((vals[1].imag() + 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn local_qr_uses_hermitian_inner_products_for_complex_values() {
+        let row_ptr = vec![0, 2, 4];
+        let col_idx = vec![0, 1, 0, 1];
+        let mut vals = vec![
+            S::from_parts(1.0, 0.0),
+            S::from_parts(1.0, 0.0),
+            S::from_parts(0.0, 1.0),
+            S::from_parts(1.0, 0.0),
+        ];
+
+        local_qr(2, &[0, 0], &row_ptr, &col_idx, &mut vals).unwrap();
+
+        let q0 = [vals[0], vals[2]];
+        let q1 = [vals[1], vals[3]];
+        let dot = q0[0].conj() * q1[0] + q0[1].conj() * q1[1];
+        let n0 = q0.iter().map(|v| v.abs2()).sum::<f64>().sqrt();
+        let n1 = q1.iter().map(|v| v.abs2()).sum::<f64>().sqrt();
+        assert!(
+            dot.abs() < 1e-12,
+            "columns are not Hermitian-orthogonal: {dot:?}"
+        );
+        assert!((n0 - 1.0).abs() < 1e-12);
+        assert!((n1 - 1.0).abs() < 1e-12);
     }
 }
