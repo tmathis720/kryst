@@ -2950,6 +2950,31 @@ fn csr_real_from_complex(csr: &CsrMatrix<S>) -> CsrMatrix<f64> {
 }
 
 #[cfg(feature = "complex")]
+fn csr_has_imaginary_values(csr: &CsrMatrix<S>, tol: R) -> bool {
+    csr.values().iter().any(|v| v.imag().abs() > tol)
+}
+
+#[cfg(feature = "complex")]
+fn validate_complex_transfer_overrides_supported(
+    overrides: &BTreeMap<usize, AmgTransferOperators>,
+    drop_tol: R,
+) -> Result<(), KError> {
+    for (level, ops) in overrides {
+        if csr_has_imaginary_values(&ops.prolongation, drop_tol) {
+            return Err(KError::InvalidInput(format!(
+                "AMG complex transfer override level {level} has imaginary prolongation values; native complex AMG hierarchy support is required before these values can be preserved"
+            )));
+        }
+        if csr_has_imaginary_values(&ops.restriction, drop_tol) {
+            return Err(KError::InvalidInput(format!(
+                "AMG complex transfer override level {level} has imaginary restriction values; native complex AMG hierarchy support is required before these values can be preserved"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "complex")]
 fn complex_diagonal_inverse(csr: &CsrMatrix<S>, drop_tol: R) -> Result<Option<Vec<S>>, KError> {
     if csr.nrows() != csr.ncols() {
         return Ok(None);
@@ -7140,6 +7165,7 @@ impl Preconditioner for AMG {
         }
         self.cfg.validate()?;
         self.dist = None;
+        validate_complex_transfer_overrides_supported(&self.transfer_overrides, self.cfg.drop_tol)?;
         let csr_complex = csr_from_linop_complex(op, self.cfg.drop_tol)?;
         self.complex_diag_inv = complex_diagonal_inverse(csr_complex.as_ref(), self.cfg.drop_tol)?;
         let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));

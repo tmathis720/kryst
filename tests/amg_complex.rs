@@ -97,7 +97,7 @@ fn amg_complex_transfer_override_plumbing() {
         1,
         vec![0, 1, 2],
         vec![0, 0],
-        vec![S::from_parts(1.0, 0.2), S::from_parts(1.0, -0.2)],
+        vec![S::from_real(1.0), S::from_real(1.0)],
     );
     let r = CsrMatrix::from_csr(
         1,
@@ -122,6 +122,54 @@ fn amg_complex_transfer_override_plumbing() {
     assert!(
         out.iter()
             .all(|v| v.real().is_finite() && v.imag().is_finite())
+    );
+}
+
+#[test]
+fn amg_complex_rejects_imaginary_transfer_override_until_native_hierarchy_support() {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(2.0),
+            S::from_parts(-1.0, 0.5),
+            S::from_parts(-1.0, -0.5),
+            S::from_real(2.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let mut amg = AMG::default();
+
+    let p = CsrMatrix::from_csr(
+        2,
+        1,
+        vec![0, 1, 2],
+        vec![0, 0],
+        vec![S::from_parts(1.0, 0.2), S::from_real(1.0)],
+    );
+    let r = CsrMatrix::from_csr(
+        1,
+        2,
+        vec![0, 2],
+        vec![0, 1],
+        vec![S::from_real(0.5), S::from_real(0.5)],
+    );
+    amg.set_level_transfer_operators(
+        0,
+        kryst::preconditioner::amg::AmgTransferOperators {
+            prolongation: p,
+            restriction: r,
+        },
+    );
+
+    let err = amg
+        .setup(&op)
+        .expect_err("imaginary complex transfer override should be rejected");
+    assert!(
+        err.to_string().contains("imaginary prolongation"),
+        "unexpected error: {err}"
     );
 }
 
