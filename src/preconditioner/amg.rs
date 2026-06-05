@@ -6941,6 +6941,10 @@ impl AMG {
         if let (Some(s), Ok(rt)) = (out.as_mut(), self.runtime.lock()) {
             s.last_cycle = rt.last_cycle.clone();
         }
+        #[cfg(feature = "complex")]
+        if let Some(s) = out.as_mut() {
+            s.complex_setup_mode = self.complex_setup_mode;
+        }
         out
     }
 
@@ -10048,6 +10052,8 @@ pub struct AmgStats {
     pub last_cycle: Option<CycleTimings>,
     pub selected_dist_coarse_route: Option<String>,
     pub dist_route_fallback: Vec<String>,
+    #[cfg(feature = "complex")]
+    pub complex_setup_mode: AmgComplexSetupMode,
 }
 
 impl AmgStats {
@@ -10072,6 +10078,8 @@ impl AmgStats {
             last_cycle: None,
             selected_dist_coarse_route: None,
             dist_route_fallback: Vec::new(),
+            #[cfg(feature = "complex")]
+            complex_setup_mode: AmgComplexSetupMode::Unset,
         }
     }
 }

@@ -276,9 +276,16 @@ fn amg_complex_apply_residual_acceptance() {
         ],
     );
     let op = CsrOp::new(Arc::new(csr.clone()));
-    let mut amg = AMG::default();
+    let mut amg = AMGBuilder::new()
+        .logging_level(1)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("amg build");
     amg.setup(&op).unwrap();
     assert_eq!(amg.complex_setup_mode_label(), "projected_real_hierarchy");
+    assert_eq!(
+        amg.stats().expect("stats").complex_setup_mode.as_str(),
+        "projected_real_hierarchy"
+    );
 
     let rhs = vec![
         S::from_parts(1.0, -0.3),
