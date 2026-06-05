@@ -777,6 +777,9 @@ impl AMGConfig {
         if let Some(flag) = opts.amg_require_spd {
             cfg.require_spd = flag;
         }
+        if let Some(flag) = opts.amg_require_native_complex_hierarchy {
+            cfg.require_native_complex_hierarchy = flag;
+        }
         if cfg.require_spd && !cfg.keep_transpose {
             return Err(KError::InvalidInput(
                 "SPD mode requires pc_amg_keep_transpose true".into(),
@@ -1074,6 +1077,18 @@ mod config_mapping_tests {
     fn amg_config_denies_keep_transpose_when_spd() {
         let opts = opts_from(&["-pc_type", "amg", "-pc_amg_keep_transpose", "false"]);
         assert!(AMGConfig::try_from_opts(&opts).is_err());
+    }
+
+    #[test]
+    fn amg_config_maps_native_complex_hierarchy_requirement() {
+        let opts = opts_from(&[
+            "-pc_type",
+            "amg",
+            "-pc_amg_require_native_complex_hierarchy",
+            "true",
+        ]);
+        let cfg = AMGConfig::try_from_opts(&opts).unwrap();
+        assert!(cfg.require_native_complex_hierarchy);
     }
 
     #[test]

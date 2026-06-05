@@ -976,6 +976,13 @@ pub static SPECS: &[Spec] = &[
         doc: "enforce SPD-safe AMG for CG",
     },
     Spec {
+        flag: "-pc_amg_require_native_complex_hierarchy",
+        key: "pc_amg_require_native_complex_hierarchy",
+        arity: Arity::Zero,
+        kind: ValueKind::Bool,
+        doc: "require scalar-correct native complex AMG hierarchy",
+    },
+    Spec {
         flag: "-pc_amg_print_setup",
         key: "pc_amg_print_setup",
         arity: Arity::Zero,

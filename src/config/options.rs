@@ -257,6 +257,8 @@ pub struct PcOptions {
     pub amg_keep_pivot_in_rap: Option<bool>,
     /// Enforce SPD-safe AMG behavior.
     pub amg_require_spd: Option<bool>,
+    /// Require scalar-correct native complex AMG hierarchy in complex builds.
+    pub amg_require_native_complex_hierarchy: Option<bool>,
     /// Print the AMG setup statistics when enabled.
     pub amg_print_setup: Option<bool>,
     /// Distributed AMG apply mode: "root" or "local".
@@ -1132,6 +1134,9 @@ impl Sink for PcOptions {
             "pc_amg_keep_transpose" => set_opt!(&mut self.amg_keep_transpose, v),
             "pc_amg_keep_pivot_in_rap" => set_opt!(&mut self.amg_keep_pivot_in_rap, v),
             "pc_amg_require_spd" => set_opt!(&mut self.amg_require_spd, v),
+            "pc_amg_require_native_complex_hierarchy" => {
+                set_opt!(&mut self.amg_require_native_complex_hierarchy, v)
+            }
             "pc_amg_print_setup" => set_opt!(&mut self.amg_print_setup, v),
             "pc_amg_dist_instrumentation" => set_opt!(&mut self.amg_dist_instrumentation, v),
             "pc_amg_ieee_checks" => set_opt!(&mut self.amg_ieee_checks, v),
@@ -2631,6 +2636,7 @@ impl PcOptions {
         o!(amg_keep_transpose);
         o!(amg_keep_pivot_in_rap);
         o!(amg_require_spd);
+        o!(amg_require_native_complex_hierarchy);
         o!(amg_print_setup);
         o!(amg_dist_apply_mode);
         o!(amg_dist_coarse_repartition);
@@ -3833,6 +3839,8 @@ mod old_tests {
             "200",
             "-pc_amg_min_iterations",
             "5",
+            "-pc_amg_require_native_complex_hierarchy",
+            "true",
             "-pc_amg_ieee_checks",
             "true",
             "-pc_amg_optimize_workspace",
@@ -3859,8 +3867,23 @@ mod old_tests {
         assert_eq!(opts.amg_tolerance, Some(1e-10));
         assert_eq!(opts.amg_max_iterations, Some(200));
         assert_eq!(opts.amg_min_iterations, Some(5));
+        assert_eq!(opts.amg_require_native_complex_hierarchy, Some(true));
         assert_eq!(opts.amg_ieee_checks, Some(true));
         assert_eq!(opts.amg_optimize_workspace, Some(false));
+    }
+
+    #[test]
+    fn test_pc_options_amg_native_complex_hierarchy_flag() {
+        let args = vec![
+            "-pc_type",
+            "amg",
+            "-pc_amg_require_native_complex_hierarchy",
+            "true",
+        ];
+        let opts = PcOptions::from_args(&args).unwrap();
+
+        assert_eq!(opts.pc_type, Some("amg".to_string()));
+        assert_eq!(opts.amg_require_native_complex_hierarchy, Some(true));
     }
 
     #[test]
