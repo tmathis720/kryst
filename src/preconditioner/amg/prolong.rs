@@ -954,6 +954,26 @@ pub fn smooth_tentative_sa_multi(
     max_per_row: usize,
     trunc_rel: f64,
 ) -> Pcsr {
+    let p =
+        smooth_tentative_sa_multi_generic(a, d_inv, tp, omega, drop_tol, max_per_row, trunc_rel);
+    Pcsr {
+        m: p.m,
+        n: p.n,
+        row_ptr: p.row_ptr,
+        col_idx: p.col_idx,
+        vals: p.vals,
+    }
+}
+
+pub fn smooth_tentative_sa_multi_generic<T: KrystScalar<Real = f64>>(
+    a: &CsrMatrix<T>,
+    d_inv: &[T],
+    tp: &TentativeP,
+    omega: f64,
+    drop_tol: f64,
+    max_per_row: usize,
+    trunc_rel: f64,
+) -> GenericPcsr<T> {
     let m = a.nrows();
     let r = tp.num_functions;
     let ncoarse = tp.n_coarse * r;
@@ -962,11 +982,12 @@ pub fn smooth_tentative_sa_multi(
     let vv = a.values();
     let mut row_ptr = Vec::with_capacity(m + 1);
     let mut col_idx: Vec<usize> = Vec::new();
-    let mut vals: Vec<f64> = Vec::new();
+    let mut vals: Vec<T> = Vec::new();
     row_ptr.push(0);
     let mut marker: Vec<isize> = vec![-1; ncoarse.min(1024).max(512)];
     let mut acc_cols: Vec<usize> = Vec::new();
-    let mut acc_vals: Vec<f64> = Vec::new();
+    let mut acc_vals: Vec<T> = Vec::new();
+    let minus_omega = T::from_real(-omega);
     for i in 0..m {
         if marker.len() < ncoarse {
             marker.resize(ncoarse, -1);
@@ -987,7 +1008,7 @@ pub fn smooth_tentative_sa_multi(
             } else {
                 0.0
             };
-            acc_vals.push(v0);
+            acc_vals.push(T::from_real(v0));
         }
         let di = d_inv[i];
         let rs = rp[i];
@@ -998,7 +1019,7 @@ pub fn smooth_tentative_sa_multi(
                 continue;
             }
             let gj = tp.agg_of[j] * r;
-            let s = -omega * di * vv[p];
+            let s = minus_omega * di * vv[p];
             for alpha in 0..r {
                 let col = gj + alpha;
                 let t = if let Some(ref nns) = tp.nns {
@@ -1010,10 +1031,10 @@ pub fn smooth_tentative_sa_multi(
                 } else {
                     0.0
                 };
-                let val = s * t;
+                let val = s * T::from_real(t);
                 let k = marker[col];
                 if k >= 0 {
-                    acc_vals[k as usize] += val;
+                    acc_vals[k as usize] = acc_vals[k as usize] + val;
                 } else {
                     marker[col] = acc_cols.len() as isize;
                     acc_cols.push(col);
@@ -1043,7 +1064,7 @@ pub fn smooth_tentative_sa_multi(
                     0.0
                 };
                 cols.push(c);
-                vs.push(v0);
+                vs.push(T::from_real(v0));
             }
         }
         for (c, v) in cols.into_iter().zip(vs.into_iter()) {
@@ -1055,7 +1076,7 @@ pub fn smooth_tentative_sa_multi(
             marker[c] = -1;
         }
     }
-    Pcsr {
+    GenericPcsr {
         m,
         n: ncoarse,
         row_ptr,
@@ -1072,6 +1093,24 @@ pub fn smooth_tentative_sa_mf(
     drop_tol: f64,
     max_per_row: usize,
 ) -> Pcsr {
+    let p = smooth_tentative_sa_mf_generic(a, d_inv, tn, omega, drop_tol, max_per_row);
+    Pcsr {
+        m: p.m,
+        n: p.n,
+        row_ptr: p.row_ptr,
+        col_idx: p.col_idx,
+        vals: p.vals,
+    }
+}
+
+pub fn smooth_tentative_sa_mf_generic<T: KrystScalar<Real = f64>>(
+    a: &CsrMatrix<T>,
+    d_inv: &[T],
+    tn: &TentativeNodal,
+    omega: f64,
+    drop_tol: f64,
+    max_per_row: usize,
+) -> GenericPcsr<T> {
     let n = a.nrows();
     let mfun = tn.mfun;
     let ncoarse = tn.n_agg * mfun;
@@ -1081,15 +1120,16 @@ pub fn smooth_tentative_sa_mf(
     let rp = a.row_ptr();
     let cj = a.col_idx();
     let vv = a.values();
+    let minus_omega = T::from_real(-omega);
 
     let mut row_ptr = Vec::with_capacity(n + 1);
     let mut col_idx: Vec<usize> = Vec::new();
-    let mut vals: Vec<f64> = Vec::new();
+    let mut vals: Vec<T> = Vec::new();
     row_ptr.push(0);
 
     let mut marker: Vec<isize> = vec![-1; ncoarse.min(4096).max(512)];
     let mut acc_cols: Vec<usize> = Vec::new();
-    let mut acc_vals: Vec<f64> = Vec::new();
+    let mut acc_vals: Vec<T> = Vec::new();
 
     for i in 0..n {
         if marker.len() < ncoarse {
@@ -1105,7 +1145,7 @@ pub fn smooth_tentative_sa_mf(
             let c = gi * mfun + f;
             marker[c] = acc_cols.len() as isize;
             acc_cols.push(c);
-            acc_vals.push(tn.row_basis[i * mfun + f]);
+            acc_vals.push(T::from_real(tn.row_basis[i * mfun + f]));
         }
 
         let rs = rp[i];
@@ -1116,13 +1156,13 @@ pub fn smooth_tentative_sa_mf(
                 continue;
             }
             let gj = tn.agg_of[j];
-            let scale = -omega * di * vv[p];
+            let scale = minus_omega * di * vv[p];
             for f in 0..mfun {
                 let c = gj * mfun + f;
-                let contrib = scale * tn.row_basis[j * mfun + f];
+                let contrib = scale * T::from_real(tn.row_basis[j * mfun + f]);
                 let k = marker[c];
                 if k >= 0 {
-                    acc_vals[k as usize] += contrib;
+                    acc_vals[k as usize] = acc_vals[k as usize] + contrib;
                 } else {
                     marker[c] = acc_cols.len() as isize;
                     acc_cols.push(c);
@@ -1131,7 +1171,7 @@ pub fn smooth_tentative_sa_mf(
             }
         }
 
-        let mut keep: Vec<(usize, f64)> = Vec::with_capacity(acc_cols.len());
+        let mut keep: Vec<(usize, T)> = Vec::with_capacity(acc_cols.len());
         for (&c, &v) in acc_cols.iter().zip(acc_vals.iter()) {
             if v.abs() >= drop_tol {
                 keep.push((c, v));
@@ -1160,7 +1200,7 @@ pub fn smooth_tentative_sa_mf(
         }
     }
 
-    Pcsr {
+    GenericPcsr {
         m: n,
         n: ncoarse,
         row_ptr,
@@ -1898,6 +1938,37 @@ mod tests {
         assert_complex_values_match_real(&complex_vals, &real_vals);
     }
 
+    #[test]
+    fn smooth_tentative_sa_multi_delegates_to_generic_builder_for_real_values() {
+        let a = CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 2, 5, 7],
+            vec![0, 1, 0, 1, 2, 1, 2],
+            vec![4.0, -1.0, -1.0, 4.0, -0.5, -0.5, 3.0],
+        );
+        let tp = TentativeP {
+            agg_of: vec![0, 1, 1],
+            n_coarse: 2,
+            num_functions: 2,
+            nns: Some(vec![vec![1.0, 0.25, 0.0], vec![0.0, 0.75, 1.0]]),
+            comp_of: None,
+        };
+        let d_inv = diag_inv(&a);
+
+        let legacy = smooth_tentative_sa_multi(&a, &d_inv, &tp, 0.5, 0.0, 0, 0.0);
+        let generic = smooth_tentative_sa_multi_generic(&a, &d_inv, &tp, 0.5, 0.0, 0, 0.0);
+
+        assert_eq!(legacy.m, generic.m);
+        assert_eq!(legacy.n, generic.n);
+        assert_eq!(legacy.row_ptr, generic.row_ptr);
+        assert_eq!(legacy.col_idx, generic.col_idx);
+        assert_eq!(legacy.vals.len(), generic.vals.len());
+        for (a, b) in legacy.vals.iter().zip(generic.vals.iter()) {
+            assert!((a - b).abs() < 1e-12);
+        }
+    }
+
     #[cfg(feature = "complex")]
     #[test]
     fn smooth_sa_values_only_multi_preserves_complex_matrix_values() {
@@ -1925,6 +1996,33 @@ mod tests {
         assert_eq!(vals[5], S::zero());
         assert_eq!(vals[6], S::zero());
         assert_eq!(vals[7], S::one());
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn smooth_tentative_sa_multi_generic_preserves_complex_matrix_values() {
+        let a = complex_hermitian_2x2();
+        let d_inv = vec![S::from_real(0.25); 2];
+        let tp = TentativeP {
+            agg_of: vec![0, 1],
+            n_coarse: 2,
+            num_functions: 2,
+            nns: Some(vec![vec![1.0, 0.0], vec![0.0, 1.0]]),
+            comp_of: None,
+        };
+
+        let p = smooth_tentative_sa_multi_generic(&a, &d_inv, &tp, 0.5, 0.0, 0, 0.0);
+
+        assert_eq!(p.row_ptr, vec![0, 4, 8]);
+        assert_eq!(p.col_idx, vec![0, 1, 2, 3, 0, 1, 2, 3]);
+        assert_eq!(p.vals[0], S::one());
+        assert_eq!(p.vals[1], S::zero());
+        assert_eq!(p.vals[2], S::zero());
+        assert!((p.vals[3] - S::from_parts(0.125, -0.25)).abs() < 1e-12);
+        assert!((p.vals[4] - S::from_parts(0.125, 0.25)).abs() < 1e-12);
+        assert_eq!(p.vals[5], S::zero());
+        assert_eq!(p.vals[6], S::zero());
+        assert_eq!(p.vals[7], S::one());
     }
 
     #[cfg(feature = "complex")]
@@ -1968,6 +2066,38 @@ mod tests {
         assert_complex_values_match_real(&complex_vals, &real_vals);
     }
 
+    #[test]
+    fn smooth_tentative_sa_mf_delegates_to_generic_builder_for_real_values() {
+        let a = CsrMatrix::from_csr(
+            4,
+            4,
+            vec![0, 3, 6, 9, 12],
+            vec![0, 1, 2, 0, 1, 3, 1, 2, 3, 0, 2, 3],
+            vec![
+                4.0, -1.0, 0.5, -1.0, 4.0, -0.5, 0.5, -1.0, 4.0, 0.5, -0.5, 4.0,
+            ],
+        );
+        let tn = TentativeNodal {
+            agg_of: vec![0, 0, 1, 1],
+            n_agg: 2,
+            mfun: 2,
+            row_basis: vec![1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0],
+        };
+        let d_inv = vec![1.0 / 4.0; 4];
+
+        let legacy = smooth_tentative_sa_mf(&a, &d_inv, &tn, 0.8, 0.0, 0);
+        let generic = smooth_tentative_sa_mf_generic(&a, &d_inv, &tn, 0.8, 0.0, 0);
+
+        assert_eq!(legacy.m, generic.m);
+        assert_eq!(legacy.n, generic.n);
+        assert_eq!(legacy.row_ptr, generic.row_ptr);
+        assert_eq!(legacy.col_idx, generic.col_idx);
+        assert_eq!(legacy.vals.len(), generic.vals.len());
+        for (a, b) in legacy.vals.iter().zip(generic.vals.iter()) {
+            assert!((a - b).abs() < 1e-12);
+        }
+    }
+
     #[cfg(feature = "complex")]
     #[test]
     fn smooth_sa_values_only_mf_preserves_complex_matrix_values() {
@@ -1989,6 +2119,28 @@ mod tests {
         assert!((vals[1] - S::from_parts(0.125, -0.25)).abs() < 1e-12);
         assert!((vals[2] - S::from_parts(0.125, 0.25)).abs() < 1e-12);
         assert_eq!(vals[3], S::one());
+    }
+
+    #[cfg(feature = "complex")]
+    #[test]
+    fn smooth_tentative_sa_mf_generic_preserves_complex_matrix_values() {
+        let a = complex_hermitian_2x2();
+        let d_inv = vec![S::from_real(0.25); 2];
+        let tn = TentativeNodal {
+            agg_of: vec![0, 1],
+            n_agg: 2,
+            mfun: 1,
+            row_basis: vec![1.0, 1.0],
+        };
+
+        let p = smooth_tentative_sa_mf_generic(&a, &d_inv, &tn, 0.5, 0.0, 0);
+
+        assert_eq!(p.row_ptr, vec![0, 2, 4]);
+        assert_eq!(p.col_idx, vec![0, 1, 0, 1]);
+        assert_eq!(p.vals[0], S::one());
+        assert!((p.vals[1] - S::from_parts(0.125, -0.25)).abs() < 1e-12);
+        assert!((p.vals[2] - S::from_parts(0.125, 0.25)).abs() < 1e-12);
+        assert_eq!(p.vals[3], S::one());
     }
 
     #[cfg(feature = "complex")]
