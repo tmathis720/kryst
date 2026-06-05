@@ -17,11 +17,24 @@ fn pc_diagnostics_reports_complex_capability_mode() {
     let ilu0 = PcDiagnostics::from_options(Some(PcType::Ilu0), Some(&PcOptions::default()));
     let ainv =
         PcDiagnostics::from_options(Some(PcType::ApproxInverse), Some(&PcOptions::default()));
+    let amg = PcDiagnostics::from_options(Some(PcType::Amg), Some(&PcOptions::default()));
+    let mut strict_amg_opts = PcOptions::default();
+    strict_amg_opts.amg_require_native_complex_hierarchy = Some(true);
+    let strict_amg = PcDiagnostics::from_options(Some(PcType::Amg), Some(&strict_amg_opts));
 
     assert_eq!(sor.complex_support, "native_complex");
     assert_eq!(ilu0.complex_support, "native_complex");
     assert_eq!(ilutp.complex_support, "projected_complex");
     assert_eq!(ainv.complex_support, "native_complex");
+    assert_eq!(amg.complex_support, "projected_complex");
+    assert_eq!(strict_amg.complex_support, "native_complex_required");
+    assert_eq!(
+        strict_amg
+            .config
+            .get("amg_require_native_complex_hierarchy")
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
 }
 
 #[test]

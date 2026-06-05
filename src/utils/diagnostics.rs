@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 enum PcComplexSupport {
     NativeComplex,
     ProjectedComplex,
-    NativeWithDegradedFallback,
+    NativeComplexRequired,
 }
 
 impl PcComplexSupport {
@@ -22,13 +22,19 @@ impl PcComplexSupport {
         match self {
             Self::NativeComplex => "native_complex",
             Self::ProjectedComplex => "projected_complex",
-            Self::NativeWithDegradedFallback => "native_complex_with_degraded_fallback",
+            Self::NativeComplexRequired => "native_complex_required",
         }
     }
 }
 
-fn pc_complex_support(pc_type: Option<PcType>) -> PcComplexSupport {
+fn pc_complex_support(pc_type: Option<PcType>, opts: Option<&PcOptions>) -> PcComplexSupport {
     match pc_type {
+        Some(PcType::Amg)
+            if opts.and_then(|o| o.amg_require_native_complex_hierarchy) == Some(true) =>
+        {
+            PcComplexSupport::NativeComplexRequired
+        }
+        Some(PcType::Amg) => PcComplexSupport::ProjectedComplex,
         Some(PcType::Sor) => PcComplexSupport::NativeComplex,
         Some(PcType::Jacobi) | Some(PcType::Chebyshev) => PcComplexSupport::NativeComplex,
         Some(PcType::Ilu0) | Some(PcType::Ilu) | Some(PcType::Ilut) => {
@@ -99,6 +105,11 @@ impl PcDiagnostics {
             insert_opt(&mut config, "amg_levels", opts.amg_levels);
             insert_opt(
                 &mut config,
+                "amg_require_native_complex_hierarchy",
+                opts.amg_require_native_complex_hierarchy,
+            );
+            insert_opt(
+                &mut config,
                 "pc_amg_level_scoped_count",
                 Some(opts.pc_amg_level_scoped_options.len()),
             );
@@ -157,7 +168,7 @@ impl PcDiagnostics {
             insert_opt(&mut config, "pc_bddc_scaling", opts.pc_bddc_scaling.clone());
         }
 
-        let complex_support = pc_complex_support(pc_type).as_str().to_string();
+        let complex_support = pc_complex_support(pc_type, opts).as_str().to_string();
 
         Self {
             pc_type: pc_type.map(|pct| format!("{pct:?}")),
