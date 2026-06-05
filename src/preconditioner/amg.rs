@@ -3585,10 +3585,31 @@ impl DistAmgInfo {
 
 // ===== Main AMG object =======================================================
 
+#[cfg(feature = "complex")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AmgComplexSetupMode {
+    Unset,
+    NativeDiagonal,
+    ProjectedRealHierarchy,
+}
+
+#[cfg(feature = "complex")]
+impl AmgComplexSetupMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unset => "unset",
+            Self::NativeDiagonal => "native_diagonal",
+            Self::ProjectedRealHierarchy => "projected_real_hierarchy",
+        }
+    }
+}
+
 pub struct AMG {
     csr: Option<Arc<CsrMatrix<f64>>>,
     #[cfg(feature = "complex")]
     complex_diag_inv: Option<Vec<S>>,
+    #[cfg(feature = "complex")]
+    complex_setup_mode: AmgComplexSetupMode,
     state: AmgState,
     cycle_policy: Box<dyn CyclePolicy + Send + Sync>,
     cfg: AMGConfig,
@@ -3614,6 +3635,8 @@ impl Default for AMG {
             csr: None,
             #[cfg(feature = "complex")]
             complex_diag_inv: None,
+            #[cfg(feature = "complex")]
+            complex_setup_mode: AmgComplexSetupMode::Unset,
             state: AmgState::Uninitialized,
             cycle_policy: Self::make_cycle_policy(&cfg),
             cfg,
@@ -6921,6 +6944,16 @@ impl AMG {
         out
     }
 
+    #[cfg(feature = "complex")]
+    pub fn complex_setup_mode(&self) -> AmgComplexSetupMode {
+        self.complex_setup_mode
+    }
+
+    #[cfg(feature = "complex")]
+    pub fn complex_setup_mode_label(&self) -> &'static str {
+        self.complex_setup_mode.as_str()
+    }
+
     pub fn dist_apply_stats(&self) -> Option<DistApplyStats> {
         if let Ok(rt) = self.runtime.lock() {
             rt.last_dist_apply.clone()
@@ -7206,10 +7239,12 @@ impl Preconditioner for AMG {
         }
         self.cfg.validate()?;
         self.dist = None;
+        self.complex_setup_mode = AmgComplexSetupMode::Unset;
         validate_complex_transfer_overrides_supported(&self.transfer_overrides, self.cfg.drop_tol)?;
         let csr_complex = csr_from_linop_complex(op, self.cfg.drop_tol)?;
         self.complex_diag_inv = complex_diagonal_inverse(csr_complex.as_ref(), self.cfg.drop_tol)?;
         if self.complex_diag_inv.is_some() {
+            self.complex_setup_mode = AmgComplexSetupMode::NativeDiagonal;
             let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
             self.csr = Some(csr_real);
             self.state = AmgState::Uninitialized;
@@ -7226,7 +7261,9 @@ impl Preconditioner for AMG {
         let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
         let sid = op.structure_id();
         let vid = op.values_id();
-        self.setup_from_csr_real(csr_real, sid, vid)
+        self.setup_from_csr_real(csr_real, sid, vid)?;
+        self.complex_setup_mode = AmgComplexSetupMode::ProjectedRealHierarchy;
+        Ok(())
     }
 
     fn apply(&self, side: PcSide, r: &[S], z: &mut [S]) -> Result<(), KError> {

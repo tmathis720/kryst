@@ -14,6 +14,7 @@ fn amg_complex_setup_apply_small() {
     let op = CsrOp::new(Arc::new(csr));
     let mut amg = AMG::default();
     amg.setup(&op).unwrap();
+    assert_eq!(amg.complex_setup_mode_label(), "native_diagonal");
 
     let rhs = vec![S::from_parts(1.0, -2.0)];
     let mut out = vec![S::zero(); rhs.len()];
@@ -35,6 +36,7 @@ fn amg_complex_diagonal_uses_complex_inverse() {
     let op = CsrOp::new(Arc::new(csr.clone()));
     let mut amg = AMG::default();
     amg.setup(&op).unwrap();
+    assert_eq!(amg.complex_setup_mode_label(), "native_diagonal");
 
     let rhs = vec![S::from_parts(3.0, -4.0), S::from_parts(2.0, 5.0)];
     let mut out = vec![S::zero(); rhs.len()];
@@ -276,6 +278,7 @@ fn amg_complex_apply_residual_acceptance() {
     let op = CsrOp::new(Arc::new(csr.clone()));
     let mut amg = AMG::default();
     amg.setup(&op).unwrap();
+    assert_eq!(amg.complex_setup_mode_label(), "projected_real_hierarchy");
 
     let rhs = vec![
         S::from_parts(1.0, -0.3),
