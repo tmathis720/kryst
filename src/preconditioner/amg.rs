@@ -402,6 +402,9 @@ pub struct AMGConfig {
     pub dist_coarse_solver_route: DistCoarseSolverRoute,
     pub dist_apply_instrumentation: bool,
     pub dist_coarse_ghost_scale: f64,
+    /// In complex builds, reject genuinely complex non-diagonal operators until AMG
+    /// carries complex values through the full hierarchy.
+    pub require_native_complex_hierarchy: bool,
     pub level_relax_overrides: BTreeMap<usize, RelaxType>,
     pub level_sweep_overrides: BTreeMap<usize, (usize, usize)>,
     pub level_coarse_overrides: BTreeMap<usize, CoarseSolve>,
@@ -515,6 +518,7 @@ impl Default for AMGConfig {
             dist_coarse_solver_route: DistCoarseSolverRoute::Auto,
             dist_apply_instrumentation: false,
             dist_coarse_ghost_scale: 0.0,
+            require_native_complex_hierarchy: false,
             level_relax_overrides: BTreeMap::new(),
             level_sweep_overrides: BTreeMap::new(),
             level_coarse_overrides: BTreeMap::new(),
@@ -1676,6 +1680,11 @@ impl AMGBuilder {
 
     pub fn mixed_storage(mut self, storage: MixedStorage) -> Self {
         self.cfg.mixed_storage = storage;
+        self
+    }
+
+    pub fn require_native_complex_hierarchy(mut self, on: bool) -> Self {
+        self.cfg.require_native_complex_hierarchy = on;
         self
     }
 
@@ -7185,13 +7194,21 @@ impl Preconditioner for AMG {
         validate_complex_transfer_overrides_supported(&self.transfer_overrides, self.cfg.drop_tol)?;
         let csr_complex = csr_from_linop_complex(op, self.cfg.drop_tol)?;
         self.complex_diag_inv = complex_diagonal_inverse(csr_complex.as_ref(), self.cfg.drop_tol)?;
-        let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
         if self.complex_diag_inv.is_some() {
+            let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
             self.csr = Some(csr_real);
             self.state = AmgState::Uninitialized;
             self.stats = None;
             return Ok(());
         }
+        if self.cfg.require_native_complex_hierarchy
+            && csr_has_imaginary_values(csr_complex.as_ref(), self.cfg.drop_tol)
+        {
+            return Err(KError::Unsupported(
+                "AMG native complex hierarchy is required for this operator, but AMG levels are still real-valued; disable require_native_complex_hierarchy to use the current projected complex fallback",
+            ));
+        }
+        let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
         let sid = op.structure_id();
         let vid = op.values_id();
         self.setup_from_csr_real(csr_real, sid, vid)

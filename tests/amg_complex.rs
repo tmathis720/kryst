@@ -76,6 +76,87 @@ fn amg_complex_rejects_coarse_ilu_until_native_hierarchy_support() {
 }
 
 #[test]
+fn amg_complex_native_hierarchy_required_rejects_imaginary_coupling() {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(2.0),
+            S::from_parts(-1.0, 0.25),
+            S::from_parts(-1.0, -0.25),
+            S::from_real(2.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let mut amg = AMGBuilder::new()
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("amg build");
+
+    let err = amg
+        .setup(&op)
+        .expect_err("native complex hierarchy should be required");
+    assert!(
+        err.to_string().contains("native complex hierarchy"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn amg_complex_native_hierarchy_required_allows_real_valued_complex_matrix() {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(2.0),
+            S::from_real(-1.0),
+            S::from_real(-1.0),
+            S::from_real(2.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let mut amg = AMGBuilder::new()
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("amg build");
+
+    amg.setup(&op)
+        .expect("real-valued complex operator can use real hierarchy");
+}
+
+#[test]
+fn amg_complex_native_hierarchy_required_allows_complex_diagonal_fast_path() {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 1, 2],
+        vec![0, 1],
+        vec![S::from_parts(2.0, 1.0), S::from_parts(-1.0, 3.0)],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let mut amg = AMGBuilder::new()
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("amg build");
+
+    amg.setup(&op)
+        .expect("complex diagonal fast path is native scalar algebra");
+
+    let rhs = vec![S::from_parts(3.0, -4.0), S::from_parts(2.0, 5.0)];
+    let mut out = vec![S::zero(); rhs.len()];
+    amg.apply(PcSide::Left, &rhs, &mut out).unwrap();
+
+    let expected = vec![S::from_parts(0.4, -2.2), S::from_parts(1.3, -1.1)];
+    for (got, exp) in out.iter().zip(expected.iter()) {
+        assert!((*got - *exp).abs() < 1e-12, "got={got:?}, expected={exp:?}");
+    }
+}
+
+#[test]
 fn amg_complex_transfer_override_plumbing() {
     let csr = CsrMatrix::from_csr(
         2,
