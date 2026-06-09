@@ -64,7 +64,10 @@ impl<T: KrystScalar<Real = f64>> CoarseSolver<T> for CoarseCg<T> {
 pub struct CoarseDenseLu<T: KrystScalar<Real = f64> = f64> {
     is_setup: bool,
     n: usize,
-    a: Vec<T>,
+    lu: Vec<T>,
+    pivots: Vec<usize>,
+    rhs: Vec<T>,
+    nsetup: usize,
 }
 
 impl<T: KrystScalar<Real = f64>> CoarseDenseLu<T> {
@@ -72,7 +75,10 @@ impl<T: KrystScalar<Real = f64>> CoarseDenseLu<T> {
         Self {
             is_setup: false,
             n: 0,
-            a: Vec::new(),
+            lu: Vec::new(),
+            pivots: Vec::new(),
+            rhs: Vec::new(),
+            nsetup: 0,
         }
     }
 }
@@ -84,15 +90,20 @@ impl<T: KrystScalar<Real = f64>> CoarseSolver<T> for CoarseDenseLu<T> {
                 "coarse dense LU requires a square matrix".into(),
             ));
         }
+        self.is_setup = false;
         self.n = a.nrows();
-        self.a = vec![T::zero(); self.n * self.n];
+        self.lu = vec![T::zero(); self.n * self.n];
         for i in 0..self.n {
             let (cols, vals) = a.row(i);
             for (&j, &v) in cols.iter().zip(vals.iter()) {
-                self.a[i * self.n + j] = v;
+                self.lu[i * self.n + j] = v;
             }
         }
+        self.pivots.resize(self.n, 0);
+        dense_lu_factor(&mut self.lu, &mut self.pivots, self.n)?;
+        self.rhs.resize(self.n, T::zero());
         self.is_setup = true;
+        self.nsetup += 1;
         Ok(())
     }
     fn solve(&mut self, b: &[T], x: &mut [T]) -> Result<(), KError> {
@@ -103,12 +114,11 @@ impl<T: KrystScalar<Real = f64>> CoarseSolver<T> for CoarseDenseLu<T> {
         if b.len() != n || x.len() != n {
             return Err(KError::InvalidInput("coarse LU: dim mismatch".into()));
         }
-        dense_lu_solve(&self.a, b, x, n)?;
-        Ok(())
+        dense_lu_solve_factored(&self.lu, &self.pivots, b, x, &mut self.rhs, n)
     }
 
     fn nsetups(&self) -> usize {
-        0
+        self.nsetup
     }
 }
 
@@ -265,17 +275,16 @@ fn cg_sparse_generic<T: KrystScalar<Real = f64>>(
     Ok(())
 }
 
-fn dense_lu_solve<T: KrystScalar<Real = f64>>(
-    a: &[T],
-    b: &[T],
-    x: &mut [T],
+fn dense_lu_factor<T: KrystScalar<Real = f64>>(
+    lu: &mut [T],
+    pivots: &mut [usize],
     n: usize,
 ) -> Result<(), KError> {
-    if a.len() != n * n || b.len() != n || x.len() != n {
-        return Err(KError::InvalidInput("coarse dense LU: dim mismatch".into()));
+    if lu.len() != n * n || pivots.len() != n {
+        return Err(KError::InvalidInput(
+            "coarse dense LU factor: dim mismatch".into(),
+        ));
     }
-    let mut lu = a.to_vec();
-    let mut rhs = b.to_vec();
     for k in 0..n {
         let mut pivot = k;
         let mut pivot_abs = lu[k * n + k].abs();
@@ -295,19 +304,42 @@ fn dense_lu_solve<T: KrystScalar<Real = f64>>(
             for j in 0..n {
                 lu.swap(k * n + j, pivot * n + j);
             }
-            rhs.swap(k, pivot);
         }
+        pivots[k] = pivot;
         let pivot_val = lu[k * n + k];
         for i in (k + 1)..n {
             let factor = lu[i * n + k] / pivot_val;
-            lu[i * n + k] = T::zero();
+            lu[i * n + k] = factor;
             for j in (k + 1)..n {
                 lu[i * n + j] = lu[i * n + j] - factor * lu[k * n + j];
             }
-            rhs[i] = rhs[i] - factor * rhs[k];
         }
     }
+    Ok(())
+}
 
+fn dense_lu_solve_factored<T: KrystScalar<Real = f64>>(
+    lu: &[T],
+    pivots: &[usize],
+    b: &[T],
+    x: &mut [T],
+    rhs: &mut [T],
+    n: usize,
+) -> Result<(), KError> {
+    if lu.len() != n * n || pivots.len() != n || b.len() != n || x.len() != n || rhs.len() != n {
+        return Err(KError::InvalidInput("coarse dense LU: dim mismatch".into()));
+    }
+    rhs.copy_from_slice(b);
+    for (k, &pivot) in pivots.iter().enumerate() {
+        rhs.swap(k, pivot);
+    }
+    for i in 0..n {
+        let mut sum = rhs[i];
+        for j in 0..i {
+            sum = sum - lu[i * n + j] * rhs[j];
+        }
+        rhs[i] = sum;
+    }
     for i in (0..n).rev() {
         let mut sum = rhs[i];
         for j in (i + 1)..n {
@@ -349,6 +381,29 @@ mod tests {
         solver.solve(&[1.0, 1.0], &mut x).unwrap();
         assert!((x[0] - 0.2).abs() < 1e-12);
         assert!((x[1] - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn dense_lu_reuses_factorization_and_workspace_across_solves() {
+        let a = csr_from_rows(2, vec![vec![(0, 0.0), (1, 2.0)], vec![(0, 1.0), (1, 3.0)]]);
+        let mut solver = CoarseDenseLu::<f64>::new();
+        solver.setup(&a).unwrap();
+
+        let factored = solver.lu.clone();
+        let rhs_ptr = solver.rhs.as_ptr();
+        let rhs_capacity = solver.rhs.capacity();
+
+        let mut x = vec![0.0; 2];
+        solver.solve(&[4.0, 7.0], &mut x).unwrap();
+        assert!((x[0] - 1.0).abs() < 1e-12);
+        assert!((x[1] - 2.0).abs() < 1e-12);
+
+        solver.solve(&[-2.0, -1.0], &mut x).unwrap();
+        assert!((x[0] - 2.0).abs() < 1e-12);
+        assert!((x[1] + 1.0).abs() < 1e-12);
+        assert_eq!(solver.lu, factored);
+        assert_eq!(solver.rhs.as_ptr(), rhs_ptr);
+        assert_eq!(solver.rhs.capacity(), rhs_capacity);
     }
 
     #[test]

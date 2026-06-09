@@ -5040,19 +5040,33 @@ impl AMG {
                 p_cond_sketched: rank_diag.cond_estimate,
                 galerkin_worst_rel: galerkin_worst,
             });
-            if l + 1 == h.coarsest_ix() && matches!(self.cfg.coarse_solve, CoarseSolve::ILU) {
+            if l + 1 == h.coarsest_ix() {
                 let levelc = &mut h.levels[l + 1];
-                if let Some(m) = &levelc.coarse_solver {
-                    m.lock().unwrap().setup(&levelc.a)?;
+                let prefer_dense = matches!(self.cfg.coarse_solve, CoarseSolve::DirectDense)
+                    || levelc.a.nrows() <= self.cfg.max_coarse_size;
+                if prefer_dense {
+                    if let Some(m) = &levelc.coarse_solver {
+                        m.lock().unwrap().setup(&levelc.a)?;
+                    } else {
+                        let mut solver = CoarseDenseLu::new();
+                        solver.setup(&levelc.a)?;
+                        levelc.coarse_solver = Some(Mutex::new(Box::new(solver)));
+                    }
+                } else if matches!(self.cfg.coarse_solve, CoarseSolve::ILU) {
+                    if let Some(m) = &levelc.coarse_solver {
+                        m.lock().unwrap().setup(&levelc.a)?;
+                    } else {
+                        let mut solver = CoarseIlu::new(
+                            self.cfg.tolerance,
+                            levelc.a.nrows().min(self.cfg.max_iterations.max(50)),
+                            self.cfg.ilu_drop_tol,
+                            self.cfg.ilu_fill_per_row,
+                        );
+                        solver.setup(&levelc.a)?;
+                        levelc.coarse_solver = Some(Mutex::new(Box::new(solver)));
+                    }
                 } else {
-                    let mut solver = CoarseIlu::new(
-                        self.cfg.tolerance,
-                        levelc.a.nrows().min(self.cfg.max_iterations.max(50)),
-                        self.cfg.ilu_drop_tol,
-                        self.cfg.ilu_fill_per_row,
-                    );
-                    solver.setup(&levelc.a)?;
-                    levelc.coarse_solver = Some(Mutex::new(Box::new(solver)));
+                    levelc.coarse_solver = None;
                 }
             }
         }
@@ -6626,6 +6640,72 @@ impl AMG {
         }
     }
 
+    fn solve_coarse_level(
+        &self,
+        h: &AmgHierarchy,
+        level: usize,
+        rhs: &[f64],
+        sol: &mut [f64],
+        ws: &mut AMGWorkspace,
+    ) -> Result<(), KError> {
+        let levelc = &h.levels[level];
+        let a = &levelc.a;
+        let n = a.nrows();
+        if matches!(h.coarse_solve, CoarseSolve::Smoother) {
+            ws.ensure(n);
+            return self.apply_relax_effective(
+                RelaxPhase::Coarsest,
+                RelaxWhere::Pre,
+                level,
+                levelc,
+                rhs,
+                sol,
+                ws,
+            );
+        }
+
+        let prefer_dense =
+            matches!(h.coarse_solve, CoarseSolve::DirectDense) || n <= self.cfg.max_coarse_size;
+        if prefer_dense {
+            if let Some(m) = &levelc.coarse_solver {
+                return m
+                    .lock()
+                    .expect("coarse solver mutex poisoned")
+                    .solve(rhs, sol);
+            }
+            let mut solver = CoarseDenseLu::new();
+            solver.setup(a)?;
+            return solver.solve(rhs, sol);
+        }
+
+        match h.coarse_solve {
+            CoarseSolve::CG => cg_sparse(
+                a,
+                rhs,
+                sol,
+                self.cfg.tolerance,
+                n.min(self.cfg.max_iterations.max(50)),
+            ),
+            CoarseSolve::ILU => {
+                if let Some(m) = &levelc.coarse_solver {
+                    let mut guard = m.lock().expect("coarse solver mutex poisoned");
+                    guard.solve(rhs, sol)
+                } else {
+                    let mut solver = CoarseIlu::new(
+                        self.cfg.tolerance,
+                        n.min(self.cfg.max_iterations.max(50)),
+                        self.cfg.ilu_drop_tol,
+                        self.cfg.ilu_fill_per_row,
+                    );
+                    solver.setup(a)?;
+                    solver.solve(rhs, sol)
+                }
+            }
+            CoarseSolve::DirectDense => unreachable!(),
+            CoarseSolve::Smoother => unreachable!(),
+        }
+    }
+
     fn cycle_profiled(
         &self,
         level: usize,
@@ -6651,54 +6731,7 @@ impl AMG {
 
         if level == lc {
             with_timing(prof, &mut lv.coarse_solve, || {
-                let n = a.nrows();
-                if matches!(h.coarse_solve, CoarseSolve::Smoother) {
-                    ws.ensure(n);
-                    return self.apply_relax_effective(
-                        RelaxPhase::Coarsest,
-                        RelaxWhere::Pre,
-                        level,
-                        &h.levels[level],
-                        rhs,
-                        sol,
-                        ws,
-                    );
-                }
-                let prefer_dense = matches!(h.coarse_solve, CoarseSolve::DirectDense)
-                    || n <= self.cfg.max_coarse_size;
-                if prefer_dense {
-                    let mut solver = CoarseDenseLu::new();
-                    solver.setup(a)?;
-                    solver.solve(rhs, sol)
-                } else {
-                    match h.coarse_solve {
-                        CoarseSolve::CG => cg_sparse(
-                            a,
-                            rhs,
-                            sol,
-                            self.cfg.tolerance,
-                            n.min(self.cfg.max_iterations.max(50)),
-                        ),
-                        CoarseSolve::ILU => {
-                            let levelc = &h.levels[level];
-                            if let Some(m) = &levelc.coarse_solver {
-                                let mut guard = m.lock().expect("coarse solver mutex poisoned");
-                                guard.solve(rhs, sol)
-                            } else {
-                                let mut solver = CoarseIlu::new(
-                                    self.cfg.tolerance,
-                                    n.min(self.cfg.max_iterations.max(50)),
-                                    self.cfg.ilu_drop_tol,
-                                    self.cfg.ilu_fill_per_row,
-                                );
-                                solver.setup(a)?;
-                                solver.solve(rhs, sol)
-                            }
-                        }
-                        CoarseSolve::DirectDense => unreachable!(),
-                        CoarseSolve::Smoother => unreachable!(),
-                    }
-                }
+                self.solve_coarse_level(h, level, rhs, sol, ws)
             })?;
             if let Some(c) = cyc {
                 c.per_level.push(lv);
@@ -6817,9 +6850,7 @@ impl AMG {
             let mut zc = vec![R::zero(); nc];
             if level + 1 == lc {
                 with_timing(prof, &mut lv.coarse_solve, || {
-                    let mut solver = CoarseDenseLu::new();
-                    solver.setup(&h.levels[level + 1].a)?;
-                    solver.solve(&local_coarse[..nc], &mut zc)
+                    self.solve_coarse_level(h, level + 1, &local_coarse[..nc], &mut zc, ws)
                 })?;
             } else {
                 self.cycle_profiled(
@@ -8227,7 +8258,13 @@ fn build_hierarchy(
 
     #[allow(non_snake_case)]
     let L = levels.len() - 1;
-    if matches!(cfg.coarse_solve, CoarseSolve::ILU) {
+    let prefer_dense = matches!(cfg.coarse_solve, CoarseSolve::DirectDense)
+        || levels[L].a.nrows() <= cfg.max_coarse_size;
+    if prefer_dense {
+        let mut solver = CoarseDenseLu::new();
+        solver.setup(&levels[L].a)?;
+        levels[L].coarse_solver = Some(Mutex::new(Box::new(solver)));
+    } else if matches!(cfg.coarse_solve, CoarseSolve::ILU) {
         let n = levels[L].a.nrows();
         let mut ilu = CoarseIlu::new(
             cfg.tolerance,
@@ -11197,6 +11234,48 @@ mod tests {
             .unwrap()[0];
         assert!((new_l - old_l).abs() > 1e-6);
         assert!((new_ds - old_ds).abs() > 1e-12);
+    }
+
+    #[test]
+    fn coarse_dense_factorization_reused_across_cycles() {
+        let a = poisson1d(16);
+        let mut amg = AMGBuilder::new()
+            .relaxation_type(RelaxType::Jacobi)
+            .grid_relax_type_all(RelaxType::Jacobi)
+            .coarse_solve(CoarseSolve::DirectDense)
+            .num_grid_sweeps(RelaxPhase::Coarsest, 0)
+            .build(&Mat::<f64>::zeros(0, 0))
+            .unwrap();
+        amg.setup(&a).unwrap();
+
+        let setups_before = {
+            let h = ready_hierarchy(&amg);
+            let lvl = &h.levels[h.coarsest_ix()];
+            lvl.coarse_solver
+                .as_ref()
+                .expect("dense coarse solver cache")
+                .lock()
+                .unwrap()
+                .nsetups()
+        };
+
+        let rhs = vec![1.0; a.nrows()];
+        let mut z = vec![0.0; a.nrows()];
+        amg.apply(PcSide::Left, &rhs, &mut z).unwrap();
+        amg.apply(PcSide::Left, &rhs, &mut z).unwrap();
+
+        let setups_after = {
+            let h = ready_hierarchy(&amg);
+            let lvl = &h.levels[h.coarsest_ix()];
+            lvl.coarse_solver
+                .as_ref()
+                .expect("dense coarse solver cache")
+                .lock()
+                .unwrap()
+                .nsetups()
+        };
+        assert!(setups_before > 0);
+        assert_eq!(setups_after, setups_before);
     }
 
     #[test]
