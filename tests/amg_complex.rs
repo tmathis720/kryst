@@ -15,6 +15,7 @@ fn amg_complex_setup_apply_small() {
     let mut amg = AMG::default();
     amg.setup(&op).unwrap();
     assert_eq!(amg.complex_setup_mode_label(), "native_diagonal");
+    assert_eq!(amg.complex_setup_fallback_reason(), None);
 
     let rhs = vec![S::from_parts(1.0, -2.0)];
     let mut out = vec![S::zero(); rhs.len()];
@@ -37,6 +38,7 @@ fn amg_complex_diagonal_uses_complex_inverse() {
     let mut amg = AMG::default();
     amg.setup(&op).unwrap();
     assert_eq!(amg.complex_setup_mode_label(), "native_diagonal");
+    assert_eq!(amg.complex_setup_fallback_reason(), None);
 
     let rhs = vec![S::from_parts(3.0, -4.0), S::from_parts(2.0, 5.0)];
     let mut out = vec![S::zero(); rhs.len()];
@@ -103,6 +105,10 @@ fn amg_complex_native_hierarchy_required_rejects_imaginary_coupling() {
     assert!(
         err.to_string().contains("native complex hierarchy"),
         "unexpected error: {err}"
+    );
+    assert_eq!(
+        amg.complex_setup_fallback_reason(),
+        Some("native_complex_hierarchy_required")
     );
 }
 
@@ -283,8 +289,19 @@ fn amg_complex_apply_residual_acceptance() {
     amg.setup(&op).unwrap();
     assert_eq!(amg.complex_setup_mode_label(), "projected_real_hierarchy");
     assert_eq!(
+        amg.complex_setup_fallback_reason(),
+        Some("imaginary_values_projected_to_real_hierarchy")
+    );
+    assert_eq!(
         amg.stats().expect("stats").complex_setup_mode.as_str(),
         "projected_real_hierarchy"
+    );
+    assert_eq!(
+        amg.stats()
+            .expect("stats")
+            .complex_setup_fallback_reason
+            .as_deref(),
+        Some("imaginary_values_projected_to_real_hierarchy")
     );
 
     let rhs = vec![

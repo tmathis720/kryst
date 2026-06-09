@@ -3610,6 +3610,8 @@ pub struct AMG {
     complex_diag_inv: Option<Vec<S>>,
     #[cfg(feature = "complex")]
     complex_setup_mode: AmgComplexSetupMode,
+    #[cfg(feature = "complex")]
+    complex_setup_fallback_reason: Option<String>,
     state: AmgState,
     cycle_policy: Box<dyn CyclePolicy + Send + Sync>,
     cfg: AMGConfig,
@@ -3637,6 +3639,8 @@ impl Default for AMG {
             complex_diag_inv: None,
             #[cfg(feature = "complex")]
             complex_setup_mode: AmgComplexSetupMode::Unset,
+            #[cfg(feature = "complex")]
+            complex_setup_fallback_reason: None,
             state: AmgState::Uninitialized,
             cycle_policy: Self::make_cycle_policy(&cfg),
             cfg,
@@ -6944,6 +6948,7 @@ impl AMG {
         #[cfg(feature = "complex")]
         if let Some(s) = out.as_mut() {
             s.complex_setup_mode = self.complex_setup_mode;
+            s.complex_setup_fallback_reason = self.complex_setup_fallback_reason.clone();
         }
         out
     }
@@ -6956,6 +6961,11 @@ impl AMG {
     #[cfg(feature = "complex")]
     pub fn complex_setup_mode_label(&self) -> &'static str {
         self.complex_setup_mode.as_str()
+    }
+
+    #[cfg(feature = "complex")]
+    pub fn complex_setup_fallback_reason(&self) -> Option<&str> {
+        self.complex_setup_fallback_reason.as_deref()
     }
 
     pub fn dist_apply_stats(&self) -> Option<DistApplyStats> {
@@ -7244,20 +7254,24 @@ impl Preconditioner for AMG {
         self.cfg.validate()?;
         self.dist = None;
         self.complex_setup_mode = AmgComplexSetupMode::Unset;
+        self.complex_setup_fallback_reason = None;
         validate_complex_transfer_overrides_supported(&self.transfer_overrides, self.cfg.drop_tol)?;
         let csr_complex = csr_from_linop_complex(op, self.cfg.drop_tol)?;
         self.complex_diag_inv = complex_diagonal_inverse(csr_complex.as_ref(), self.cfg.drop_tol)?;
         if self.complex_diag_inv.is_some() {
             self.complex_setup_mode = AmgComplexSetupMode::NativeDiagonal;
+            self.complex_setup_fallback_reason = None;
             let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
             self.csr = Some(csr_real);
             self.state = AmgState::Uninitialized;
             self.stats = None;
             return Ok(());
         }
-        if self.cfg.require_native_complex_hierarchy
-            && csr_has_imaginary_values(csr_complex.as_ref(), self.cfg.drop_tol)
-        {
+        let has_imaginary_values =
+            csr_has_imaginary_values(csr_complex.as_ref(), self.cfg.drop_tol);
+        if self.cfg.require_native_complex_hierarchy && has_imaginary_values {
+            self.complex_setup_fallback_reason =
+                Some("native_complex_hierarchy_required".to_string());
             return Err(KError::Unsupported(
                 "AMG native complex hierarchy is required for this operator, but AMG levels are still real-valued; disable require_native_complex_hierarchy to use the current projected complex fallback",
             ));
@@ -7267,6 +7281,14 @@ impl Preconditioner for AMG {
         let vid = op.values_id();
         self.setup_from_csr_real(csr_real, sid, vid)?;
         self.complex_setup_mode = AmgComplexSetupMode::ProjectedRealHierarchy;
+        self.complex_setup_fallback_reason = Some(
+            if has_imaginary_values {
+                "imaginary_values_projected_to_real_hierarchy"
+            } else {
+                "real_valued_complex_matrix_uses_real_hierarchy"
+            }
+            .to_string(),
+        );
         Ok(())
     }
 
@@ -10054,6 +10076,8 @@ pub struct AmgStats {
     pub dist_route_fallback: Vec<String>,
     #[cfg(feature = "complex")]
     pub complex_setup_mode: AmgComplexSetupMode,
+    #[cfg(feature = "complex")]
+    pub complex_setup_fallback_reason: Option<String>,
 }
 
 impl AmgStats {
@@ -10080,6 +10104,8 @@ impl AmgStats {
             dist_route_fallback: Vec::new(),
             #[cfg(feature = "complex")]
             complex_setup_mode: AmgComplexSetupMode::Unset,
+            #[cfg(feature = "complex")]
+            complex_setup_fallback_reason: None,
         }
     }
 }
