@@ -1929,6 +1929,7 @@ struct AMGWorkspace {
     work: Vec<R>,
     residual: Vec<R>,
     coarse_rhs: Vec<R>,
+    coarse_sol: Vec<Vec<R>>,
     fine_corr: Vec<R>,
     k_zeta: Vec<R>,
     k_p: Vec<R>,
@@ -1946,6 +1947,7 @@ impl AMGWorkspace {
             work: vec![R::zero(); cap],
             residual: vec![R::zero(); cap],
             coarse_rhs: vec![R::zero(); cap],
+            coarse_sol: Vec::new(),
             fine_corr: vec![R::zero(); cap],
             k_zeta: vec![R::zero(); cap],
             k_p: vec![R::zero(); cap],
@@ -1975,6 +1977,21 @@ impl AMGWorkspace {
         grow(&mut self.k_residual, n);
     }
 
+    fn take_coarse_sol(&mut self, level: usize, n: usize) -> Vec<R> {
+        if self.coarse_sol.len() <= level {
+            self.coarse_sol.resize_with(level + 1, Vec::new);
+        }
+        let mut sol = std::mem::take(&mut self.coarse_sol[level]);
+        sol.resize(n, R::zero());
+        sol.fill(R::zero());
+        sol
+    }
+
+    fn put_coarse_sol(&mut self, level: usize, sol: Vec<R>) {
+        debug_assert!(level < self.coarse_sol.len());
+        self.coarse_sol[level] = sol;
+    }
+
     fn ensure_mixed(&mut self, n: usize) {
         if self.mp.is_none() {
             self.mp = Some(MixedWs::with_capacity(n));
@@ -1982,6 +1999,25 @@ impl AMGWorkspace {
         if let Some(ref mut mp) = self.mp {
             mp.ensure_vectors(n);
         }
+    }
+}
+
+#[cfg(feature = "complex")]
+#[derive(Debug, Default)]
+struct ComplexApplyWorkspace {
+    r_re: Vec<f64>,
+    r_im: Vec<f64>,
+    z_re: Vec<f64>,
+    z_im: Vec<f64>,
+}
+
+#[cfg(feature = "complex")]
+impl ComplexApplyWorkspace {
+    fn ensure(&mut self, n: usize) {
+        self.r_re.resize(n, 0.0);
+        self.r_im.resize(n, 0.0);
+        self.z_re.resize(n, 0.0);
+        self.z_im.resize(n, 0.0);
     }
 }
 
@@ -3617,6 +3653,9 @@ pub struct AMG {
     cfg: AMGConfig,
     stats: Option<AmgStats>,
     runtime: Mutex<AmgRuntime>,
+    workspace_pool: Mutex<Vec<AMGWorkspace>>,
+    #[cfg(feature = "complex")]
+    complex_workspace_pool: Mutex<Vec<ComplexApplyWorkspace>>,
     dist: Option<DistAmgInfo>,
     transfer_overrides: BTreeMap<usize, AmgTransferOperators>,
     coarse_level_overrides: BTreeMap<usize, CoarseSolve>,
@@ -3646,6 +3685,9 @@ impl Default for AMG {
             cfg,
             stats: None,
             runtime: Mutex::new(AmgRuntime::default()),
+            workspace_pool: Mutex::new(Vec::new()),
+            #[cfg(feature = "complex")]
+            complex_workspace_pool: Mutex::new(Vec::new()),
             dist: None,
             transfer_overrides: BTreeMap::new(),
             coarse_level_overrides: BTreeMap::new(),
@@ -4267,27 +4309,41 @@ impl AMG {
         z: &mut [f64],
         h: &AmgHierarchy,
     ) -> Result<(), KError> {
-        let mut ws = AMGWorkspace::new(h.finest().a.nrows());
+        let n = h.finest().a.nrows();
+        let mut ws = self
+            .workspace_pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()
+            .unwrap_or_else(|| AMGWorkspace::new(n));
+        ws.ensure(n);
         let do_prof = self.cfg.logging_level >= 2;
-        if do_prof {
+        let result = if do_prof {
             let mut cyc = CycleTimings::default();
             let t_all = tic();
             z.fill(R::default());
-            self.cycle_profiled(0, r, z, &mut ws, Some(&mut cyc))?;
-            cyc.total_cycle = toc(t_all);
-            cyc.cycle_type = self.cfg.cycle_type;
-            cyc.kcycle = self.cfg.kcycle.clone();
-            if let Ok(mut rt) = self.runtime.lock() {
-                rt.last_cycle = Some(cyc.clone());
+            let cycle_result = self.cycle_profiled(0, r, z, &mut ws, Some(&mut cyc));
+            if cycle_result.is_ok() {
+                cyc.total_cycle = toc(t_all);
+                cyc.cycle_type = self.cfg.cycle_type;
+                cyc.kcycle = self.cfg.kcycle.clone();
+                if let Ok(mut rt) = self.runtime.lock() {
+                    rt.last_cycle = Some(cyc.clone());
+                }
+                if self.cfg.print_level >= 2 {
+                    print_cycle_table(&cyc);
+                }
             }
-            if self.cfg.print_level >= 2 {
-                print_cycle_table(&cyc);
-            }
+            cycle_result
         } else {
             z.fill(R::default());
-            self.cycle(0, r, z, &mut ws)?;
-        }
-        Ok(())
+            self.cycle(0, r, z, &mut ws)
+        };
+        self.workspace_pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ws);
+        result
     }
 
     #[cfg(not(feature = "complex"))]
@@ -6847,11 +6903,11 @@ impl AMG {
 
         let gamma = cycle_pol.gamma_visits(level).max(1);
         for t in 0..gamma {
-            let mut zc = vec![R::zero(); nc];
-            if level + 1 == lc {
+            let mut zc = ws.take_coarse_sol(level, nc);
+            let coarse_result = if level + 1 == lc {
                 with_timing(prof, &mut lv.coarse_solve, || {
                     self.solve_coarse_level(h, level + 1, &local_coarse[..nc], &mut zc, ws)
-                })?;
+                })
             } else {
                 self.cycle_profiled(
                     level + 1,
@@ -6859,12 +6915,18 @@ impl AMG {
                     &mut zc,
                     ws,
                     cyc.as_deref_mut(),
-                )?;
+                )
+            };
+            if let Err(err) = coarse_result {
+                ws.put_coarse_sol(level, zc);
+                return Err(err);
             }
-            with_timing(prof, &mut lv.prolong, || {
+            let prolong_result = with_timing(prof, &mut lv.prolong, || {
                 ws.fine_corr[..n].fill(R::zero());
                 p.spmv_scaled(1.0, &zc, 0.0, &mut ws.fine_corr[..n])
-            })?;
+            });
+            ws.put_coarse_sol(level, zc);
+            prolong_result?;
             for i in 0..n {
                 sol[i] += ws.fine_corr[i];
             }
@@ -7343,20 +7405,30 @@ impl Preconditioner for AMG {
             }
             return Ok(());
         }
-        let mut r_re = vec![0.0f64; n];
-        let mut r_im = vec![0.0f64; n];
+        let mut ws = self
+            .complex_workspace_pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()
+            .unwrap_or_default();
+        ws.ensure(n);
         for (i, &ri) in r.iter().enumerate() {
-            r_re[i] = ri.real();
-            r_im[i] = ri.imag();
+            ws.r_re[i] = ri.real();
+            ws.r_im[i] = ri.imag();
         }
-        let mut z_re = vec![0.0f64; n];
-        let mut z_im = vec![0.0f64; n];
-        self.apply_local(side, &r_re, &mut z_re)?;
-        self.apply_local(side, &r_im, &mut z_im)?;
-        for i in 0..n {
-            z[i] = S::from_parts(z_re[i], z_im[i]);
+        let result = self
+            .apply_local(side, &ws.r_re, &mut ws.z_re)
+            .and_then(|_| self.apply_local(side, &ws.r_im, &mut ws.z_im));
+        if result.is_ok() {
+            for i in 0..n {
+                z[i] = S::from_parts(ws.z_re[i], ws.z_im[i]);
+            }
         }
-        Ok(())
+        self.complex_workspace_pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ws);
+        result
     }
 
     fn capabilities(&self) -> PcCaps {
@@ -11280,6 +11352,46 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "complex"))]
+    fn apply_reuses_v_cycle_workspace() {
+        let a = poisson1d(32);
+        let mut amg = AMGBuilder::new()
+            .relaxation_type(RelaxType::Jacobi)
+            .grid_relax_type_all(RelaxType::Jacobi)
+            .build(&Mat::<f64>::zeros(0, 0))
+            .unwrap();
+        amg.setup(&a).unwrap();
+
+        let rhs = vec![1.0; a.nrows()];
+        let mut z = vec![0.0; a.nrows()];
+        amg.apply(PcSide::Left, &rhs, &mut z).unwrap();
+        let (temp_ptr, temp_cap, coarse_ptrs, coarse_caps) = {
+            let pool = amg.workspace_pool.lock().unwrap();
+            let ws = pool.last().expect("workspace returned to pool");
+            (
+                ws.temp.as_ptr(),
+                ws.temp.capacity(),
+                ws.coarse_sol.iter().map(Vec::as_ptr).collect::<Vec<_>>(),
+                ws.coarse_sol.iter().map(Vec::capacity).collect::<Vec<_>>(),
+            )
+        };
+
+        amg.apply(PcSide::Left, &rhs, &mut z).unwrap();
+        let pool = amg.workspace_pool.lock().unwrap();
+        let ws = pool.last().expect("workspace returned to pool");
+        assert_eq!(ws.temp.as_ptr(), temp_ptr);
+        assert_eq!(ws.temp.capacity(), temp_cap);
+        assert_eq!(
+            ws.coarse_sol.iter().map(Vec::as_ptr).collect::<Vec<_>>(),
+            coarse_ptrs
+        );
+        assert_eq!(
+            ws.coarse_sol.iter().map(Vec::capacity).collect::<Vec<_>>(),
+            coarse_caps
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "complex"))]
     fn coarse_ilu_reused() {
         let n = 8;
         let mut row_ptr = vec![0usize; n + 1];
@@ -11611,8 +11723,8 @@ mod tests {
 #[cfg(all(test, feature = "complex"))]
 mod tests_complex {
     use super::{
-        RowScaleMode, csr_pattern_hash, eff_nnz, local_qr, max_row_sum_abs, p_column_norms2,
-        row_scaling, sync_adjoint_values_from_forward,
+        ComplexApplyWorkspace, RowScaleMode, csr_pattern_hash, eff_nnz, local_qr, max_row_sum_abs,
+        p_column_norms2, row_scaling, sync_adjoint_values_from_forward,
     };
     use crate::algebra::prelude::*;
     use crate::matrix::sparse::CsrMatrix;
@@ -11635,6 +11747,43 @@ mod tests_complex {
                 S::from_parts(2.0, 0.1),
             ],
         )
+    }
+
+    #[test]
+    fn complex_apply_workspace_reuses_conversion_buffers() {
+        let mut ws = ComplexApplyWorkspace::default();
+        ws.ensure(32);
+        let ptrs = [
+            ws.r_re.as_ptr(),
+            ws.r_im.as_ptr(),
+            ws.z_re.as_ptr(),
+            ws.z_im.as_ptr(),
+        ];
+        let caps = [
+            ws.r_re.capacity(),
+            ws.r_im.capacity(),
+            ws.z_re.capacity(),
+            ws.z_im.capacity(),
+        ];
+        ws.ensure(16);
+        assert_eq!(
+            [
+                ws.r_re.as_ptr(),
+                ws.r_im.as_ptr(),
+                ws.z_re.as_ptr(),
+                ws.z_im.as_ptr(),
+            ],
+            ptrs
+        );
+        assert_eq!(
+            [
+                ws.r_re.capacity(),
+                ws.r_im.capacity(),
+                ws.z_re.capacity(),
+                ws.z_im.capacity(),
+            ],
+            caps
+        );
     }
 
     #[test]
