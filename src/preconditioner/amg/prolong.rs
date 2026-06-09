@@ -784,6 +784,86 @@ pub fn smooth_tentative_sa(
     }
 }
 
+struct SaRowScratch<T> {
+    marker: Vec<isize>,
+    acc_cols: Vec<usize>,
+    acc_vals: Vec<T>,
+}
+
+impl<T> SaRowScratch<T> {
+    fn new(ncoarse: usize) -> Self {
+        Self {
+            marker: vec![-1; ncoarse],
+            acc_cols: Vec::new(),
+            acc_vals: Vec::new(),
+        }
+    }
+}
+
+fn smooth_tentative_sa_row<T: KrystScalar<Real = f64>>(
+    i: usize,
+    a: &CsrMatrix<T>,
+    d_inv: &[T],
+    tp: &TentativeP,
+    omega: f64,
+    drop_tol: f64,
+    max_per_row: usize,
+    trunc_rel: f64,
+    scratch: &mut SaRowScratch<T>,
+) -> (Vec<usize>, Vec<T>) {
+    scratch.acc_cols.clear();
+    scratch.acc_vals.clear();
+
+    let myc = tp.agg_of[i];
+    scratch.marker[myc] = 0;
+    scratch.acc_cols.push(myc);
+    scratch.acc_vals.push(T::one());
+
+    let rp = a.row_ptr();
+    let cj = a.col_idx();
+    let vv = a.values();
+    let di = d_inv[i];
+    let minus_omega = T::from_real(-omega);
+    for p in rp[i]..rp[i + 1] {
+        let j = cj[p];
+        if j == i {
+            continue;
+        }
+        let cjg = tp.agg_of[j];
+        let v = minus_omega * di * vv[p];
+        let k = scratch.marker[cjg];
+        if k >= 0 {
+            scratch.acc_vals[k as usize] = scratch.acc_vals[k as usize] + v;
+        } else {
+            scratch.marker[cjg] = scratch.acc_cols.len() as isize;
+            scratch.acc_cols.push(cjg);
+            scratch.acc_vals.push(v);
+        }
+    }
+
+    let mut cols = scratch.acc_cols.clone();
+    let mut vals = scratch.acc_vals.clone();
+    filter_row_by_truncation(
+        &mut cols,
+        &mut vals,
+        RowFilter {
+            tau_abs: drop_tol,
+            tau_rel: trunc_rel,
+            k_max: max_per_row,
+            must_keep: Some(myc),
+        },
+    );
+    if cols.is_empty() {
+        cols.push(myc);
+        vals.push(T::one());
+    }
+
+    for &c in &scratch.acc_cols {
+        scratch.marker[c] = -1;
+    }
+    (cols, vals)
+}
+
 pub fn smooth_tentative_sa_generic<T: KrystScalar<Real = f64>>(
     a: &CsrMatrix<T>,
     d_inv: &[T],
@@ -795,78 +875,67 @@ pub fn smooth_tentative_sa_generic<T: KrystScalar<Real = f64>>(
 ) -> GenericPcsr<T> {
     let m = a.nrows();
     let ncoarse = tp.n_coarse;
-    let rp = a.row_ptr();
-    let cj = a.col_idx();
-    let vv = a.values();
 
-    let mut row_ptr = Vec::with_capacity(m + 1);
-    let mut col_idx: Vec<usize> = Vec::new();
-    let mut vals: Vec<T> = Vec::new();
-    row_ptr.push(0);
-
-    let mut marker: Vec<isize> = vec![-1; ncoarse.min(1024).max(512)];
-    let mut acc_cols: Vec<usize> = Vec::new();
-    let mut acc_vals: Vec<T> = Vec::new();
-    let minus_omega = T::from_real(-omega);
-
-    for i in 0..m {
-        if marker.len() < ncoarse {
-            marker.resize(ncoarse, -1);
+    #[cfg(feature = "rayon")]
+    let (row_ptr, col_idx, vals) = {
+        use rayon::prelude::*;
+        let rows: Vec<(Vec<usize>, Vec<T>)> = (0..m)
+            .into_par_iter()
+            .map_init(
+                || SaRowScratch::new(ncoarse),
+                |scratch, i| {
+                    smooth_tentative_sa_row(
+                        i,
+                        a,
+                        d_inv,
+                        tp,
+                        omega,
+                        drop_tol,
+                        max_per_row,
+                        trunc_rel,
+                        scratch,
+                    )
+                },
+            )
+            .collect();
+        let total_nnz = rows.iter().map(|(cols, _)| cols.len()).sum();
+        let mut row_ptr = Vec::with_capacity(m + 1);
+        let mut col_idx = Vec::with_capacity(total_nnz);
+        let mut vals = Vec::with_capacity(total_nnz);
+        row_ptr.push(0);
+        for (cols, row_vals) in rows {
+            col_idx.extend(cols);
+            vals.extend(row_vals);
+            row_ptr.push(col_idx.len());
         }
-        acc_cols.clear();
-        acc_vals.clear();
+        (row_ptr, col_idx, vals)
+    };
 
-        // Start with 1.0 at own aggregate
-        let myc = tp.agg_of[i];
-        marker[myc] = 0;
-        acc_cols.push(myc);
-        acc_vals.push(T::one());
-
-        // Accumulate -ω d_i a_ij into coarse columns of neighbors' aggregates
-        let di = d_inv[i];
-        let rs = rp[i];
-        let re = rp[i + 1];
-        for p in rs..re {
-            let j = cj[p];
-            if j == i {
-                continue;
-            }
-            let cjg = tp.agg_of[j];
-            let v = minus_omega * di * vv[p];
-            let k = marker[cjg];
-            if k >= 0 {
-                acc_vals[k as usize] = acc_vals[k as usize] + v;
-            } else {
-                marker[cjg] = acc_cols.len() as isize;
-                acc_cols.push(cjg);
-                acc_vals.push(v);
-            }
+    #[cfg(not(feature = "rayon"))]
+    let (row_ptr, col_idx, vals) = {
+        let mut scratch = SaRowScratch::new(ncoarse);
+        let mut row_ptr = Vec::with_capacity(m + 1);
+        let mut col_idx = Vec::new();
+        let mut vals = Vec::new();
+        row_ptr.push(0);
+        for i in 0..m {
+            let (cols, row_vals) = smooth_tentative_sa_row(
+                i,
+                a,
+                d_inv,
+                tp,
+                omega,
+                drop_tol,
+                max_per_row,
+                trunc_rel,
+                &mut scratch,
+            );
+            col_idx.extend(cols);
+            vals.extend(row_vals);
+            row_ptr.push(col_idx.len());
         }
-
-        let mut cols: Vec<usize> = acc_cols.clone();
-        let mut vs: Vec<T> = acc_vals.clone();
-        let rf = RowFilter {
-            tau_abs: drop_tol,
-            tau_rel: trunc_rel,
-            k_max: max_per_row,
-            must_keep: Some(myc),
-        };
-        filter_row_by_truncation(&mut cols, &mut vs, rf);
-        if cols.is_empty() {
-            cols.push(myc);
-            vs.push(T::one());
-        }
-        for (c, v) in cols.into_iter().zip(vs.into_iter()) {
-            col_idx.push(c);
-            vals.push(v);
-        }
-        row_ptr.push(col_idx.len());
-
-        // reset markers used
-        for &c in &acc_cols {
-            marker[c] = -1;
-        }
-    }
+        (row_ptr, col_idx, vals)
+    };
 
     GenericPcsr {
         m,
