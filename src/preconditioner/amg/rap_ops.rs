@@ -49,47 +49,52 @@ pub fn adjoint_csr_with_pos<T: KrystScalar>(a: &CsrMatrix<T>) -> (CsrMatrix<T>, 
 }
 
 /// Symbolic RAP = R * A * P returns the pattern of the coarse operator.
+fn rap_symbolic_row<T: KrystScalar>(
+    i: usize,
+    r: &CsrMatrix<T>,
+    a: &CsrMatrix<T>,
+    p: &CsrMatrix<T>,
+) -> Vec<usize> {
+    let mut cols = Vec::new();
+    for rpos in r.row_ptr()[i]..r.row_ptr()[i + 1] {
+        let k = r.col_idx()[rpos];
+        for apos in a.row_ptr()[k]..a.row_ptr()[k + 1] {
+            let j = a.col_idx()[apos];
+            for ppos in p.row_ptr()[j]..p.row_ptr()[j + 1] {
+                cols.push(p.col_idx()[ppos]);
+            }
+        }
+    }
+    cols.sort_unstable();
+    cols.dedup();
+    cols
+}
+
 pub fn rap_symbolic<T: KrystScalar>(
     r: &CsrMatrix<T>,
     a: &CsrMatrix<T>,
     p: &CsrMatrix<T>,
 ) -> CsrPattern {
     let nc = r.nrows();
-    let rp_r = r.row_ptr();
-    let cj_r = r.col_idx();
-    let rp_a = a.row_ptr();
-    let cj_a = a.col_idx();
-    let rp_p = p.row_ptr();
-    let cj_p = p.col_idx();
 
+    #[cfg(feature = "rayon")]
+    let rows: Vec<Vec<usize>> = {
+        use rayon::prelude::*;
+        (0..nc)
+            .into_par_iter()
+            .map(|i| rap_symbolic_row(i, r, a, p))
+            .collect()
+    };
+
+    #[cfg(not(feature = "rayon"))]
+    let rows: Vec<Vec<usize>> = (0..nc).map(|i| rap_symbolic_row(i, r, a, p)).collect();
+
+    let total_nnz = rows.iter().map(Vec::len).sum();
     let mut row_ptr = Vec::with_capacity(nc + 1);
-    let mut col_idx: Vec<usize> = Vec::new();
+    let mut col_idx = Vec::with_capacity(total_nnz);
     row_ptr.push(0);
-
-    for i in 0..nc {
-        let mut cols: Vec<usize> = Vec::new();
-        let rs_r = rp_r[i];
-        let re_r = rp_r[i + 1];
-        for rpos in rs_r..re_r {
-            let k = cj_r[rpos]; // fine row index
-            let rs_a = rp_a[k];
-            let re_a = rp_a[k + 1];
-            for apos in rs_a..re_a {
-                let j = cj_a[apos]; // fine column index
-                // columns in coarse correspond to columns present in P[j, :]
-                let rs_p = rp_p[j];
-                let re_p = rp_p[j + 1];
-                for ppos in rs_p..re_p {
-                    cols.push(cj_p[ppos]);
-                }
-            }
-        }
-        // unique + sort
-        if !cols.is_empty() {
-            cols.sort_unstable();
-            cols.dedup();
-            col_idx.extend_from_slice(&cols);
-        }
+    for cols in rows {
+        col_idx.extend_from_slice(&cols);
         row_ptr.push(col_idx.len());
     }
 
@@ -231,6 +236,36 @@ mod tests {
         assert_eq!(ph.values()[0], crate::S::from_parts(1.0, -2.0));
         assert_eq!(ph.values()[1], crate::S::from_parts(3.0, 4.0));
         assert_eq!(ph.values()[2], crate::S::from_parts(-2.0, -5.0));
+    }
+
+    #[test]
+    fn rap_symbolic_rows_are_sorted_deduplicated_and_preserve_empty_rows() {
+        let r = CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 2, 2, 3],
+            vec![0, 2, 1],
+            vec![crate::S::one(); 3],
+        );
+        let a = CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 2, 4, 6],
+            vec![0, 1, 0, 2, 1, 2],
+            vec![crate::S::one(); 6],
+        );
+        let p = CsrMatrix::from_csr(
+            3,
+            3,
+            vec![0, 1, 3, 4],
+            vec![2, 0, 2, 1],
+            vec![crate::S::one(); 4],
+        );
+
+        let pattern = rap_symbolic(&r, &a, &p);
+
+        assert_eq!(pattern.row_ptr, vec![0, 3, 3, 5]);
+        assert_eq!(pattern.col_idx, vec![0, 1, 2, 1, 2]);
     }
 
     #[test]
