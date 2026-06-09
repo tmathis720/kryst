@@ -111,6 +111,67 @@ fn non_galerkin_row_keep<T: KrystScalar<Real = f64>>(
     keep
 }
 
+struct NgBuiltRow<T> {
+    cols: Vec<usize>,
+    vals: Vec<T>,
+    full2local: Vec<Option<usize>>,
+}
+
+fn build_non_galerkin_row<T: KrystScalar<Real = f64>>(
+    i: usize,
+    cols: &[usize],
+    vals: &[T],
+    keep: &[bool],
+    lump_diag: bool,
+) -> NgBuiltRow<T> {
+    let mut ng_cols = Vec::with_capacity(cols.len());
+    let mut ng_vals = Vec::with_capacity(vals.len());
+    let mut full2local = vec![None; cols.len()];
+    let mut diag_add = T::zero();
+    let mut has_lumped_entry = false;
+
+    for t in 0..cols.len() {
+        if keep[t] {
+            full2local[t] = Some(ng_cols.len());
+            ng_cols.push(cols[t]);
+            ng_vals.push(vals[t]);
+        } else if lump_diag && cols[t] != i {
+            diag_add = diag_add + vals[t];
+            has_lumped_entry = true;
+        }
+    }
+
+    if has_lumped_entry {
+        let diag_pos = match ng_cols.binary_search(&i) {
+            Ok(pos) => {
+                ng_vals[pos] = ng_vals[pos] + diag_add;
+                pos
+            }
+            Err(pos) => {
+                ng_cols.insert(pos, i);
+                ng_vals.insert(pos, diag_add);
+                for mapped in full2local.iter_mut().flatten() {
+                    if *mapped >= pos {
+                        *mapped += 1;
+                    }
+                }
+                pos
+            }
+        };
+        for t in 0..cols.len() {
+            if !keep[t] && cols[t] != i {
+                full2local[t] = Some(diag_pos);
+            }
+        }
+    }
+
+    NgBuiltRow {
+        cols: ng_cols,
+        vals: ng_vals,
+        full2local,
+    }
+}
+
 pub(crate) fn non_galerkin_filter_coarse<T: KrystScalar<Real = f64>>(
     pat: &CsrPattern,
     vals: &[T],
@@ -166,43 +227,38 @@ pub(crate) fn non_galerkin_filter_coarse<T: KrystScalar<Real = f64>>(
         }
     }
 
-    // build filtered pattern and values
+    let build_row = |i: usize| {
+        let rs = pr[i];
+        let re = pr[i + 1];
+        build_non_galerkin_row(i, &pc[rs..re], &vals[rs..re], &keep[rs..re], rf.lump_diag)
+    };
+
+    #[cfg(feature = "rayon")]
+    let built_rows: Vec<NgBuiltRow<T>> = {
+        use rayon::prelude::*;
+        (0..m).into_par_iter().map(build_row).collect()
+    };
+
+    #[cfg(not(feature = "rayon"))]
+    let built_rows: Vec<NgBuiltRow<T>> = (0..m).map(build_row).collect();
+
     let mut ng_row_ptr = Vec::with_capacity(m + 1);
-    let mut ng_col_idx = Vec::new();
-    let mut ng_vals = Vec::new();
+    let total_nnz = built_rows.iter().map(|row| row.cols.len()).sum();
+    let mut ng_col_idx = Vec::with_capacity(total_nnz);
+    let mut ng_vals = Vec::with_capacity(total_nnz);
     let mut full2ng = vec![None; nnz];
     ng_row_ptr.push(0);
 
-    for i in 0..m {
+    for (i, row) in built_rows.into_iter().enumerate() {
         let rs = pr[i];
-        let re = pr[i + 1];
-        let mut diag_add = T::zero();
-        for t in rs..re {
-            let j = pc[t];
-            if keep[t] {
-                full2ng[t] = Some(ng_col_idx.len());
-                ng_col_idx.push(j);
-                ng_vals.push(vals[t]);
-            } else if rf.lump_diag && j != i {
-                diag_add = diag_add + vals[t];
+        let row_start = ng_col_idx.len();
+        for (local, mapped) in row.full2local.into_iter().enumerate() {
+            if let Some(pos) = mapped {
+                full2ng[rs + local] = Some(row_start + pos);
             }
         }
-        if rf.lump_diag && diag_add != T::zero() {
-            // find diagonal position
-            let row_start = ng_row_ptr.last().copied().unwrap();
-            if let Ok(pos) = ng_col_idx[row_start..].binary_search(&i) {
-                let idx = row_start + pos;
-                ng_vals[idx] = ng_vals[idx] + diag_add;
-            } else {
-                // insert diag
-                let pos = match ng_col_idx[row_start..].binary_search(&i) {
-                    Ok(p) => row_start + p,
-                    Err(p) => row_start + p,
-                };
-                ng_col_idx.insert(pos, i);
-                ng_vals.insert(pos, diag_add);
-            }
-        }
+        ng_col_idx.extend(row.cols);
+        ng_vals.extend(row.vals);
         ng_row_ptr.push(ng_col_idx.len());
     }
 
@@ -260,6 +316,42 @@ mod tests {
         assert_eq!(keep, vec![true, true, false]);
     }
 
+    #[test]
+    fn lumped_entries_map_to_inserted_diagonal_for_numeric_rebuild() {
+        let pat = CsrPattern {
+            nrows: 1,
+            ncols: 3,
+            row_ptr: vec![0, 2],
+            col_idx: vec![1, 2],
+        };
+        let vals = vec![0.01, -0.02];
+        let (ng_pat, ng_vals, full2ng) = non_galerkin_filter_coarse(
+            &pat,
+            &vals,
+            NgSymmetry::None,
+            NgRowFilter {
+                tau_abs: 1.0,
+                tau_rel: 0.0,
+                k_max: 0,
+                lump_diag: true,
+            },
+        );
+
+        assert_eq!(ng_pat.row_ptr, vec![0, 2]);
+        assert_eq!(ng_pat.col_idx, vec![0, 2]);
+        assert_eq!(ng_vals, vec![0.01, -0.02]);
+        assert_eq!(full2ng, vec![Some(0), Some(1)]);
+
+        let rebuilt_full_vals = [2.0, 3.0];
+        let mut rebuilt_ng_vals = vec![0.0; ng_pat.col_idx.len()];
+        for (full, mapped) in rebuilt_full_vals.iter().zip(full2ng) {
+            if let Some(ng) = mapped {
+                rebuilt_ng_vals[ng] += full;
+            }
+        }
+        assert_eq!(rebuilt_ng_vals, vec![2.0, 3.0]);
+    }
+
     #[cfg(feature = "complex")]
     #[test]
     fn complex_values_filter_by_magnitude_and_lump_complex_diag() {
@@ -286,7 +378,7 @@ mod tests {
 
         assert_eq!(ng_pat.row_ptr, vec![0, 2, 3]);
         assert_eq!(ng_pat.col_idx, vec![0, 2, 1]);
-        assert_eq!(full2ng, vec![Some(0), None, Some(1), Some(2)]);
+        assert_eq!(full2ng, vec![Some(0), Some(0), Some(1), Some(2)]);
         assert_eq!(ng_vals[0], crate::S::from_parts(4.01, 0.02));
         assert_eq!(ng_vals[1], crate::S::from_parts(-2.0, 1.0));
         assert_eq!(ng_vals[2], crate::S::from_parts(3.0, 0.0));
