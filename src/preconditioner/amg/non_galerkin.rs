@@ -13,6 +13,104 @@ pub(crate) struct NgRowFilter {
     pub lump_diag: bool,
 }
 
+fn non_galerkin_row_keep<T: KrystScalar<Real = f64>>(
+    i: usize,
+    cols: &[usize],
+    vals: &[T],
+    rf: NgRowFilter,
+) -> Vec<bool> {
+    let mut keep = vec![false; cols.len()];
+    if cols.is_empty() {
+        return keep;
+    }
+
+    let mut idx: Vec<usize> = (0..cols.len()).collect();
+    if rf.tau_abs > 0.0 || rf.tau_rel > 0.0 || (rf.k_max > 0 && cols.len() > rf.k_max) {
+        idx.sort_unstable_by(|&u, &v| {
+            let au = vals[u].abs();
+            let av = vals[v].abs();
+            au.total_cmp(&av).then_with(|| cols[u].cmp(&cols[v]))
+        });
+        let mut drop_mask = vec![false; cols.len()];
+        let mut dropped_sum = 0.0f64;
+        let l1 = cols
+            .iter()
+            .zip(vals)
+            .filter_map(|(&col, val)| (col != i).then_some(val.abs()))
+            .sum::<f64>();
+        for &t in &idx {
+            let col = cols[t];
+            let v = vals[t];
+            if col == i {
+                continue;
+            }
+            let by_abs = v.abs() < rf.tau_abs;
+            let allow = rf.tau_rel * l1;
+            let by_rel = dropped_sum + v.abs() <= allow + 1e-300;
+            if by_abs || (rf.tau_rel > 0.0 && by_rel) {
+                drop_mask[t] = true;
+                dropped_sum += v.abs();
+            }
+        }
+        if rf.k_max > 0 {
+            let mut order_keep: Vec<usize> = (0..cols.len()).collect();
+            order_keep.sort_unstable_by(|&u, &v| {
+                let au = vals[u].abs();
+                let av = vals[v].abs();
+                av.total_cmp(&au).then_with(|| cols[u].cmp(&cols[v]))
+            });
+            let mut kept_off = 0usize;
+            for &t in &order_keep {
+                if cols[t] == i {
+                    keep[t] = true;
+                    continue;
+                }
+                if kept_off < rf.k_max && !drop_mask[t] {
+                    keep[t] = true;
+                    kept_off += 1;
+                }
+            }
+            for t in 0..cols.len() {
+                if cols[t] == i {
+                    keep[t] = true;
+                } else if !drop_mask[t] && !keep[t] && kept_off < rf.k_max {
+                    keep[t] = true;
+                    kept_off += 1;
+                }
+            }
+        } else {
+            for t in 0..cols.len() {
+                if cols[t] == i || !drop_mask[t] {
+                    keep[t] = true;
+                }
+            }
+        }
+    } else {
+        keep.fill(true);
+    }
+
+    let kept_off = (0..cols.len()).filter(|&t| keep[t] && cols[t] != i).count();
+    let had_off = cols.iter().any(|&col| col != i);
+    if kept_off == 0 && had_off {
+        let mut best = None;
+        let mut best_mag = 0.0;
+        for t in 0..cols.len() {
+            if cols[t] != i {
+                let mag = vals[t].abs();
+                if best.is_none() || mag > best_mag {
+                    best = Some(t);
+                    best_mag = mag;
+                }
+            }
+        }
+        keep[best.expect("had_off guarantees an off-diagonal entry")] = true;
+    }
+    if let Some(diag) = cols.iter().position(|&col| col == i) {
+        keep[diag] = true;
+    }
+    keep
+}
+
 pub(crate) fn non_galerkin_filter_coarse<T: KrystScalar<Real = f64>>(
     pat: &CsrPattern,
     vals: &[T],
@@ -26,110 +124,23 @@ pub(crate) fn non_galerkin_filter_coarse<T: KrystScalar<Real = f64>>(
 
     let mut keep = vec![false; nnz];
 
-    // First pass: row-wise filtering
-    for i in 0..m {
+    let filter_row = |i: usize| {
         let rs = pr[i];
         let re = pr[i + 1];
-        if rs == re {
-            continue;
-        }
-        let mut idx: Vec<usize> = (rs..re).collect();
-        // absolute and relative drops
-        if rf.tau_abs > 0.0 || rf.tau_rel > 0.0 || (rf.k_max > 0 && re - rs > rf.k_max) {
-            // sort indices by |v| asc then col
-            idx.sort_unstable_by(|&u, &v| {
-                let au = vals[u].abs();
-                let av = vals[v].abs();
-                au.total_cmp(&av).then_with(|| pc[u].cmp(&pc[v]))
-            });
-            let mut drop_mask = vec![false; re - rs];
-            let mut dropped_sum = 0.0f64;
-            let mut l1 = 0.0f64;
-            for t in rs..re {
-                if pc[t] != i {
-                    l1 += vals[t].abs();
-                }
-            }
-            for &t in idx.iter() {
-                let col = pc[t];
-                let v = vals[t];
-                if col == i {
-                    continue;
-                }
-                let by_abs = v.abs() < rf.tau_abs;
-                let allow = rf.tau_rel * l1;
-                let by_rel = dropped_sum + v.abs() <= allow + 1e-300;
-                if by_abs || (rf.tau_rel > 0.0 && by_rel) {
-                    drop_mask[t - rs] = true;
-                    dropped_sum += v.abs();
-                }
-            }
-            // cap
-            if rf.k_max > 0 {
-                let mut order_keep: Vec<usize> = (rs..re).collect();
-                order_keep.sort_unstable_by(|&u, &v| {
-                    let au = vals[u].abs();
-                    let av = vals[v].abs();
-                    av.total_cmp(&au).then_with(|| pc[u].cmp(&pc[v]))
-                });
-                let mut kept_off = 0usize;
-                for &t in &order_keep {
-                    if pc[t] == i {
-                        keep[t] = true;
-                        continue;
-                    }
-                    if kept_off < rf.k_max && !drop_mask[t - rs] {
-                        keep[t] = true;
-                        kept_off += 1;
-                    }
-                }
-                // mark remaining non-dropped as keep
-                for t in rs..re {
-                    if pc[t] == i {
-                        keep[t] = true;
-                    } else if !drop_mask[t - rs] && !keep[t] && kept_off < rf.k_max {
-                        keep[t] = true;
-                        kept_off += 1;
-                    }
-                }
-            } else {
-                for t in rs..re {
-                    if pc[t] == i || !drop_mask[t - rs] {
-                        keep[t] = true;
-                    }
-                }
-            }
-        } else {
-            for t in rs..re {
-                keep[t] = true;
-            }
-        }
+        non_galerkin_row_keep(i, &pc[rs..re], &vals[rs..re], rf)
+    };
 
-        // safety: ensure at least diag and one off-diagonal if row had any off-diagonals
-        let kept_off = (rs..re).filter(|&t| keep[t] && pc[t] != i).count();
-        let had_off = (rs..re).any(|t| pc[t] != i);
-        if kept_off == 0 && had_off {
-            // keep largest off-diagonal
-            let mut best = rs;
-            let mut best_mag = 0.0;
-            for t in rs..re {
-                if pc[t] != i {
-                    let mag = vals[t].abs();
-                    if mag > best_mag {
-                        best = t;
-                        best_mag = mag;
-                    }
-                }
-            }
-            keep[best] = true;
-        }
-        // always keep diagonal if present
-        for t in rs..re {
-            if pc[t] == i {
-                keep[t] = true;
-                break;
-            }
-        }
+    #[cfg(feature = "rayon")]
+    let row_keep: Vec<Vec<bool>> = {
+        use rayon::prelude::*;
+        (0..m).into_par_iter().map(filter_row).collect()
+    };
+
+    #[cfg(not(feature = "rayon"))]
+    let row_keep: Vec<Vec<bool>> = (0..m).map(filter_row).collect();
+
+    for (i, row) in row_keep.into_iter().enumerate() {
+        keep[pr[i]..pr[i + 1]].copy_from_slice(&row);
     }
 
     // symmetry enforcement
@@ -231,6 +242,22 @@ mod tests {
         assert_eq!(ng_pat.col_idx, vec![0, 1, 2, 0, 1, 0, 2]);
         let expected_vals = vec![4.0, -0.1, 0.05, -0.1, 5.02, 0.05, 6.02];
         assert_eq!(ng_vals, expected_vals);
+    }
+
+    #[test]
+    fn safety_keeps_a_zero_off_diagonal() {
+        let keep = non_galerkin_row_keep(
+            0,
+            &[0, 1, 2],
+            &[4.0, 0.0, 0.0],
+            NgRowFilter {
+                tau_abs: 1.0,
+                tau_rel: 0.0,
+                k_max: 0,
+                lump_diag: false,
+            },
+        );
+        assert_eq!(keep, vec![true, true, false]);
     }
 
     #[cfg(feature = "complex")]
