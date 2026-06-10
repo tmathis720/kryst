@@ -3626,6 +3626,7 @@ impl DistAmgInfo {
 pub enum AmgComplexSetupMode {
     Unset,
     NativeDiagonal,
+    NativeCoarse,
     ProjectedRealHierarchy,
 }
 
@@ -3635,6 +3636,7 @@ impl AmgComplexSetupMode {
         match self {
             Self::Unset => "unset",
             Self::NativeDiagonal => "native_diagonal",
+            Self::NativeCoarse => "native_coarse",
             Self::ProjectedRealHierarchy => "projected_real_hierarchy",
         }
     }
@@ -3644,6 +3646,8 @@ pub struct AMG {
     csr: Option<Arc<CsrMatrix<f64>>>,
     #[cfg(feature = "complex")]
     complex_diag_inv: Option<Vec<S>>,
+    #[cfg(feature = "complex")]
+    complex_coarse_solver: Option<Mutex<CoarseDenseLu<S>>>,
     #[cfg(feature = "complex")]
     complex_setup_mode: AmgComplexSetupMode,
     #[cfg(feature = "complex")]
@@ -3676,6 +3680,8 @@ impl Default for AMG {
             csr: None,
             #[cfg(feature = "complex")]
             complex_diag_inv: None,
+            #[cfg(feature = "complex")]
+            complex_coarse_solver: None,
             #[cfg(feature = "complex")]
             complex_setup_mode: AmgComplexSetupMode::Unset,
             #[cfg(feature = "complex")]
@@ -7348,6 +7354,8 @@ impl Preconditioner for AMG {
         self.dist = None;
         self.complex_setup_mode = AmgComplexSetupMode::Unset;
         self.complex_setup_fallback_reason = None;
+        self.complex_diag_inv = None;
+        self.complex_coarse_solver = None;
         validate_complex_transfer_overrides_supported(&self.transfer_overrides, self.cfg.drop_tol)?;
         let csr_complex = csr_from_linop_complex(op, self.cfg.drop_tol)?;
         self.complex_diag_inv = complex_diagonal_inverse(csr_complex.as_ref(), self.cfg.drop_tol)?;
@@ -7362,11 +7370,22 @@ impl Preconditioner for AMG {
         }
         let has_imaginary_values =
             csr_has_imaginary_values(csr_complex.as_ref(), self.cfg.drop_tol);
+        if csr_complex.nrows() <= self.cfg.max_coarse_size && self.transfer_overrides.is_empty() {
+            let mut solver = CoarseDenseLu::<S>::new();
+            solver.setup(csr_complex.as_ref())?;
+            self.complex_coarse_solver = Some(Mutex::new(solver));
+            self.complex_setup_mode = AmgComplexSetupMode::NativeCoarse;
+            self.complex_setup_fallback_reason = None;
+            self.csr = Some(Arc::new(csr_real_from_complex(csr_complex.as_ref())));
+            self.state = AmgState::Uninitialized;
+            self.stats = None;
+            return Ok(());
+        }
         if self.cfg.require_native_complex_hierarchy && has_imaginary_values {
             self.complex_setup_fallback_reason =
                 Some("native_complex_hierarchy_required".to_string());
             return Err(KError::Unsupported(
-                "AMG native complex hierarchy is required for this operator, but AMG levels are still real-valued; disable require_native_complex_hierarchy to use the current projected complex fallback",
+                "AMG native complex hierarchy is required for this operator, but it exceeds the native complex coarse path and multilevel AMG levels are still real-valued; disable require_native_complex_hierarchy to use the current projected complex fallback",
             ));
         }
         let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
@@ -7393,6 +7412,11 @@ impl Preconditioner for AMG {
                 z.len()
             )));
         }
+        if self.cfg.require_spd && side != PcSide::Left {
+            return Err(KError::InvalidInput(
+                "AMG in SPD mode supports only Left preconditioning for CG-safe use".into(),
+            ));
+        }
         let n = r.len();
         if let Some(diag_inv) = self.complex_diag_inv.as_ref() {
             if diag_inv.len() != n {
@@ -7404,6 +7428,12 @@ impl Preconditioner for AMG {
                 z[i] = diag_inv[i] * r[i];
             }
             return Ok(());
+        }
+        if let Some(solver) = self.complex_coarse_solver.as_ref() {
+            return solver
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .solve(r, z);
         }
         let mut ws = self
             .complex_workspace_pool

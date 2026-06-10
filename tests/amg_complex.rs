@@ -95,6 +95,7 @@ fn amg_complex_native_hierarchy_required_rejects_imaginary_coupling() {
     );
     let op = CsrOp::new(Arc::new(csr));
     let mut amg = AMGBuilder::new()
+        .max_coarse_size(1)
         .require_native_complex_hierarchy(true)
         .build(&faer::Mat::<f64>::zeros(0, 0))
         .expect("amg build");
@@ -110,6 +111,71 @@ fn amg_complex_native_hierarchy_required_rejects_imaginary_coupling() {
         amg.complex_setup_fallback_reason(),
         Some("native_complex_hierarchy_required")
     );
+}
+
+#[test]
+fn amg_complex_native_coarse_solve_preserves_imaginary_coupling() {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(3.0),
+            S::from_parts(-1.0, 0.5),
+            S::from_parts(-1.0, -0.5),
+            S::from_real(2.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr.clone()));
+    let mut amg = AMGBuilder::new()
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("amg build");
+
+    amg.setup(&op)
+        .expect("small complex operator should use native coarse algebra");
+    assert_eq!(amg.complex_setup_mode_label(), "native_coarse");
+    assert_eq!(amg.complex_setup_fallback_reason(), None);
+
+    let rhs = vec![S::from_parts(1.0, -0.5), S::from_parts(-0.25, 0.75)];
+    let mut out = vec![S::zero(); rhs.len()];
+    amg.apply(PcSide::Left, &rhs, &mut out).unwrap();
+
+    let mut ax = vec![S::zero(); rhs.len()];
+    kryst::core::traits::MatVec::matvec(&csr, &out, &mut ax);
+    for (got, expected) in ax.iter().zip(rhs.iter()) {
+        assert!(
+            (*got - *expected).abs() < 1e-12,
+            "got={got:?}, expected={expected:?}"
+        );
+    }
+}
+
+#[test]
+fn amg_complex_native_coarse_respects_spd_side_restriction() {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(2.0),
+            S::from_parts(-1.0, 0.25),
+            S::from_parts(-1.0, -0.25),
+            S::from_real(2.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let mut amg = AMG::default();
+    amg.setup(&op).unwrap();
+
+    let rhs = vec![S::one(); 2];
+    let mut out = vec![S::zero(); 2];
+    let err = amg
+        .apply(PcSide::Right, &rhs, &mut out)
+        .expect_err("SPD AMG should reject right preconditioning");
+    assert!(err.to_string().contains("only Left"));
 }
 
 #[test]
@@ -283,6 +349,7 @@ fn amg_complex_apply_residual_acceptance() {
     );
     let op = CsrOp::new(Arc::new(csr.clone()));
     let mut amg = AMGBuilder::new()
+        .max_coarse_size(1)
         .logging_level(1)
         .build(&faer::Mat::<f64>::zeros(0, 0))
         .expect("amg build");
