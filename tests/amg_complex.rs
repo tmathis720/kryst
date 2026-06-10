@@ -179,6 +179,154 @@ fn amg_complex_native_coarse_respects_spd_side_restriction() {
 }
 
 #[test]
+fn amg_complex_native_coarse_numeric_update_refactors_values() {
+    let pattern_row_ptr = vec![0, 2, 4];
+    let pattern_col_idx = vec![0, 1, 0, 1];
+    let csr1 = CsrMatrix::from_csr(
+        2,
+        2,
+        pattern_row_ptr.clone(),
+        pattern_col_idx.clone(),
+        vec![
+            S::from_real(3.0),
+            S::from_parts(-1.0, 0.5),
+            S::from_parts(-1.0, -0.5),
+            S::from_real(2.0),
+        ],
+    );
+    let csr2 = CsrMatrix::from_csr(
+        2,
+        2,
+        pattern_row_ptr,
+        pattern_col_idx,
+        vec![
+            S::from_real(4.0),
+            S::from_parts(-0.5, 0.25),
+            S::from_parts(-0.5, -0.25),
+            S::from_real(3.0),
+        ],
+    );
+    let op1 = CsrOp::new(Arc::new(csr1));
+    let op2 = CsrOp::new(Arc::new(csr2.clone()));
+    let mut amg = AMG::default();
+    amg.setup(&op1).unwrap();
+    assert!(amg.supports_numeric_update());
+
+    amg.update_numeric(&op2).unwrap();
+    assert_eq!(amg.complex_setup_mode_label(), "native_coarse");
+
+    let rhs = vec![S::from_parts(1.0, -0.5), S::from_parts(-0.25, 0.75)];
+    let mut out = vec![S::zero(); rhs.len()];
+    amg.apply(PcSide::Left, &rhs, &mut out).unwrap();
+    let mut ax = vec![S::zero(); rhs.len()];
+    kryst::core::traits::MatVec::matvec(&csr2, &out, &mut ax);
+    for (got, expected) in ax.iter().zip(rhs.iter()) {
+        assert!((*got - *expected).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn amg_complex_projected_hierarchy_numeric_update_refreshes_values() {
+    let row_ptr = vec![0, 3, 6, 9];
+    let col_idx = vec![0, 1, 2, 0, 1, 2, 0, 1, 2];
+    let csr1 = CsrMatrix::from_csr(
+        3,
+        3,
+        row_ptr.clone(),
+        col_idx.clone(),
+        vec![
+            S::from_real(4.0),
+            S::from_parts(-1.0, 0.2),
+            S::from_parts(0.0, -0.1),
+            S::from_parts(-1.0, -0.2),
+            S::from_real(4.2),
+            S::from_parts(-1.1, 0.1),
+            S::from_parts(0.0, 0.1),
+            S::from_parts(-1.1, -0.1),
+            S::from_real(3.8),
+        ],
+    );
+    let csr2 = CsrMatrix::from_csr(
+        3,
+        3,
+        row_ptr,
+        col_idx,
+        vec![
+            S::from_real(6.0),
+            S::from_parts(-0.5, 0.2),
+            S::from_parts(0.0, -0.1),
+            S::from_parts(-0.5, -0.2),
+            S::from_real(5.5),
+            S::from_parts(-0.6, 0.1),
+            S::from_parts(0.0, 0.1),
+            S::from_parts(-0.6, -0.1),
+            S::from_real(5.0),
+        ],
+    );
+    let op1 = CsrOp::new(Arc::new(csr1));
+    let op2 = CsrOp::new(Arc::new(csr2));
+    let mut amg = AMGBuilder::new()
+        .max_coarse_size(1)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .unwrap();
+    amg.setup(&op1).unwrap();
+    assert_eq!(amg.complex_setup_mode_label(), "projected_real_hierarchy");
+
+    let rhs = vec![
+        S::from_parts(1.0, -0.3),
+        S::from_parts(-0.5, 0.7),
+        S::from_parts(0.25, 0.4),
+    ];
+    let mut before = vec![S::zero(); rhs.len()];
+    amg.apply(PcSide::Left, &rhs, &mut before).unwrap();
+
+    amg.update_numeric(&op2).unwrap();
+    assert_eq!(amg.complex_setup_mode_label(), "projected_real_hierarchy");
+    let mut after = vec![S::zero(); rhs.len()];
+    amg.apply(PcSide::Left, &rhs, &mut after).unwrap();
+
+    assert!(
+        before
+            .iter()
+            .zip(after.iter())
+            .any(|(&a, &b)| (a - b).abs() > 1e-8),
+        "projected hierarchy output did not change after numeric refresh"
+    );
+}
+
+#[test]
+fn amg_complex_numeric_update_rejects_pattern_change() {
+    let csr1 = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(2.0),
+            S::from_real(-1.0),
+            S::from_real(-1.0),
+            S::from_real(2.0),
+        ],
+    );
+    let csr2 = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 1, 2],
+        vec![0, 1],
+        vec![S::from_real(3.0), S::from_real(4.0)],
+    );
+    let op1 = CsrOp::new(Arc::new(csr1));
+    let op2 = CsrOp::new(Arc::new(csr2));
+    let mut amg = AMG::default();
+    amg.setup(&op1).unwrap();
+
+    let err = amg
+        .update_numeric(&op2)
+        .expect_err("numeric update must reject a changed sparsity pattern");
+    assert!(err.to_string().contains("unchanged sparsity"));
+}
+
+#[test]
 fn amg_complex_native_hierarchy_required_allows_real_valued_complex_matrix() {
     let csr = CsrMatrix::from_csr(
         2,

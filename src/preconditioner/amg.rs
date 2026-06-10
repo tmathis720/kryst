@@ -7170,7 +7170,7 @@ impl Preconditioner for AMG {
         let sid = op.structure_id();
         let vid = op.values_id();
         let csr = csr_from_linop(op, self.cfg.drop_tol)?;
-        self.setup_from_csr_real(csr, sid, vid)
+        self.setup_from_csr_real(csr, sid, vid, false)
     }
 
     fn apply(&self, side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
@@ -7282,6 +7282,7 @@ impl AMG {
         csr: Arc<CsrMatrix<f64>>,
         sid: StructureId,
         vid: ValuesId,
+        force_numeric: bool,
     ) -> Result<(), KError> {
         let csr = if self.cfg.conditioning.is_active() {
             let mut local = (*csr).clone();
@@ -7297,11 +7298,12 @@ impl AMG {
 
         self.ensure_symbolic_structure(csr_ref, sid, pattern_hash)?;
 
-        let need_numeric = match &self.state {
-            AmgState::Ready { last_values_id, .. } => *last_values_id != vid,
-            AmgState::SymbolicOnly { .. } => true,
-            AmgState::Uninitialized => true,
-        };
+        let need_numeric = force_numeric
+            || match &self.state {
+                AmgState::Ready { last_values_id, .. } => *last_values_id != vid,
+                AmgState::SymbolicOnly { .. } => true,
+                AmgState::Uninitialized => true,
+            };
 
         if need_numeric {
             self.refresh_numeric_ready(csr_ref, sid, vid, pattern_hash)?;
@@ -7318,6 +7320,83 @@ impl AMG {
         if self.cfg.require_spd {
             self.spd_probe()?;
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "complex")]
+    fn setup_complex(
+        &mut self,
+        op: &dyn LinOp<S = S>,
+        force_numeric: bool,
+        require_same_pattern: bool,
+    ) -> Result<(), KError> {
+        if matches!(self.cfg.coarse_solve, CoarseSolve::ILU) {
+            return Err(KError::InvalidInput(
+                "AMG complex setup does not support coarse_solve=ILU yet; use CG for HPD problems or DirectDense for nonsymmetric complex problems"
+                    .into(),
+            ));
+        }
+        self.cfg.validate()?;
+        validate_complex_transfer_overrides_supported(&self.transfer_overrides, self.cfg.drop_tol)?;
+        let csr_complex = csr_from_linop_complex(op, self.cfg.drop_tol)?;
+        if require_same_pattern {
+            let current = self
+                .csr
+                .as_ref()
+                .ok_or_else(|| KError::InvalidInput("AMG not set up".into()))?;
+            if current.nrows() != csr_complex.nrows()
+                || current.ncols() != csr_complex.ncols()
+                || csr_pattern_hash(current.as_ref()) != csr_pattern_hash(csr_complex.as_ref())
+            {
+                return Err(KError::InvalidInput(
+                    "AMG complex numeric update requires unchanged sparsity; call update_symbolic instead"
+                        .into(),
+                ));
+            }
+        }
+
+        self.dist = None;
+        self.complex_setup_mode = AmgComplexSetupMode::Unset;
+        self.complex_setup_fallback_reason = None;
+        self.complex_diag_inv = complex_diagonal_inverse(csr_complex.as_ref(), self.cfg.drop_tol)?;
+        self.complex_coarse_solver = None;
+        if self.complex_diag_inv.is_some() {
+            self.complex_setup_mode = AmgComplexSetupMode::NativeDiagonal;
+            self.csr = Some(Arc::new(csr_real_from_complex(csr_complex.as_ref())));
+            self.state = AmgState::Uninitialized;
+            self.stats = None;
+            return Ok(());
+        }
+        let has_imaginary_values =
+            csr_has_imaginary_values(csr_complex.as_ref(), self.cfg.drop_tol);
+        if csr_complex.nrows() <= self.cfg.max_coarse_size && self.transfer_overrides.is_empty() {
+            let mut solver = CoarseDenseLu::<S>::new();
+            solver.setup(csr_complex.as_ref())?;
+            self.complex_coarse_solver = Some(Mutex::new(solver));
+            self.complex_setup_mode = AmgComplexSetupMode::NativeCoarse;
+            self.csr = Some(Arc::new(csr_real_from_complex(csr_complex.as_ref())));
+            self.state = AmgState::Uninitialized;
+            self.stats = None;
+            return Ok(());
+        }
+        if self.cfg.require_native_complex_hierarchy && has_imaginary_values {
+            self.complex_setup_fallback_reason =
+                Some("native_complex_hierarchy_required".to_string());
+            return Err(KError::Unsupported(
+                "AMG native complex hierarchy is required for this operator, but it exceeds the native complex coarse path and multilevel AMG levels are still real-valued; disable require_native_complex_hierarchy to use the current projected complex fallback",
+            ));
+        }
+        let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
+        self.setup_from_csr_real(csr_real, op.structure_id(), op.values_id(), force_numeric)?;
+        self.complex_setup_mode = AmgComplexSetupMode::ProjectedRealHierarchy;
+        self.complex_setup_fallback_reason = Some(
+            if has_imaginary_values {
+                "imaginary_values_projected_to_real_hierarchy"
+            } else {
+                "real_valued_complex_matrix_uses_real_hierarchy"
+            }
+            .to_string(),
+        );
         Ok(())
     }
 }
@@ -7344,64 +7423,7 @@ impl Preconditioner for AMG {
     }
 
     fn setup(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
-        if matches!(self.cfg.coarse_solve, CoarseSolve::ILU) {
-            return Err(KError::InvalidInput(
-                "AMG complex setup does not support coarse_solve=ILU yet; use CG for HPD problems or DirectDense for nonsymmetric complex problems"
-                    .into(),
-            ));
-        }
-        self.cfg.validate()?;
-        self.dist = None;
-        self.complex_setup_mode = AmgComplexSetupMode::Unset;
-        self.complex_setup_fallback_reason = None;
-        self.complex_diag_inv = None;
-        self.complex_coarse_solver = None;
-        validate_complex_transfer_overrides_supported(&self.transfer_overrides, self.cfg.drop_tol)?;
-        let csr_complex = csr_from_linop_complex(op, self.cfg.drop_tol)?;
-        self.complex_diag_inv = complex_diagonal_inverse(csr_complex.as_ref(), self.cfg.drop_tol)?;
-        if self.complex_diag_inv.is_some() {
-            self.complex_setup_mode = AmgComplexSetupMode::NativeDiagonal;
-            self.complex_setup_fallback_reason = None;
-            let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
-            self.csr = Some(csr_real);
-            self.state = AmgState::Uninitialized;
-            self.stats = None;
-            return Ok(());
-        }
-        let has_imaginary_values =
-            csr_has_imaginary_values(csr_complex.as_ref(), self.cfg.drop_tol);
-        if csr_complex.nrows() <= self.cfg.max_coarse_size && self.transfer_overrides.is_empty() {
-            let mut solver = CoarseDenseLu::<S>::new();
-            solver.setup(csr_complex.as_ref())?;
-            self.complex_coarse_solver = Some(Mutex::new(solver));
-            self.complex_setup_mode = AmgComplexSetupMode::NativeCoarse;
-            self.complex_setup_fallback_reason = None;
-            self.csr = Some(Arc::new(csr_real_from_complex(csr_complex.as_ref())));
-            self.state = AmgState::Uninitialized;
-            self.stats = None;
-            return Ok(());
-        }
-        if self.cfg.require_native_complex_hierarchy && has_imaginary_values {
-            self.complex_setup_fallback_reason =
-                Some("native_complex_hierarchy_required".to_string());
-            return Err(KError::Unsupported(
-                "AMG native complex hierarchy is required for this operator, but it exceeds the native complex coarse path and multilevel AMG levels are still real-valued; disable require_native_complex_hierarchy to use the current projected complex fallback",
-            ));
-        }
-        let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
-        let sid = op.structure_id();
-        let vid = op.values_id();
-        self.setup_from_csr_real(csr_real, sid, vid)?;
-        self.complex_setup_mode = AmgComplexSetupMode::ProjectedRealHierarchy;
-        self.complex_setup_fallback_reason = Some(
-            if has_imaginary_values {
-                "imaginary_values_projected_to_real_hierarchy"
-            } else {
-                "real_valued_complex_matrix_uses_real_hierarchy"
-            }
-            .to_string(),
-        );
-        Ok(())
+        self.setup_complex(op, false, false)
     }
 
     fn apply(&self, side: PcSide, r: &[S], z: &mut [S]) -> Result<(), KError> {
@@ -7468,6 +7490,18 @@ impl Preconditioner for AMG {
             caps.side_restriction = Some(PcSide::Left);
         }
         caps
+    }
+
+    fn supports_numeric_update(&self) -> bool {
+        true
+    }
+
+    fn update_numeric(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        self.setup_complex(op, true, true)
+    }
+
+    fn update_symbolic(&mut self, op: &dyn LinOp<S = S>) -> Result<(), KError> {
+        self.setup(op)
     }
 
     fn distributed_support(&self) -> crate::preconditioner::PcDistributedSupport {
