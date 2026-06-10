@@ -261,7 +261,7 @@ pub struct PcOptions {
     pub amg_require_native_complex_hierarchy: Option<bool>,
     /// Print the AMG setup statistics when enabled.
     pub amg_print_setup: Option<bool>,
-    /// Distributed AMG apply mode: "root" or "local".
+    /// Distributed AMG apply mode: distributed_csr|root|local|superlu_dist.
     pub amg_dist_apply_mode: Option<String>,
     /// Distributed coarse repartition policy: keep|uniform|root.
     pub amg_dist_coarse_repartition: Option<String>,

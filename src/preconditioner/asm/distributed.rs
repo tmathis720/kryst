@@ -635,7 +635,9 @@ fn build_coarse_space(
     let strategy = match requested {
         DistCoarseStrategy::None => return Ok(None),
         DistCoarseStrategy::RootGather => DistCoarseStrategy::RootGather,
-        DistCoarseStrategy::LocalPrototype | DistCoarseStrategy::SuperLuDist => {
+        DistCoarseStrategy::DistributedCsr
+        | DistCoarseStrategy::LocalPrototype
+        | DistCoarseStrategy::SuperLuDist => {
             log::warn!(
                 "Distributed ASM coarse strategy {} currently routes to root_gather.",
                 requested

@@ -899,6 +899,11 @@ fn dist_route_fallback_order(
         push_unique(selected);
     }
     match strategy {
+        DistCoarseStrategy::DistributedCsr => {
+            push_unique(DistCoarseSolverRoute::Local);
+            push_unique(DistCoarseSolverRoute::Root);
+            push_unique(DistCoarseSolverRoute::SuperLuDist);
+        }
         DistCoarseStrategy::RootGather => {
             push_unique(DistCoarseSolverRoute::Root);
             push_unique(DistCoarseSolverRoute::Local);
@@ -928,6 +933,7 @@ fn dist_route_label(route: DistCoarseSolverRoute, strategy: DistCoarseStrategy) 
         DistCoarseSolverRoute::Local => "local_prototype",
         DistCoarseSolverRoute::SuperLuDist => "superlu_dist",
         DistCoarseSolverRoute::Auto => match strategy {
+            DistCoarseStrategy::DistributedCsr => "distributed_csr",
             DistCoarseStrategy::RootGather => "root_gather",
             DistCoarseStrategy::LocalPrototype => "local_prototype",
             DistCoarseStrategy::SuperLuDist => "superlu_dist",
@@ -938,6 +944,7 @@ fn dist_route_label(route: DistCoarseSolverRoute, strategy: DistCoarseStrategy) 
 
 fn dist_strategy_label(strategy: DistCoarseStrategy) -> &'static str {
     match strategy {
+        DistCoarseStrategy::DistributedCsr => "distributed_csr",
         DistCoarseStrategy::RootGather => "root_gather",
         DistCoarseStrategy::LocalPrototype => "local_prototype",
         DistCoarseStrategy::SuperLuDist => "superlu_dist",
@@ -961,7 +968,10 @@ fn amg_dist_route_reports_distributed(
 ) -> bool {
     match route {
         DistCoarseSolverRoute::SuperLuDist => true,
-        DistCoarseSolverRoute::Auto => matches!(strategy, DistCoarseStrategy::SuperLuDist),
+        DistCoarseSolverRoute::Auto => matches!(
+            strategy,
+            DistCoarseStrategy::DistributedCsr | DistCoarseStrategy::SuperLuDist
+        ),
         DistCoarseSolverRoute::Root | DistCoarseSolverRoute::Local => false,
     }
 }
@@ -1700,6 +1710,16 @@ impl AMGBuilder {
 
     pub fn require_native_complex_hierarchy(mut self, on: bool) -> Self {
         self.cfg.require_native_complex_hierarchy = on;
+        self
+    }
+
+    pub fn dist_coarse_strategy(mut self, strategy: DistCoarseStrategy) -> Self {
+        self.cfg.dist_coarse_strategy = strategy;
+        self
+    }
+
+    pub fn dist_apply_instrumentation(mut self, on: bool) -> Self {
+        self.cfg.dist_apply_instrumentation = on;
         self
     }
 
@@ -3600,8 +3620,10 @@ struct DistAmgInfo {
     root: usize,
     row_part: Arc<Vec<usize>>,
     n_global: usize,
-    local_hierarchy: Option<Box<AmgHierarchy>>,
+    local_amg: Option<Box<AMG>>,
     local_matrix: Option<Arc<CsrMatrix<f64>>>,
+    #[cfg(not(feature = "complex"))]
+    distributed_matrix: Option<Arc<DistCsrOp>>,
     halo_plan: Option<HaloPlan>,
 }
 
@@ -3616,6 +3638,21 @@ impl DistAmgInfo {
     fn local_nrows(&self) -> usize {
         let (start, end) = self.local_range();
         end.saturating_sub(start)
+    }
+}
+
+#[derive(Default)]
+struct DistCsrApplyWorkspace {
+    matvec: Vec<f64>,
+    residual: Vec<f64>,
+    correction: Vec<f64>,
+}
+
+impl DistCsrApplyWorkspace {
+    fn ensure(&mut self, n: usize) {
+        self.matvec.resize(n, 0.0);
+        self.residual.resize(n, 0.0);
+        self.correction.resize(n, 0.0);
     }
 }
 
@@ -3658,6 +3695,7 @@ pub struct AMG {
     stats: Option<AmgStats>,
     runtime: Mutex<AmgRuntime>,
     workspace_pool: Mutex<Vec<AMGWorkspace>>,
+    dist_csr_workspace_pool: Mutex<Vec<DistCsrApplyWorkspace>>,
     #[cfg(feature = "complex")]
     complex_workspace_pool: Mutex<Vec<ComplexApplyWorkspace>>,
     dist: Option<DistAmgInfo>,
@@ -3692,6 +3730,7 @@ impl Default for AMG {
             stats: None,
             runtime: Mutex::new(AmgRuntime::default()),
             workspace_pool: Mutex::new(Vec::new()),
+            dist_csr_workspace_pool: Mutex::new(Vec::new()),
             #[cfg(feature = "complex")]
             complex_workspace_pool: Mutex::new(Vec::new()),
             dist: None,
@@ -3856,6 +3895,7 @@ impl AMG {
 
         let strategy_to_route = |strategy: DistCoarseStrategy| -> DistCoarseSolverRoute {
             match strategy {
+                DistCoarseStrategy::DistributedCsr => DistCoarseSolverRoute::Auto,
                 DistCoarseStrategy::RootGather => DistCoarseSolverRoute::Root,
                 DistCoarseStrategy::LocalPrototype => DistCoarseSolverRoute::Local,
                 DistCoarseStrategy::SuperLuDist => DistCoarseSolverRoute::SuperLuDist,
@@ -3876,6 +3916,10 @@ impl AMG {
 
         let strategy = self.cfg.dist_coarse_strategy;
         match strategy {
+            DistCoarseStrategy::DistributedCsr => Ok((
+                DistCoarseStrategy::DistributedCsr,
+                DistCoarseSolverRoute::Auto,
+            )),
             DistCoarseStrategy::None => {
                 if comm.size() > 1 {
                     log::warn!(
@@ -3957,8 +4001,11 @@ impl AMG {
     fn setup_dist(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
         let setup_t0 = tic();
         let (strategy, selected_route) = self.resolve_dist_coarse_strategy(&dist.comm())?;
+        if matches!(strategy, DistCoarseStrategy::DistributedCsr) {
+            return self.setup_dist_local_mode(dist, strategy);
+        }
         if matches!(strategy, DistCoarseStrategy::LocalPrototype) {
-            return self.setup_dist_local(dist);
+            return self.setup_dist_local_mode(dist, strategy);
         }
         if matches!(strategy, DistCoarseStrategy::SuperLuDist) {
             return self.setup_dist_superlu(dist, selected_route);
@@ -3977,8 +4024,9 @@ impl AMG {
             root,
             row_part: row_part.clone(),
             n_global: dist.n_global,
-            local_hierarchy: None,
+            local_amg: None,
             local_matrix: Some(Arc::new(dist.local_matrix())),
+            distributed_matrix: None,
             halo_plan: None,
         });
         let prev_cfg = self.cfg.clone();
@@ -4143,7 +4191,11 @@ impl AMG {
     }
 
     #[cfg(not(feature = "complex"))]
-    fn setup_dist_local(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
+    fn setup_dist_local_mode(
+        &mut self,
+        dist: &DistCsrOp,
+        strategy: DistCoarseStrategy,
+    ) -> Result<(), KError> {
         let setup_t0 = tic();
         let comm = dist.comm();
         let rank = comm.rank();
@@ -4164,14 +4216,14 @@ impl AMG {
 
         let local_matrix = dist.local_matrix();
         let local_block = dist.local_block_csr();
-        let mut local_hierarchy: Option<Box<AmgHierarchy>> = None;
+        let mut local_amg: Option<Box<AMG>> = None;
         let mut halo_plan: Option<HaloPlan> = None;
 
         if local_stage.is_none() {
-            let mut local_amg = AMG::with_config(self.cfg.clone());
-            match local_amg.build_symbolic(&local_block) {
-                Ok(hier) => {
-                    local_hierarchy = Some(hier);
+            let mut candidate = Box::new(AMG::with_config(self.cfg.clone()));
+            match candidate.setup(&local_block) {
+                Ok(()) => {
+                    local_amg = Some(candidate);
                 }
                 Err(err) => {
                     record_error(
@@ -4184,7 +4236,7 @@ impl AMG {
             }
         }
 
-        if local_stage.is_none() {
+        if local_stage.is_none() && matches!(strategy, DistCoarseStrategy::LocalPrototype) {
             match build_amg_halo_plan(
                 comm.clone(),
                 row_part.clone(),
@@ -4198,6 +4250,24 @@ impl AMG {
                 }
             }
         }
+
+        let distributed_matrix = if matches!(strategy, DistCoarseStrategy::DistributedCsr) {
+            match DistCsrOp::from_local_rows(
+                dist.n_global,
+                dist.row_start,
+                &local_matrix,
+                dist.row_partition().as_ref(),
+                comm.clone(),
+            ) {
+                Ok(op) => Some(Arc::new(op)),
+                Err(err) => {
+                    record_error(&mut local_stage, &mut local_detail, "build_dist_csr", err);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let local_failure = if local_stage.is_none() { 0.0 } else { 1.0 };
         let failure_sum = comm.all_reduce_f64(local_failure);
@@ -4227,8 +4297,9 @@ impl AMG {
             root,
             row_part: row_part.clone(),
             n_global: dist.n_global,
-            local_hierarchy,
+            local_amg,
             local_matrix: Some(Arc::new(local_matrix)),
+            distributed_matrix,
             halo_plan,
         });
         self.state = AmgState::Uninitialized;
@@ -4236,21 +4307,101 @@ impl AMG {
         self.csr = None;
         if let Ok(mut rt) = self.runtime.lock() {
             let mut ds = DistApplyStats::default();
-            ds.mode = DistCoarseStrategy::LocalPrototype;
+            ds.mode = strategy;
             ds.coarse_repartition = self.cfg.dist_coarse_repartition;
-            ds.coarse_solver_route = DistCoarseSolverRoute::Local;
+            ds.coarse_solver_route = if matches!(strategy, DistCoarseStrategy::DistributedCsr) {
+                DistCoarseSolverRoute::Auto
+            } else {
+                DistCoarseSolverRoute::Local
+            };
             ds.setup_total = toc(setup_t0);
             rt.last_dist_apply = Some(ds);
         }
 
         if self.cfg.print_level >= 1 && self.cfg.logging_level >= 1 {
             log::info!(
-                "AMG distributed local prototype setup complete: rank={} local_rows={}",
+                "AMG {} setup complete: rank={} local_rows={}",
+                dist_strategy_label(strategy),
                 rank,
                 dist.local_nrows()
             );
         }
         Ok(())
+    }
+
+    #[cfg(not(feature = "complex"))]
+    fn try_update_dist_local_numeric(
+        &mut self,
+        dist: &DistCsrOp,
+        strategy: DistCoarseStrategy,
+    ) -> Result<bool, KError> {
+        if !matches!(
+            strategy,
+            DistCoarseStrategy::DistributedCsr | DistCoarseStrategy::LocalPrototype
+        ) {
+            return Ok(false);
+        }
+
+        let comm = dist.comm();
+        let row_part = dist.row_partition();
+        let local_matrix = dist.local_matrix();
+        let local_block = dist.local_block_csr();
+        let compatible = self.dist.as_ref().is_some_and(|state| {
+            state.n_global == dist.n_global
+                && state.row_part.as_ref() == row_part.as_ref()
+                && state.local_range() == (dist.row_start, dist.row_end)
+                && state.local_amg.is_some()
+                && state.local_matrix.as_ref().is_some_and(|stored| {
+                    stored.row_ptr() == local_matrix.row_ptr()
+                        && stored.col_idx() == local_matrix.col_idx()
+                        && Arc::strong_count(stored) == 1
+                })
+                && match strategy {
+                    DistCoarseStrategy::DistributedCsr => state
+                        .distributed_matrix
+                        .as_ref()
+                        .is_some_and(|stored| Arc::strong_count(stored) == 1),
+                    DistCoarseStrategy::LocalPrototype => state.distributed_matrix.is_none(),
+                    _ => false,
+                }
+        });
+        if comm.all_reduce_f64(if compatible { 0.0 } else { 1.0 }) > 0.0 {
+            return Ok(false);
+        }
+
+        let mut local_error = None;
+        if let Some(state) = self.dist.as_mut() {
+            if let Some(local_amg) = state.local_amg.as_mut()
+                && let Err(err) = local_amg.update_numeric(&local_block)
+            {
+                local_error = Some(err);
+            }
+            if local_error.is_none()
+                && matches!(strategy, DistCoarseStrategy::DistributedCsr)
+                && let Some(stored) = state.distributed_matrix.as_mut()
+            {
+                match Arc::get_mut(stored) {
+                    Some(op) => {
+                        if let Err(err) = op.update_numeric(local_matrix.values()) {
+                            local_error = Some(err);
+                        }
+                    }
+                    None => {
+                        local_error = Some(KError::InvalidInput(
+                            "AMG distributed CSR operator is shared during numeric update".into(),
+                        ));
+                    }
+                }
+            }
+            if local_error.is_none() {
+                state.local_matrix = Some(Arc::new(local_matrix));
+            }
+        }
+
+        if comm.all_reduce_f64(if local_error.is_some() { 1.0 } else { 0.0 }) > 0.0 {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     #[cfg(not(feature = "complex"))]
@@ -4268,8 +4419,9 @@ impl AMG {
             root,
             row_part: row_part.clone(),
             n_global: dist.n_global,
-            local_hierarchy: None,
+            local_amg: None,
             local_matrix: Some(Arc::new(dist.local_matrix())),
+            distributed_matrix: None,
             halo_plan: None,
         });
         self.state = AmgState::Uninitialized;
@@ -4379,6 +4531,9 @@ impl AMG {
         }
 
         let result = match strategy {
+            DistCoarseStrategy::DistributedCsr => {
+                self.apply_dist_csr(side, r, z, dist, stats.as_mut())
+            }
             DistCoarseStrategy::RootGather => {
                 self.apply_dist_root(side, r, z, dist, stats.as_mut())
             }
@@ -4386,7 +4541,7 @@ impl AMG {
                 self.apply_dist_local(side, r, z, dist, stats.as_mut())
             }
             DistCoarseStrategy::None => Err(KError::Unsupported(
-                "AMG distributed apply requires a coarse strategy (root_gather, local_prototype, or superlu_dist)"
+                "AMG distributed apply requires a coarse strategy (distributed_csr, root_gather, local_prototype, or superlu_dist)"
                     .into(),
             )),
             DistCoarseStrategy::SuperLuDist => {
@@ -4421,6 +4576,103 @@ impl AMG {
         }
 
         result
+    }
+
+    #[cfg(not(feature = "complex"))]
+    fn apply_dist_csr(
+        &self,
+        side: PcSide,
+        r: &[f64],
+        z: &mut [f64],
+        dist: &DistAmgInfo,
+        mut stats: Option<&mut DistApplyStats>,
+    ) -> Result<(), KError> {
+        let local_amg = dist.local_amg.as_ref().ok_or_else(|| {
+            KError::InvalidInput("AMG distributed CSR local solver not initialized".into())
+        })?;
+        let distributed_matrix = dist.distributed_matrix.as_ref().ok_or_else(|| {
+            KError::InvalidInput("AMG distributed CSR matrix state not initialized".into())
+        })?;
+        let n = local_amg.dims().0;
+        if r.len() != n || z.len() != n {
+            return Err(KError::InvalidInput(
+                "AMG distributed CSR apply length mismatch".into(),
+            ));
+        }
+
+        let mut ws = self
+            .dist_csr_workspace_pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop()
+            .unwrap_or_default();
+        ws.ensure(n);
+
+        let t_local = stats.as_ref().map(|_| tic());
+        let result = local_amg.apply_local(side, r, z);
+        if let (Some(stats), Some(t0)) = (stats.as_mut(), t_local) {
+            stats.local_apply += toc(t0);
+        }
+        if result.is_ok() {
+            let t_halo = stats.as_ref().map(|_| tic());
+            let matvec_result = distributed_matrix.try_matvec(z, &mut ws.matvec[..n]);
+            if let (Some(stats), Some(t0)) = (stats.as_mut(), t_halo) {
+                stats.halo_exchange += toc(t0);
+                let diag = distributed_matrix.plan_diagnostics();
+                let bytes =
+                    (diag.halo_recv_volume + diag.halo_send_volume) * std::mem::size_of::<f64>();
+                stats.comm_bytes = stats.comm_bytes.saturating_add(bytes);
+                if !stats.per_level_comm_bytes.is_empty() {
+                    stats.per_level_comm_bytes[0] =
+                        stats.per_level_comm_bytes[0].saturating_add(bytes);
+                }
+            }
+            if let Err(err) = matvec_result {
+                self.dist_csr_workspace_pool
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(ws);
+                return Err(err);
+            }
+
+            #[cfg(feature = "rayon")]
+            ws.residual[..n]
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, residual)| *residual = r[i] - ws.matvec[i]);
+            #[cfg(not(feature = "rayon"))]
+            for i in 0..n {
+                ws.residual[i] = r[i] - ws.matvec[i];
+            }
+
+            let t_local = stats.as_ref().map(|_| tic());
+            let correction_result =
+                local_amg.apply_local(side, &ws.residual[..n], &mut ws.correction[..n]);
+            if let (Some(stats), Some(t0)) = (stats.as_mut(), t_local) {
+                stats.local_apply += toc(t0);
+            }
+            if correction_result.is_ok() {
+                #[cfg(feature = "rayon")]
+                z.par_iter_mut()
+                    .zip(ws.correction[..n].par_iter())
+                    .for_each(|(zi, correction)| *zi += *correction);
+                #[cfg(not(feature = "rayon"))]
+                for i in 0..n {
+                    z[i] += ws.correction[i];
+                }
+            }
+            self.dist_csr_workspace_pool
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(ws);
+            correction_result
+        } else {
+            self.dist_csr_workspace_pool
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(ws);
+            result
+        }
     }
 
     #[cfg(not(feature = "complex"))]
@@ -4490,16 +4742,16 @@ impl AMG {
         dist: &DistAmgInfo,
         mut stats: Option<&mut DistApplyStats>,
     ) -> Result<(), KError> {
-        let hierarchy = dist.local_hierarchy.as_ref().ok_or_else(|| {
-            KError::InvalidInput("AMG local prototype hierarchy not initialized".into())
+        let local_amg = dist.local_amg.as_ref().ok_or_else(|| {
+            KError::InvalidInput("AMG local prototype solver not initialized".into())
         })?;
-        if r.len() != z.len() || r.len() != hierarchy.finest().a.nrows() {
+        if r.len() != z.len() || r.len() != local_amg.dims().0 {
             return Err(KError::InvalidInput(
                 "AMG local prototype apply length mismatch".into(),
             ));
         }
         let t_local = stats.as_ref().map(|_| tic());
-        self.apply_with_hierarchy(side, r, z, hierarchy)?;
+        local_amg.apply_local(side, r, z)?;
         if let (Some(stats), Some(t0)) = (stats.as_mut(), t_local) {
             stats.local_apply = toc(t0);
         }
@@ -7162,7 +7414,16 @@ impl Preconditioner for AMG {
     fn setup(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
         if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
-            if op.comm().size() > 1 {
+            if op.comm().size() > 1
+                || matches!(
+                    self.cfg.dist_coarse_strategy,
+                    DistCoarseStrategy::DistributedCsr
+                )
+            {
+                let (strategy, _) = self.resolve_dist_coarse_strategy(&dist.comm())?;
+                if self.try_update_dist_local_numeric(dist, strategy)? {
+                    return Ok(());
+                }
                 return self.setup_dist(dist);
             }
         }
@@ -7175,9 +7436,7 @@ impl Preconditioner for AMG {
 
     fn apply(&self, side: PcSide, r: &[f64], z: &mut [f64]) -> Result<(), KError> {
         if let Some(dist) = &self.dist {
-            if dist.comm.size() > 1 {
-                return self.apply_dist(side, r, z, dist);
-            }
+            return self.apply_dist(side, r, z, dist);
         }
         self.apply_local(side, r, z)
     }
@@ -7198,7 +7457,12 @@ impl Preconditioner for AMG {
     fn update_numeric(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
         if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
-            if op.comm().size() > 1 {
+            if op.comm().size() > 1
+                || matches!(
+                    self.cfg.dist_coarse_strategy,
+                    DistCoarseStrategy::DistributedCsr
+                )
+            {
                 return self.setup_dist(dist);
             }
         }
@@ -7222,7 +7486,12 @@ impl Preconditioner for AMG {
     fn update_symbolic(&mut self, op: &dyn LinOp<S = f64>) -> Result<(), KError> {
         self.cfg.validate()?;
         if let Some(dist) = op.as_any().downcast_ref::<DistCsrOp>() {
-            if op.comm().size() > 1 {
+            if op.comm().size() > 1
+                || matches!(
+                    self.cfg.dist_coarse_strategy,
+                    DistCoarseStrategy::DistributedCsr
+                )
+            {
                 return self.setup_dist(dist);
             }
         }
@@ -7253,23 +7522,21 @@ impl Preconditioner for AMG {
     }
 
     fn distributed_support(&self) -> crate::preconditioner::PcDistributedSupport {
-        if let Some(dist) = &self.dist {
-            if dist.comm.size() > 1 {
-                if let Ok(rt) = self.runtime.lock()
-                    && let Some(last_dist) = rt.last_dist_apply.as_ref()
-                {
-                    return if last_dist.reports_distributed_support() {
-                        crate::preconditioner::PcDistributedSupport::Distributed
-                    } else {
-                        crate::preconditioner::PcDistributedSupport::LocalOnly
-                    };
-                }
-                if amg_dist_route_reports_distributed(
-                    self.cfg.dist_coarse_solver_route,
-                    self.cfg.dist_coarse_strategy,
-                ) {
-                    return crate::preconditioner::PcDistributedSupport::Distributed;
-                }
+        if self.dist.is_some() {
+            if let Ok(rt) = self.runtime.lock()
+                && let Some(last_dist) = rt.last_dist_apply.as_ref()
+            {
+                return if last_dist.reports_distributed_support() {
+                    crate::preconditioner::PcDistributedSupport::Distributed
+                } else {
+                    crate::preconditioner::PcDistributedSupport::LocalOnly
+                };
+            }
+            if amg_dist_route_reports_distributed(
+                self.cfg.dist_coarse_solver_route,
+                self.cfg.dist_coarse_strategy,
+            ) {
+                return crate::preconditioner::PcDistributedSupport::Distributed;
             }
         }
         crate::preconditioner::PcDistributedSupport::LocalOnly

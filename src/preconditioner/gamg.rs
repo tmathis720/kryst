@@ -461,6 +461,12 @@ fn route_fallback_order(
 
     push_unique(selected);
     match strategy {
+        DistCoarseStrategy::DistributedCsr => {
+            push_unique(DistCoarseSolverRoute::Auto);
+            push_unique(DistCoarseSolverRoute::Local);
+            push_unique(DistCoarseSolverRoute::Root);
+            push_unique(DistCoarseSolverRoute::SuperLuDist);
+        }
         DistCoarseStrategy::RootGather => {
             push_unique(DistCoarseSolverRoute::Root);
             push_unique(DistCoarseSolverRoute::Local);

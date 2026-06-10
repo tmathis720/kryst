@@ -994,7 +994,7 @@ pub static SPECS: &[Spec] = &[
         key: "pc_amg_dist_apply_mode",
         arity: Arity::One,
         kind: ValueKind::Str,
-        doc: "distributed AMG apply mode: root or local",
+        doc: "distributed AMG apply mode: distributed_csr|root|local|superlu_dist",
     },
     Spec {
         flag: "-pc_amg_dist_coarse_repartition",

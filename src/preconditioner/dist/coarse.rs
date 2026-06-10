@@ -7,6 +7,8 @@ use std::str::FromStr;
 pub enum DistCoarseStrategy {
     /// No coarse correction (rank-local only).
     None,
+    /// Canonical distributed CSR residual correction with rank-local AMG solves.
+    DistributedCsr,
     /// Gather to rank 0 and solve on the root.
     RootGather,
     /// Per-rank local prototype (optionally with halo correction).
@@ -126,7 +128,9 @@ impl DistCoarseStrategy {
     pub fn is_collective(self) -> bool {
         matches!(
             self,
-            DistCoarseStrategy::RootGather | DistCoarseStrategy::SuperLuDist
+            DistCoarseStrategy::DistributedCsr
+                | DistCoarseStrategy::RootGather
+                | DistCoarseStrategy::SuperLuDist
         )
     }
 }
@@ -141,6 +145,7 @@ impl fmt::Display for DistCoarseStrategy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let label = match self {
             DistCoarseStrategy::None => "none",
+            DistCoarseStrategy::DistributedCsr => "distributed_csr",
             DistCoarseStrategy::RootGather => "root_gather",
             DistCoarseStrategy::LocalPrototype => "local_prototype",
             DistCoarseStrategy::SuperLuDist => "superlu_dist",
@@ -155,6 +160,9 @@ impl FromStr for DistCoarseStrategy {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.to_lowercase().as_str() {
             "none" | "off" => Ok(DistCoarseStrategy::None),
+            "distributed" | "distributed_csr" | "dist_csr" | "native" => {
+                Ok(DistCoarseStrategy::DistributedCsr)
+            }
             "root" | "root_gather" | "gather" => Ok(DistCoarseStrategy::RootGather),
             "local" | "local_prototype" | "prototype" | "hybrid" => {
                 Ok(DistCoarseStrategy::LocalPrototype)
