@@ -4,8 +4,8 @@ use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 
-use super::coarse_solver::{CoarseDenseLu, CoarseSolver};
-use super::rap_ops::{adjoint_csr_with_pos, galerkin_numeric, galerkin_symbolic};
+use super::coarse_solver::{CoarseCg, CoarseDenseLu, CoarseSolver};
+use super::rap_ops::{CsrPattern, adjoint_csr_with_pos, galerkin_numeric, galerkin_symbolic};
 use super::{AMGConfig, AmgStats, CoarseSolve, LevelStats, RelaxPhase};
 
 struct ScalarLevel<T: KrystScalar<Real = f64>> {
@@ -17,8 +17,43 @@ struct ScalarLevel<T: KrystScalar<Real = f64>> {
 
 pub(crate) struct AmgCore<T: KrystScalar<Real = f64>> {
     levels: Vec<ScalarLevel<T>>,
-    coarse_solver: CoarseDenseLu<T>,
+    coarse_solver: ScalarCoarseSolver<T>,
     cfg: AMGConfig,
+}
+
+enum ScalarCoarseSolver<T: KrystScalar<Real = f64>> {
+    Cg(CoarseCg<T>),
+    Dense(CoarseDenseLu<T>),
+}
+
+impl<T: KrystScalar<Real = f64>> ScalarCoarseSolver<T> {
+    fn from_config(cfg: &AMGConfig) -> Result<Self, KError> {
+        match cfg.coarse_solve {
+            CoarseSolve::CG => Ok(Self::Cg(CoarseCg::new(cfg.tolerance, cfg.max_iterations))),
+            CoarseSolve::DirectDense => Ok(Self::Dense(CoarseDenseLu::new())),
+            CoarseSolve::ILU => Err(KError::Unsupported(
+                "AMG scalar core coarse_solve=ILU is not available for this scalar path".into(),
+            )),
+            CoarseSolve::Smoother => Err(KError::Unsupported(
+                "AMG scalar core coarse_solve=Smoother is not implemented for native scalar hierarchy"
+                    .into(),
+            )),
+        }
+    }
+
+    fn setup(&mut self, a: &CsrMatrix<T>) -> Result<(), KError> {
+        match self {
+            Self::Cg(solver) => solver.setup(a),
+            Self::Dense(solver) => solver.setup(a),
+        }
+    }
+
+    fn solve(&mut self, b: &[T], x: &mut [T]) -> Result<(), KError> {
+        match self {
+            Self::Cg(solver) => solver.solve(b, x),
+            Self::Dense(solver) => solver.solve(b, x),
+        }
+    }
 }
 
 struct ScalarWorkspace<T: KrystScalar<Real = f64>> {
@@ -95,13 +130,48 @@ where
         let coarsest = levels
             .last()
             .ok_or_else(|| KError::InvalidInput("AMG scalar core built no levels".into()))?;
-        let mut coarse_solver = CoarseDenseLu::<T>::new();
+        let mut coarse_solver = ScalarCoarseSolver::<T>::from_config(cfg)?;
         coarse_solver.setup(&coarsest.a)?;
         Ok(Self {
             levels,
             coarse_solver,
             cfg: cfg.clone(),
         })
+    }
+
+    pub(crate) fn update_numeric(&mut self, fine: &CsrMatrix<T>) -> Result<(), KError> {
+        let first = self
+            .levels
+            .first()
+            .ok_or_else(|| KError::InvalidInput("AMG scalar core not set up".into()))?;
+        if !same_csr_pattern(&first.a, fine) {
+            return Err(KError::InvalidInput(
+                "AMG scalar core numeric update requires unchanged sparsity".into(),
+            ));
+        }
+
+        self.levels[0].a.values_mut().copy_from_slice(fine.values());
+        self.levels[0].diag_inv = diag_inv_from_csr(&self.levels[0].a, self.cfg.drop_tol)?;
+
+        for level in 0..self.levels.len().saturating_sub(1) {
+            let (fine_levels, coarse_levels) = self.levels.split_at_mut(level + 1);
+            let fine_level = &fine_levels[level];
+            let coarse_level = &mut coarse_levels[0];
+            let pat = pattern_from_csr(&coarse_level.a);
+            galerkin_numeric(
+                &pat,
+                &fine_level.a,
+                &fine_level.p,
+                coarse_level.a.values_mut(),
+            );
+            coarse_level.diag_inv = diag_inv_from_csr(&coarse_level.a, self.cfg.drop_tol)?;
+        }
+
+        let coarsest = self
+            .levels
+            .last()
+            .ok_or_else(|| KError::InvalidInput("AMG scalar core not set up".into()))?;
+        self.coarse_solver.setup(&coarsest.a)
     }
 
     pub(crate) fn apply(&mut self, rhs: &[T], out: &mut [T]) -> Result<(), KError> {
@@ -200,6 +270,22 @@ where
     }
 }
 
+fn same_csr_pattern<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> bool {
+    a.nrows() == b.nrows()
+        && a.ncols() == b.ncols()
+        && a.row_ptr() == b.row_ptr()
+        && a.col_idx() == b.col_idx()
+}
+
+fn pattern_from_csr<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>) -> CsrPattern {
+    CsrPattern {
+        nrows: a.nrows(),
+        ncols: a.ncols(),
+        row_ptr: a.row_ptr().to_vec(),
+        col_idx: a.col_idx().to_vec(),
+    }
+}
+
 fn diag_inv_from_csr<T: KrystScalar<Real = f64>>(
     a: &CsrMatrix<T>,
     drop_tol: f64,
@@ -283,8 +369,7 @@ impl AmgStats {
                 post_work_estimate: cfg.num_grid_sweeps[RelaxPhase::Up.ix()] as f64 * nnz_a as f64,
                 selected_relax_pre: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
                 selected_relax_post: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Up.ix()]),
-                coarse_solver: (level + 1 == raw.len())
-                    .then(|| format!("{:?}", CoarseSolve::DirectDense)),
+                coarse_solver: (level + 1 == raw.len()).then(|| format!("{:?}", cfg.coarse_solve)),
             })
             .collect::<Vec<_>>();
         let total_smoothing_work = levels

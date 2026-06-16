@@ -5,7 +5,7 @@ use std::sync::Arc;
 use kryst::algebra::prelude::*;
 use kryst::matrix::op::CsrOp;
 use kryst::matrix::sparse::CsrMatrix;
-use kryst::preconditioner::amg::{AMG, AMGBuilder, CoarseSolve};
+use kryst::preconditioner::amg::{AMG, AMGBuilder, CoarseSolve, RelaxPhase};
 use kryst::preconditioner::{PcSide, Preconditioner};
 
 #[test]
@@ -285,6 +285,54 @@ fn amg_complex_projected_hierarchy_numeric_update_refreshes_values() {
             .any(|(&a, &b)| (a - b).abs() > 1e-8),
         "projected hierarchy output did not change after numeric refresh"
     );
+}
+
+#[test]
+fn amg_complex_native_hierarchy_honors_direct_dense_coarse_solver() {
+    let csr = CsrMatrix::from_csr(
+        3,
+        3,
+        vec![0, 3, 6, 9],
+        vec![0, 1, 2, 0, 1, 2, 0, 1, 2],
+        vec![
+            S::from_real(4.0),
+            S::from_parts(-1.0, 0.2),
+            S::from_parts(0.0, -0.1),
+            S::from_parts(-1.0, -0.2),
+            S::from_real(4.2),
+            S::from_parts(-1.1, 0.1),
+            S::from_parts(0.0, 0.1),
+            S::from_parts(-1.1, -0.1),
+            S::from_real(3.8),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let mut amg = AMGBuilder::new()
+        .max_coarse_size(1)
+        .coarse_solve(CoarseSolve::DirectDense)
+        .num_grid_sweeps(RelaxPhase::Coarsest, 0)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("amg build");
+
+    amg.setup(&op).unwrap();
+    assert_eq!(amg.complex_setup_mode_label(), "native_hierarchy");
+    let stats = amg.stats().expect("stats");
+    assert_eq!(
+        stats
+            .levels
+            .last()
+            .and_then(|level| level.coarse_solver.as_deref()),
+        Some("DirectDense")
+    );
+
+    let rhs = vec![
+        S::from_parts(1.0, -0.3),
+        S::from_parts(-0.5, 0.7),
+        S::from_parts(0.25, 0.4),
+    ];
+    let mut out = vec![S::zero(); rhs.len()];
+    amg.apply(PcSide::Left, &rhs, &mut out).unwrap();
+    assert!(out.iter().all(|v| v.abs().is_finite()));
 }
 
 #[test]

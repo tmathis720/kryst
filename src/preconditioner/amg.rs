@@ -7628,6 +7628,21 @@ impl AMG {
             }
         }
 
+        if require_same_pattern
+            && self.complex_setup_mode == AmgComplexSetupMode::NativeHierarchy
+            && let Some(core) = self.complex_core.as_ref()
+        {
+            let mut core = core
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            core.update_numeric(csr_complex.as_ref())?;
+            self.stats = Some(core.stats());
+            self.complex_setup_fallback_reason = None;
+            self.csr = Some(Arc::new(csr_real_from_complex(csr_complex.as_ref())));
+            self.state = AmgState::Uninitialized;
+            return Ok(());
+        }
+
         self.dist = None;
         self.complex_setup_mode = AmgComplexSetupMode::Unset;
         self.complex_setup_fallback_reason = None;
