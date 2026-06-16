@@ -690,6 +690,7 @@ mod real {
             .and_then(|v| DistCoarseSolverRoute::from_str(v.trim()).ok())
             .unwrap_or(DistCoarseSolverRoute::Auto);
         let fallback_chain = match dist_strategy {
+            DistCoarseStrategy::DistributedCsr => vec!["Local", "Root", "SuperLuDist"],
             DistCoarseStrategy::RootGather => vec!["Root", "Local", "SuperLuDist"],
             DistCoarseStrategy::LocalPrototype => vec!["Local", "Root", "SuperLuDist"],
             DistCoarseStrategy::SuperLuDist => vec!["SuperLuDist", "Root", "Local"],
