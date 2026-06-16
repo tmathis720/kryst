@@ -188,7 +188,7 @@ fn single_rank_distributed_csr_route_matches_residual_correction_contract() {
     dist_amg.setup(&dist).expect("distributed CSR AMG setup");
     assert_eq!(
         dist_amg.distributed_support(),
-        PcDistributedSupport::Distributed
+        PcDistributedSupport::LocalOnly
     );
 
     let mut actual = vec![0.0; n];
@@ -208,7 +208,7 @@ fn single_rank_distributed_csr_route_matches_residual_correction_contract() {
         .expect("distributed apply stats");
     assert_eq!(stats.mode_label(), "distributed_csr");
     assert_eq!(stats.coarse_solver_route_label(), "distributed_csr");
-    assert!(stats.reports_distributed_support());
+    assert!(!stats.reports_distributed_support());
     assert!(!stats.uses_root_gather());
     assert_eq!(stats.gather, std::time::Duration::default());
     assert_eq!(stats.scatter, std::time::Duration::default());

@@ -971,10 +971,7 @@ fn amg_dist_route_reports_distributed(
 ) -> bool {
     match route {
         DistCoarseSolverRoute::SuperLuDist => true,
-        DistCoarseSolverRoute::Auto => matches!(
-            strategy,
-            DistCoarseStrategy::DistributedCsr | DistCoarseStrategy::SuperLuDist
-        ),
+        DistCoarseSolverRoute::Auto => matches!(strategy, DistCoarseStrategy::SuperLuDist),
         DistCoarseSolverRoute::Root | DistCoarseSolverRoute::Local => false,
     }
 }
@@ -10469,6 +10466,7 @@ pub struct DistApplyStats {
     pub comm_bytes: usize,
     pub per_level_comm_bytes: Vec<usize>,
     pub reductions: usize,
+    pub true_distributed_hierarchy: bool,
 }
 
 impl Default for DistApplyStats {
@@ -10486,6 +10484,7 @@ impl Default for DistApplyStats {
             comm_bytes: 0,
             per_level_comm_bytes: Vec::new(),
             reductions: 0,
+            true_distributed_hierarchy: false,
         }
     }
 }
@@ -10511,7 +10510,8 @@ impl DistApplyStats {
 
     /// True when this resolved route provides native distributed execution.
     pub fn reports_distributed_support(&self) -> bool {
-        amg_dist_route_reports_distributed(self.coarse_solver_route, self.mode)
+        self.true_distributed_hierarchy
+            || amg_dist_route_reports_distributed(self.coarse_solver_route, self.mode)
     }
 }
 

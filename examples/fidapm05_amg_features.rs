@@ -356,7 +356,7 @@ mod real {
         }
         assert_eq!(
             dist_amg.distributed_support(),
-            PcDistributedSupport::Distributed
+            PcDistributedSupport::LocalOnly
         );
         let (dist_x, _) = solve(
             "distributed_csr AMG",

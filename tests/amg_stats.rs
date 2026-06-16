@@ -100,7 +100,15 @@ fn dist_apply_stats_expose_stable_route_labels() {
     assert_eq!(distributed.mode_label(), "distributed_csr");
     assert_eq!(distributed.coarse_solver_route_label(), "distributed_csr");
     assert!(!distributed.uses_root_gather());
-    assert!(distributed.reports_distributed_support());
+    assert!(!distributed.reports_distributed_support());
+
+    let true_distributed = DistApplyStats {
+        mode: DistCoarseStrategy::DistributedCsr,
+        coarse_solver_route: DistCoarseSolverRoute::Auto,
+        true_distributed_hierarchy: true,
+        ..Default::default()
+    };
+    assert!(true_distributed.reports_distributed_support());
 
     let root = DistApplyStats {
         mode: DistCoarseStrategy::RootGather,
