@@ -305,6 +305,11 @@ fn validate_transfer_override(
             ops.prolongation.nrows()
         )));
     }
+    if ops.prolongation.ncols() == 0 {
+        return Err(KError::InvalidInput(format!(
+            "AMG scalar core transfer override level {level} has zero coarse columns"
+        )));
+    }
     if ops.restriction.ncols() != n_fine {
         return Err(KError::InvalidInput(format!(
             "AMG scalar core transfer override level {level} has R cols {}, expected {n_fine}",

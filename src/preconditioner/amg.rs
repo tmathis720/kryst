@@ -8368,6 +8368,11 @@ fn build_hierarchy(
                     override_ops.prolongation.nrows()
                 )));
             }
+            if override_ops.prolongation.ncols() == 0 {
+                return Err(KError::InvalidInput(format!(
+                    "AMG transfer override level {level} has zero coarse columns"
+                )));
+            }
             if override_ops.restriction.ncols() != n {
                 return Err(KError::InvalidInput(format!(
                     "AMG transfer override level {level} has R cols {}, expected {n}",

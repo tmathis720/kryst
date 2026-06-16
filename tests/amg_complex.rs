@@ -606,6 +606,45 @@ fn amg_complex_native_hierarchy_uses_hermitian_restriction() {
 }
 
 #[test]
+fn amg_complex_transfer_override_rejects_zero_coarse_columns() {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(2.0),
+            S::from_parts(-1.0, 0.25),
+            S::from_parts(-1.0, -0.25),
+            S::from_real(2.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let p = CsrMatrix::from_csr(2, 0, vec![0, 0, 0], vec![], vec![]);
+    let r = CsrMatrix::from_csr(0, 2, vec![0], vec![], vec![]);
+    let mut amg = AMGBuilder::new()
+        .max_coarse_size(1)
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("amg build");
+    amg.set_level_transfer_operators(
+        0,
+        AmgTransferOperators {
+            prolongation: p,
+            restriction: r,
+        },
+    );
+
+    let err = amg
+        .setup(&op)
+        .expect_err("zero-column transfer override should be rejected");
+    assert!(
+        err.to_string().contains("zero coarse columns"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn amg_complex_apply_residual_acceptance() {
     let csr = CsrMatrix::from_csr(
         3,
