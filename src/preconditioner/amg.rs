@@ -4319,6 +4319,7 @@ impl AMG {
         dist: &DistCsrOp,
         strategy: DistCoarseStrategy,
     ) -> Result<bool, KError> {
+        let setup_t0 = tic();
         if !matches!(
             strategy,
             DistCoarseStrategy::DistributedCsr | DistCoarseStrategy::LocalPrototype
@@ -4338,13 +4339,14 @@ impl AMG {
                 && state.local_matrix.as_ref().is_some_and(|stored| {
                     stored.row_ptr() == local_matrix.row_ptr()
                         && stored.col_idx() == local_matrix.col_idx()
-                        && Arc::strong_count(stored) == 1
                 })
                 && match strategy {
-                    DistCoarseStrategy::DistributedCsr => state
-                        .distributed_matrix
-                        .as_ref()
-                        .is_some_and(|stored| Arc::strong_count(stored) == 1),
+                    DistCoarseStrategy::DistributedCsr => {
+                        state.distributed_matrix.as_ref().is_some_and(|stored| {
+                            stored.local_matrix().row_ptr() == local_matrix.row_ptr()
+                                && stored.local_matrix().col_idx() == local_matrix.col_idx()
+                        })
+                    }
                     DistCoarseStrategy::LocalPrototype => state.distributed_matrix.is_none(),
                     _ => false,
                 }
@@ -4360,20 +4362,17 @@ impl AMG {
             {
                 local_error = Some(err);
             }
-            if local_error.is_none()
-                && matches!(strategy, DistCoarseStrategy::DistributedCsr)
-                && let Some(stored) = state.distributed_matrix.as_mut()
-            {
-                match Arc::get_mut(stored) {
-                    Some(op) => {
-                        if let Err(err) = op.update_numeric(local_matrix.values()) {
-                            local_error = Some(err);
-                        }
-                    }
-                    None => {
-                        local_error = Some(KError::InvalidInput(
-                            "AMG distributed CSR operator is shared during numeric update".into(),
-                        ));
+            if local_error.is_none() && matches!(strategy, DistCoarseStrategy::DistributedCsr) {
+                match DistCsrOp::from_local_rows(
+                    dist.n_global,
+                    dist.row_start,
+                    &local_matrix,
+                    dist.row_partition().as_ref(),
+                    comm.clone(),
+                ) {
+                    Ok(op) => state.distributed_matrix = Some(Arc::new(op)),
+                    Err(err) => {
+                        local_error = Some(err);
                     }
                 }
             }
@@ -4384,6 +4383,19 @@ impl AMG {
 
         if comm.all_reduce_f64(if local_error.is_some() { 1.0 } else { 0.0 }) > 0.0 {
             return Ok(false);
+        }
+        if let Ok(mut rt) = self.runtime.lock() {
+            let mut ds = DistApplyStats::default();
+            ds.mode = strategy;
+            ds.coarse_repartition = self.cfg.dist_coarse_repartition;
+            ds.coarse_solver_route = if matches!(strategy, DistCoarseStrategy::DistributedCsr) {
+                DistCoarseSolverRoute::Auto
+            } else {
+                DistCoarseSolverRoute::Local
+            };
+            ds.setup_total = toc(setup_t0);
+            ds.reductions = 2;
+            rt.last_dist_apply = Some(ds);
         }
         Ok(true)
     }
@@ -7453,6 +7465,10 @@ impl Preconditioner for AMG {
                     DistCoarseStrategy::DistributedCsr
                 )
             {
+                let (strategy, _) = self.resolve_dist_coarse_strategy(&dist.comm())?;
+                if self.try_update_dist_local_numeric(dist, strategy)? {
+                    return Ok(());
+                }
                 return self.setup_dist(dist);
             }
         }

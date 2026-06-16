@@ -272,6 +272,14 @@ fn single_rank_distributed_csr_route_refreshes_numeric_values() {
     dist_amg
         .update_numeric(&dist)
         .expect("distributed CSR AMG numeric refresh");
+    let refresh_stats = dist_amg
+        .dist_apply_stats()
+        .expect("distributed CSR numeric refresh stats");
+    assert_eq!(refresh_stats.mode_label(), "distributed_csr");
+    assert_eq!(refresh_stats.coarse_solver_route_label(), "distributed_csr");
+    assert!(!refresh_stats.reports_distributed_support());
+    assert_eq!(refresh_stats.reductions, 2);
+    assert!(refresh_stats.setup_total > std::time::Duration::default());
 
     let mut actual = vec![0.0; n];
     dist_amg
