@@ -6,7 +6,7 @@ use crate::matrix::sparse::CsrMatrix;
 
 use super::coarse_solver::{CoarseCg, CoarseDenseLu, CoarseSolver};
 use super::rap_ops::{CsrPattern, adjoint_csr_with_pos, galerkin_numeric, galerkin_symbolic};
-use super::{AMGConfig, AmgStats, CoarseSolve, LevelStats, RelaxPhase};
+use super::{AMGConfig, AmgStats, AmgTransferOperators, CoarseSolve, LevelStats, RelaxPhase};
 
 struct ScalarLevel<T: KrystScalar<Real = f64>> {
     a: CsrMatrix<T>,
@@ -81,6 +81,14 @@ where
     T: KrystScalar<Real = f64> + AddAssign,
 {
     pub(crate) fn setup(fine: &CsrMatrix<T>, cfg: &AMGConfig) -> Result<Self, KError> {
+        Self::setup_with_transfer_overrides(fine, cfg, &[])
+    }
+
+    pub(crate) fn setup_with_transfer_overrides(
+        fine: &CsrMatrix<T>,
+        cfg: &AMGConfig,
+        transfer_overrides: &[(usize, AmgTransferOperators)],
+    ) -> Result<Self, KError> {
         if fine.nrows() != fine.ncols() {
             return Err(KError::InvalidInput(
                 "AMG scalar core requires a square matrix".into(),
@@ -92,7 +100,9 @@ where
         for level in 0..max_levels {
             let diag_inv = diag_inv_from_csr(&a_cur, cfg.drop_tol)?;
             let n = a_cur.nrows();
-            let terminal = level + 1 == max_levels || n <= cfg.max_coarse_size.max(1) || n <= 2;
+            let override_ops = transfer_override_for_level(transfer_overrides, level);
+            let terminal = override_ops.is_none()
+                && (level + 1 == max_levels || n <= cfg.max_coarse_size.max(1) || n <= 2);
             if terminal {
                 levels.push(ScalarLevel {
                     a: a_cur,
@@ -103,7 +113,12 @@ where
                 break;
             }
 
-            let p = pairwise_piecewise_constant_p::<T>(n);
+            let p = if let Some(ops) = override_ops {
+                validate_transfer_override(level, n, ops)?;
+                clone_csr_cast(&ops.prolongation)
+            } else {
+                pairwise_piecewise_constant_p::<T>(n)
+            };
             let (r, _) = adjoint_csr_with_pos(&p);
             let pat = galerkin_symbolic(&a_cur, &p);
             let mut vals = vec![T::zero(); pat.col_idx.len()];
@@ -268,6 +283,55 @@ where
             &mut ws.az[..n],
         )
     }
+}
+
+fn transfer_override_for_level(
+    overrides: &[(usize, AmgTransferOperators)],
+    level: usize,
+) -> Option<&AmgTransferOperators> {
+    overrides
+        .iter()
+        .find_map(|(override_level, ops)| (*override_level == level).then_some(ops))
+}
+
+fn validate_transfer_override(
+    level: usize,
+    n_fine: usize,
+    ops: &AmgTransferOperators,
+) -> Result<(), KError> {
+    if ops.prolongation.nrows() != n_fine {
+        return Err(KError::InvalidInput(format!(
+            "AMG scalar core transfer override level {level} has P rows {}, expected {n_fine}",
+            ops.prolongation.nrows()
+        )));
+    }
+    if ops.restriction.ncols() != n_fine {
+        return Err(KError::InvalidInput(format!(
+            "AMG scalar core transfer override level {level} has R cols {}, expected {n_fine}",
+            ops.restriction.ncols()
+        )));
+    }
+    if ops.prolongation.ncols() != ops.restriction.nrows() {
+        return Err(KError::InvalidInput(format!(
+            "AMG scalar core transfer override level {level} has inconsistent coarse dims P: {} cols, R: {} rows",
+            ops.prolongation.ncols(),
+            ops.restriction.nrows()
+        )));
+    }
+    Ok(())
+}
+
+fn clone_csr_cast<T: KrystScalar<Real = f64>>(a: &CsrMatrix<crate::S>) -> CsrMatrix<T> {
+    CsrMatrix::from_csr(
+        a.nrows(),
+        a.ncols(),
+        a.row_ptr().to_vec(),
+        a.col_idx().to_vec(),
+        a.values()
+            .iter()
+            .map(|v| T::from_parts(v.real(), v.imag()))
+            .collect(),
+    )
 }
 
 fn same_csr_pattern<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>, b: &CsrMatrix<T>) -> bool {

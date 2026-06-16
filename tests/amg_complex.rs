@@ -470,7 +470,7 @@ fn amg_complex_transfer_override_plumbing() {
 }
 
 #[test]
-fn amg_complex_rejects_imaginary_transfer_override_until_native_hierarchy_support() {
+fn amg_complex_native_hierarchy_accepts_imaginary_transfer_override() {
     let csr = CsrMatrix::from_csr(
         2,
         2,
@@ -508,12 +508,16 @@ fn amg_complex_rejects_imaginary_transfer_override_until_native_hierarchy_suppor
         },
     );
 
-    let err = amg
-        .setup(&op)
-        .expect_err("imaginary complex transfer override should be rejected");
+    amg.setup(&op)
+        .expect("native complex hierarchy should preserve imaginary transfer values");
+    assert_eq!(amg.complex_setup_mode_label(), "native_hierarchy");
+
+    let rhs = vec![S::from_parts(1.0, -0.25), S::from_parts(0.5, 0.75)];
+    let mut out = vec![S::zero(); rhs.len()];
+    amg.apply(PcSide::Left, &rhs, &mut out).unwrap();
     assert!(
-        err.to_string().contains("imaginary prolongation"),
-        "unexpected error: {err}"
+        out.iter()
+            .all(|v| v.real().is_finite() && v.imag().is_finite())
     );
 }
 
