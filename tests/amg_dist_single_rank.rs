@@ -212,6 +212,8 @@ fn single_rank_distributed_csr_route_matches_residual_correction_contract() {
     assert!(!stats.uses_root_gather());
     assert_eq!(stats.gather, std::time::Duration::default());
     assert_eq!(stats.scatter, std::time::Duration::default());
+    assert_eq!(stats.reductions, 1);
+    assert!(stats.setup_total > std::time::Duration::default());
 }
 
 #[test]

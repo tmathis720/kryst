@@ -4129,6 +4129,7 @@ impl AMG {
                 ds.coarse_repartition = self.cfg.dist_coarse_repartition;
                 ds.coarse_solver_route = selected_route;
                 ds.setup_total = toc(setup_t0);
+                ds.reductions = 1;
                 rt.last_dist_apply = Some(ds);
             }
             return Ok(());
@@ -4166,6 +4167,7 @@ impl AMG {
             ds.coarse_repartition = self.cfg.dist_coarse_repartition;
             ds.coarse_solver_route = selected_route;
             ds.setup_total = toc(setup_t0);
+            ds.reductions = 1;
             rt.last_dist_apply = Some(ds);
         }
         Ok(())
@@ -4296,6 +4298,7 @@ impl AMG {
                 DistCoarseSolverRoute::Local
             };
             ds.setup_total = toc(setup_t0);
+            ds.reductions = 1;
             rt.last_dist_apply = Some(ds);
         }
 
@@ -4500,6 +4503,12 @@ impl AMG {
             stats.mode = strategy;
             stats.coarse_solver_route = selected_route;
             stats.coarse_repartition = self.cfg.dist_coarse_repartition;
+            if let Ok(rt) = self.runtime.lock()
+                && let Some(setup_stats) = rt.last_dist_apply.as_ref()
+            {
+                stats.setup_total = setup_stats.setup_total;
+                stats.reductions = setup_stats.reductions;
+            }
             Some(stats)
         } else {
             None
