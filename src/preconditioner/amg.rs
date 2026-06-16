@@ -7578,11 +7578,20 @@ impl AMG {
         _force_numeric: bool,
         require_same_pattern: bool,
     ) -> Result<(), KError> {
-        if matches!(self.cfg.coarse_solve, CoarseSolve::ILU) {
-            return Err(KError::InvalidInput(
-                "AMG complex setup does not support coarse_solve=ILU yet; use CG for HPD problems or DirectDense for nonsymmetric complex problems"
-                    .into(),
-            ));
+        match self.cfg.coarse_solve {
+            CoarseSolve::ILU => {
+                return Err(KError::InvalidInput(
+                    "AMG complex setup does not support coarse_solve=ILU yet; use CG for HPD problems or DirectDense for nonsymmetric complex problems"
+                        .into(),
+                ));
+            }
+            CoarseSolve::Smoother => {
+                return Err(KError::InvalidInput(
+                    "AMG complex setup does not support coarse_solve=Smoother yet; use CG for HPD problems or DirectDense for nonsymmetric complex problems"
+                        .into(),
+                ));
+            }
+            CoarseSolve::CG | CoarseSolve::DirectDense => {}
         }
         self.cfg.validate()?;
         let csr_complex = csr_from_linop_complex(op, self.cfg.drop_tol)?;

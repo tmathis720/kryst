@@ -80,6 +80,35 @@ fn amg_complex_rejects_coarse_ilu_until_native_hierarchy_support() {
 }
 
 #[test]
+fn amg_complex_rejects_coarse_smoother_until_native_support() {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(2.0),
+            S::from_parts(-1.0, 0.25),
+            S::from_parts(-1.0, -0.25),
+            S::from_real(2.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let mut amg = AMGBuilder::new()
+        .coarse_solve(CoarseSolve::Smoother)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("amg build");
+
+    let err = amg
+        .setup(&op)
+        .expect_err("complex coarse smoother should be rejected");
+    assert!(
+        err.to_string().contains("coarse_solve=Smoother"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn amg_complex_native_hierarchy_required_uses_native_hierarchy_for_imaginary_coupling() {
     let csr = CsrMatrix::from_csr(
         2,
