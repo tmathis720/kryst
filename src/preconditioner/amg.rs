@@ -70,6 +70,7 @@ pub(crate) mod prolong;
 pub use prolong::AdaptiveWeight;
 mod rap_ops;
 mod row_filter;
+mod scalar_core;
 pub mod strength;
 pub(crate) mod strength_nodal;
 pub(crate) mod util;
@@ -90,6 +91,8 @@ use row_filter::{
     RowFilter, apply_filter_to_csr_values_in_place, compensate_nodal_diag, compensate_scalar_rows,
     restrict_trials,
 };
+#[cfg(feature = "complex")]
+use scalar_core::AmgCore;
 use strength::Strength;
 use strength_nodal::strength_nodal_from_csr;
 use util::DofLayout;
@@ -3664,6 +3667,7 @@ pub enum AmgComplexSetupMode {
     Unset,
     NativeDiagonal,
     NativeCoarse,
+    NativeHierarchy,
     ProjectedRealHierarchy,
 }
 
@@ -3674,6 +3678,7 @@ impl AmgComplexSetupMode {
             Self::Unset => "unset",
             Self::NativeDiagonal => "native_diagonal",
             Self::NativeCoarse => "native_coarse",
+            Self::NativeHierarchy => "native_hierarchy",
             Self::ProjectedRealHierarchy => "projected_real_hierarchy",
         }
     }
@@ -3685,6 +3690,8 @@ pub struct AMG {
     complex_diag_inv: Option<Vec<S>>,
     #[cfg(feature = "complex")]
     complex_coarse_solver: Option<Mutex<CoarseDenseLu<S>>>,
+    #[cfg(feature = "complex")]
+    complex_core: Option<Mutex<AmgCore<S>>>,
     #[cfg(feature = "complex")]
     complex_setup_mode: AmgComplexSetupMode,
     #[cfg(feature = "complex")]
@@ -3720,6 +3727,8 @@ impl Default for AMG {
             complex_diag_inv: None,
             #[cfg(feature = "complex")]
             complex_coarse_solver: None,
+            #[cfg(feature = "complex")]
+            complex_core: None,
             #[cfg(feature = "complex")]
             complex_setup_mode: AmgComplexSetupMode::Unset,
             #[cfg(feature = "complex")]
@@ -7594,7 +7603,7 @@ impl AMG {
     fn setup_complex(
         &mut self,
         op: &dyn LinOp<S = S>,
-        force_numeric: bool,
+        _force_numeric: bool,
         require_same_pattern: bool,
     ) -> Result<(), KError> {
         if matches!(self.cfg.coarse_solve, CoarseSolve::ILU) {
@@ -7627,6 +7636,7 @@ impl AMG {
         self.complex_setup_fallback_reason = None;
         self.complex_diag_inv = complex_diagonal_inverse(csr_complex.as_ref(), self.cfg.drop_tol)?;
         self.complex_coarse_solver = None;
+        self.complex_core = None;
         if self.complex_diag_inv.is_some() {
             self.complex_setup_mode = AmgComplexSetupMode::NativeDiagonal;
             self.csr = Some(Arc::new(csr_real_from_complex(csr_complex.as_ref())));
@@ -7634,8 +7644,6 @@ impl AMG {
             self.stats = None;
             return Ok(());
         }
-        let has_imaginary_values =
-            csr_has_imaginary_values(csr_complex.as_ref(), self.cfg.drop_tol);
         if csr_complex.nrows() <= self.cfg.max_coarse_size && self.transfer_overrides.is_empty() {
             let mut solver = CoarseDenseLu::<S>::new();
             solver.setup(csr_complex.as_ref())?;
@@ -7646,24 +7654,14 @@ impl AMG {
             self.stats = None;
             return Ok(());
         }
-        if self.cfg.require_native_complex_hierarchy && has_imaginary_values {
-            self.complex_setup_fallback_reason =
-                Some("native_complex_hierarchy_required".to_string());
-            return Err(KError::Unsupported(
-                "AMG native complex hierarchy is required for this operator, but it exceeds the native complex coarse path and multilevel AMG levels are still real-valued; disable require_native_complex_hierarchy to use the current projected complex fallback",
-            ));
-        }
-        let csr_real = Arc::new(csr_real_from_complex(csr_complex.as_ref()));
-        self.setup_from_csr_real(csr_real, op.structure_id(), op.values_id(), force_numeric)?;
-        self.complex_setup_mode = AmgComplexSetupMode::ProjectedRealHierarchy;
-        self.complex_setup_fallback_reason = Some(
-            if has_imaginary_values {
-                "imaginary_values_projected_to_real_hierarchy"
-            } else {
-                "real_valued_complex_matrix_uses_real_hierarchy"
-            }
-            .to_string(),
-        );
+
+        let core = AmgCore::<S>::setup(csr_complex.as_ref(), &self.cfg)?;
+        self.stats = Some(core.stats());
+        self.complex_core = Some(Mutex::new(core));
+        self.complex_setup_mode = AmgComplexSetupMode::NativeHierarchy;
+        self.complex_setup_fallback_reason = None;
+        self.csr = Some(Arc::new(csr_real_from_complex(csr_complex.as_ref())));
+        self.state = AmgState::Uninitialized;
         Ok(())
     }
 }
@@ -7677,6 +7675,16 @@ impl Preconditioner for AMG {
         }
         if let AmgState::Ready { hierarchy, .. } = &self.state {
             let n = hierarchy.finest().a.nrows();
+            (n, n)
+        } else if let Some(core) = self.complex_core.as_ref() {
+            let n = core
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stats()
+                .levels
+                .first()
+                .map(|level| level.n)
+                .unwrap_or(0);
             (n, n)
         } else if let Some(csr) = self.csr.as_ref() {
             (csr.nrows(), csr.ncols())
@@ -7723,6 +7731,12 @@ impl Preconditioner for AMG {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .solve(r, z);
+        }
+        if let Some(core) = self.complex_core.as_ref() {
+            return core
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .apply(r, z);
         }
         let mut ws = self
             .complex_workspace_pool

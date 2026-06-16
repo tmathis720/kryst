@@ -80,7 +80,7 @@ fn amg_complex_rejects_coarse_ilu_until_native_hierarchy_support() {
 }
 
 #[test]
-fn amg_complex_native_hierarchy_required_rejects_imaginary_coupling() {
+fn amg_complex_native_hierarchy_required_uses_native_hierarchy_for_imaginary_coupling() {
     let csr = CsrMatrix::from_csr(
         2,
         2,
@@ -100,17 +100,10 @@ fn amg_complex_native_hierarchy_required_rejects_imaginary_coupling() {
         .build(&faer::Mat::<f64>::zeros(0, 0))
         .expect("amg build");
 
-    let err = amg
-        .setup(&op)
-        .expect_err("native complex hierarchy should be required");
-    assert!(
-        err.to_string().contains("native complex hierarchy"),
-        "unexpected error: {err}"
-    );
-    assert_eq!(
-        amg.complex_setup_fallback_reason(),
-        Some("native_complex_hierarchy_required")
-    );
+    amg.setup(&op)
+        .expect("native complex hierarchy should handle imaginary coupling");
+    assert_eq!(amg.complex_setup_mode_label(), "native_hierarchy");
+    assert_eq!(amg.complex_setup_fallback_reason(), None);
 }
 
 #[test]
@@ -270,7 +263,7 @@ fn amg_complex_projected_hierarchy_numeric_update_refreshes_values() {
         .build(&faer::Mat::<f64>::zeros(0, 0))
         .unwrap();
     amg.setup(&op1).unwrap();
-    assert_eq!(amg.complex_setup_mode_label(), "projected_real_hierarchy");
+    assert_eq!(amg.complex_setup_mode_label(), "native_hierarchy");
 
     let rhs = vec![
         S::from_parts(1.0, -0.3),
@@ -281,7 +274,7 @@ fn amg_complex_projected_hierarchy_numeric_update_refreshes_values() {
     amg.apply(PcSide::Left, &rhs, &mut before).unwrap();
 
     amg.update_numeric(&op2).unwrap();
-    assert_eq!(amg.complex_setup_mode_label(), "projected_real_hierarchy");
+    assert_eq!(amg.complex_setup_mode_label(), "native_hierarchy");
     let mut after = vec![S::zero(); rhs.len()];
     amg.apply(PcSide::Left, &rhs, &mut after).unwrap();
 
@@ -502,21 +495,18 @@ fn amg_complex_apply_residual_acceptance() {
         .build(&faer::Mat::<f64>::zeros(0, 0))
         .expect("amg build");
     amg.setup(&op).unwrap();
-    assert_eq!(amg.complex_setup_mode_label(), "projected_real_hierarchy");
-    assert_eq!(
-        amg.complex_setup_fallback_reason(),
-        Some("imaginary_values_projected_to_real_hierarchy")
-    );
+    assert_eq!(amg.complex_setup_mode_label(), "native_hierarchy");
+    assert_eq!(amg.complex_setup_fallback_reason(), None);
     assert_eq!(
         amg.stats().expect("stats").complex_setup_mode.as_str(),
-        "projected_real_hierarchy"
+        "native_hierarchy"
     );
     assert_eq!(
         amg.stats()
             .expect("stats")
             .complex_setup_fallback_reason
             .as_deref(),
-        Some("imaginary_values_projected_to_real_hierarchy")
+        None
     );
 
     let rhs = vec![
