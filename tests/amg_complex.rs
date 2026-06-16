@@ -5,7 +5,7 @@ use std::sync::Arc;
 use kryst::algebra::prelude::*;
 use kryst::matrix::op::CsrOp;
 use kryst::matrix::sparse::CsrMatrix;
-use kryst::preconditioner::amg::{AMG, AMGBuilder, CoarseSolve, RelaxPhase};
+use kryst::preconditioner::amg::{AMG, AMGBuilder, AmgTransferOperators, CoarseSolve, RelaxPhase};
 use kryst::preconditioner::{PcSide, Preconditioner};
 
 #[test]
@@ -472,20 +472,7 @@ fn amg_complex_transfer_override_plumbing() {
         vec![0, 0],
         vec![S::from_real(1.0), S::from_real(1.0)],
     );
-    let r = CsrMatrix::from_csr(
-        1,
-        2,
-        vec![0, 2],
-        vec![0, 1],
-        vec![S::from_real(0.5), S::from_real(0.5)],
-    );
-    amg.set_level_transfer_operators(
-        0,
-        kryst::preconditioner::amg::AmgTransferOperators {
-            prolongation: p,
-            restriction: r,
-        },
-    );
+    amg.set_level_transfer_operators(0, AmgTransferOperators::from_prolongation_adjoint(p));
 
     amg.setup(&op).unwrap();
     let rhs = vec![S::from_parts(1.0, 0.5), S::from_parts(-0.5, 1.0)];
@@ -522,20 +509,10 @@ fn amg_complex_native_hierarchy_accepts_imaginary_transfer_override() {
         vec![0, 0],
         vec![S::from_parts(1.0, 0.2), S::from_real(1.0)],
     );
-    let r = CsrMatrix::from_csr(
-        1,
-        2,
-        vec![0, 2],
-        vec![0, 1],
-        vec![S::from_real(0.5), S::from_real(0.5)],
-    );
-    amg.set_level_transfer_operators(
-        0,
-        kryst::preconditioner::amg::AmgTransferOperators {
-            prolongation: p,
-            restriction: r,
-        },
-    );
+    let transfer = AmgTransferOperators::from_prolongation_adjoint(p);
+    assert_eq!(transfer.restriction.values()[0], S::from_parts(1.0, -0.2));
+    assert_eq!(transfer.restriction.values()[1], S::from_real(1.0));
+    amg.set_level_transfer_operators(0, transfer);
 
     amg.setup(&op)
         .expect("native complex hierarchy should preserve imaginary transfer values");
@@ -586,7 +563,7 @@ fn amg_complex_native_hierarchy_uses_hermitian_restriction() {
     );
     amg.set_level_transfer_operators(
         0,
-        kryst::preconditioner::amg::AmgTransferOperators {
+        AmgTransferOperators {
             prolongation: p,
             restriction: deliberately_wrong_r,
         },

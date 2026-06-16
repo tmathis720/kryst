@@ -3690,6 +3690,21 @@ pub struct AmgTransferOperators {
     pub restriction: CsrMatrix<S>,
 }
 
+impl AmgTransferOperators {
+    /// Build transfer operators with the canonical AMG restriction `R = P^H`.
+    ///
+    /// AMG setup derives its restriction from the prolongation in scalar-generic
+    /// Galerkin paths. This constructor makes that contract explicit for callers
+    /// that only need to provide a custom prolongation.
+    pub fn from_prolongation_adjoint(prolongation: CsrMatrix<S>) -> Self {
+        let (restriction, _) = adjoint_csr_with_pos(&prolongation);
+        Self {
+            prolongation,
+            restriction,
+        }
+    }
+}
+
 impl Default for AMG {
     fn default() -> Self {
         let cfg = AMGConfig::default();
