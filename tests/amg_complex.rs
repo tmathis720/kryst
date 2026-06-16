@@ -551,6 +551,84 @@ fn amg_complex_native_hierarchy_accepts_imaginary_transfer_override() {
 }
 
 #[test]
+fn amg_complex_native_hierarchy_uses_hermitian_restriction() {
+    let csr = CsrMatrix::from_csr(
+        2,
+        2,
+        vec![0, 2, 4],
+        vec![0, 1, 0, 1],
+        vec![
+            S::from_real(2.0),
+            S::from_real(0.5),
+            S::from_real(0.5),
+            S::from_real(3.0),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let mut amg = AMGBuilder::new()
+        .max_coarse_size(1)
+        .max_levels(2)
+        .num_grid_sweeps(RelaxPhase::Coarsest, 0)
+        .coarse_solve(CoarseSolve::DirectDense)
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("amg build");
+
+    let p0 = S::from_parts(1.0, 1.0);
+    let p1 = S::from_real(1.0);
+    let p = CsrMatrix::from_csr(2, 1, vec![0, 1, 2], vec![0, 0], vec![p0, p1]);
+    let deliberately_wrong_r = CsrMatrix::from_csr(
+        1,
+        2,
+        vec![0, 2],
+        vec![0, 1],
+        vec![S::from_real(9.0), S::from_parts(-4.0, 2.0)],
+    );
+    amg.set_level_transfer_operators(
+        0,
+        kryst::preconditioner::amg::AmgTransferOperators {
+            prolongation: p,
+            restriction: deliberately_wrong_r,
+        },
+    );
+
+    amg.setup(&op)
+        .expect("native complex hierarchy should build with complex transfer");
+    assert_eq!(amg.complex_setup_mode_label(), "native_hierarchy");
+
+    let rhs = vec![S::from_parts(1.0, 2.0), S::from_parts(3.0, -1.0)];
+    let mut out = vec![S::zero(); rhs.len()];
+    amg.apply(PcSide::Left, &rhs, &mut out).unwrap();
+
+    let omega = 2.0 / 3.0;
+    let a0 = S::from_real(2.0);
+    let a1 = S::from_real(3.0);
+    let offdiag = S::from_real(0.5);
+    let mut expected = vec![omega * rhs[0] / a0, omega * rhs[1] / a1];
+    let residual = vec![
+        rhs[0] - (a0 * expected[0] + offdiag * expected[1]),
+        rhs[1] - (offdiag * expected[0] + a1 * expected[1]),
+    ];
+    let coarse_rhs = p0.conj() * residual[0] + p1.conj() * residual[1];
+    let coarse_a = p0.conj() * (a0 * p0 + offdiag * p1) + p1.conj() * (offdiag * p0 + a1 * p1);
+    let coarse_sol = coarse_rhs / coarse_a;
+    expected[0] = expected[0] + p0 * coarse_sol;
+    expected[1] = expected[1] + p1 * coarse_sol;
+    let post_residual = vec![
+        rhs[0] - (a0 * expected[0] + offdiag * expected[1]),
+        rhs[1] - (offdiag * expected[0] + a1 * expected[1]),
+    ];
+    expected[0] = expected[0] + omega * post_residual[0] / a0;
+    expected[1] = expected[1] + omega * post_residual[1] / a1;
+    for (got, expected) in out.iter().zip(expected.iter()) {
+        assert!(
+            (*got - *expected).abs() < 1e-12,
+            "got={got:?}, expected={expected:?}"
+        );
+    }
+}
+
+#[test]
 fn amg_complex_apply_residual_acceptance() {
     let csr = CsrMatrix::from_csr(
         3,
