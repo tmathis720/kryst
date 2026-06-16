@@ -28,6 +28,35 @@ fn poisson_1d(n: usize) -> CsrMatrix<f64> {
     CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
 }
 
+fn poisson_1d_with_endpoint_link(n: usize, diag: f64) -> CsrMatrix<f64> {
+    let mut row_ptr = Vec::with_capacity(n + 1);
+    let mut col_idx = Vec::new();
+    let mut vals = Vec::new();
+    row_ptr.push(0);
+    for i in 0..n {
+        let mut entries = Vec::new();
+        if i > 0 {
+            entries.push((i - 1, -1.0));
+        }
+        entries.push((i, diag));
+        if i + 1 < n {
+            entries.push((i + 1, -1.0));
+        }
+        if i == 0 && n > 1 {
+            entries.push((n - 1, -0.25));
+        } else if i + 1 == n && n > 1 {
+            entries.push((0, -0.25));
+        }
+        entries.sort_by_key(|(col, _)| *col);
+        for (col, value) in entries {
+            col_idx.push(col);
+            vals.push(value);
+        }
+        row_ptr.push(col_idx.len());
+    }
+    CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals)
+}
+
 fn build_amg() -> kryst::preconditioner::amg::AMG {
     AMGBuilder::new()
         .logging_level(0)
@@ -290,6 +319,72 @@ fn single_rank_distributed_csr_route_refreshes_numeric_values() {
         assert!(
             (expected - actual).abs() <= 1e-11 * scale,
             "updated distributed CSR correction mismatch at row {i}: expected={expected}, actual={actual}"
+        );
+    }
+}
+
+#[test]
+fn single_rank_distributed_csr_pattern_change_rebuilds_setup() {
+    let n = 12;
+    let local_csr = poisson_1d(n);
+    let changed_csr = poisson_1d_with_endpoint_link(n, 3.5);
+    let rhs: Vec<f64> = (0..n)
+        .map(|i| 0.25 + 0.5 * ((i + 5) as f64).sin())
+        .collect();
+
+    let mut local_amg = build_amg();
+    local_amg
+        .setup(&changed_csr)
+        .expect("changed-pattern local AMG setup");
+    let mut expected = vec![0.0; n];
+    local_amg
+        .apply(PcSide::Left, &rhs, &mut expected)
+        .expect("first changed-pattern local AMG correction");
+    let mut ax = vec![0.0; n];
+    kryst::core::traits::MatVec::matvec(&changed_csr, &expected, &mut ax);
+    let residual: Vec<f64> = rhs.iter().zip(&ax).map(|(r, az)| r - az).collect();
+    let mut correction = vec![0.0; n];
+    local_amg
+        .apply(PcSide::Left, &residual, &mut correction)
+        .expect("second changed-pattern local AMG correction");
+    for (value, correction) in expected.iter_mut().zip(correction) {
+        *value += correction;
+    }
+
+    let comm = UniverseComm::NoComm(NoComm);
+    let dist =
+        DistCsrOp::from_local_rows(n, 0, &local_csr, &[0, n], comm).expect("initial DistCsrOp");
+    let changed_dist =
+        DistCsrOp::from_local_rows(n, 0, &changed_csr, &[0, n], UniverseComm::NoComm(NoComm))
+            .expect("changed-pattern DistCsrOp");
+
+    let mut dist_amg = AMGBuilder::new()
+        .logging_level(0)
+        .relaxation_type(RelaxType::Jacobi)
+        .grid_relax_type_all(RelaxType::Jacobi)
+        .dist_coarse_strategy(DistCoarseStrategy::DistributedCsr)
+        .build(&Mat::<f64>::zeros(0, 0))
+        .expect("distributed CSR AMG build");
+    dist_amg.setup(&dist).expect("distributed CSR AMG setup");
+    dist_amg
+        .update_numeric(&changed_dist)
+        .expect("changed-pattern distributed CSR AMG rebuild");
+    let rebuild_stats = dist_amg
+        .dist_apply_stats()
+        .expect("changed-pattern distributed CSR rebuild stats");
+    assert_eq!(rebuild_stats.mode_label(), "distributed_csr");
+    assert_eq!(rebuild_stats.coarse_solver_route_label(), "distributed_csr");
+    assert_eq!(rebuild_stats.reductions, 1);
+
+    let mut actual = vec![0.0; n];
+    dist_amg
+        .apply(PcSide::Left, &rhs, &mut actual)
+        .expect("changed-pattern distributed CSR AMG apply");
+    for (i, (expected, actual)) in expected.iter().zip(actual.iter()).enumerate() {
+        let scale = expected.abs().max(actual.abs()).max(1.0);
+        assert!(
+            (expected - actual).abs() <= 1e-11 * scale,
+            "changed-pattern distributed CSR correction mismatch at row {i}: expected={expected}, actual={actual}"
         );
     }
 }
