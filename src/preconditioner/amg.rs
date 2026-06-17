@@ -22,6 +22,8 @@ use crate::matrix::DistCsrOp;
 use crate::matrix::convert::csr_from_linop;
 #[cfg(not(feature = "complex"))]
 use crate::matrix::dist::halo::HaloPlan;
+#[cfg(not(feature = "complex"))]
+use crate::matrix::dist::hierarchy::DistHierarchyMeta;
 #[cfg(all(feature = "complex", feature = "backend-faer"))]
 use crate::matrix::op::{CsrOp, DenseOp, GenericCsrOp};
 use crate::matrix::op::{LinOp, StructureId, ValuesId};
@@ -3589,6 +3591,8 @@ struct DistAmgInfo {
     #[cfg(not(feature = "complex"))]
     distributed_matrix: Option<Arc<DistCsrOp>>,
     halo_plan: Option<HaloPlan>,
+    #[cfg(not(feature = "complex"))]
+    hierarchy_meta: Option<DistHierarchyMeta>,
 }
 
 impl DistAmgInfo {
@@ -3602,6 +3606,24 @@ impl DistAmgInfo {
     fn local_nrows(&self) -> usize {
         let (start, end) = self.local_range();
         end.saturating_sub(start)
+    }
+}
+
+#[cfg(not(feature = "complex"))]
+fn dist_amg_fine_level_meta(
+    comm: UniverseComm,
+    row_part: Arc<Vec<usize>>,
+    dist_op: &DistCsrOp,
+) -> DistHierarchyMeta {
+    let halo = Arc::new(HaloPlan::from_shared_index(dist_op.halo_index()));
+    DistHierarchyMeta {
+        comm,
+        row_part: row_part.clone(),
+        level_row_parts: vec![row_part],
+        level_halos: vec![halo],
+        coarse_owners: Vec::new(),
+        coarse_offsets: Vec::new(),
+        coarse_global_size: 0,
     }
 }
 
@@ -4013,6 +4035,7 @@ impl AMG {
             local_matrix: Some(Arc::new(dist.local_matrix())),
             distributed_matrix: None,
             halo_plan: None,
+            hierarchy_meta: None,
         });
         let prev_cfg = self.cfg.clone();
         let mut local_stage: Option<&'static str> = None;
@@ -4257,6 +4280,9 @@ impl AMG {
         } else {
             None
         };
+        let hierarchy_meta = distributed_matrix
+            .as_ref()
+            .map(|op| dist_amg_fine_level_meta(comm.clone(), row_part.clone(), op.as_ref()));
 
         let local_failure = if local_stage.is_none() { 0.0 } else { 1.0 };
         let failure_sum = comm.all_reduce_f64(local_failure);
@@ -4290,6 +4316,7 @@ impl AMG {
             local_matrix: Some(Arc::new(local_matrix)),
             distributed_matrix,
             halo_plan,
+            hierarchy_meta,
         });
         self.state = AmgState::Uninitialized;
         self.csr = None;
@@ -4376,11 +4403,21 @@ impl AMG {
                     dist.row_partition().as_ref(),
                     comm.clone(),
                 ) {
-                    Ok(op) => state.distributed_matrix = Some(Arc::new(op)),
+                    Ok(op) => {
+                        let op = Arc::new(op);
+                        state.hierarchy_meta = Some(dist_amg_fine_level_meta(
+                            comm.clone(),
+                            state.row_part.clone(),
+                            op.as_ref(),
+                        ));
+                        state.distributed_matrix = Some(op);
+                    }
                     Err(err) => {
                         local_error = Some(err);
                     }
                 }
+            } else if local_error.is_none() {
+                state.hierarchy_meta = None;
             }
             if local_error.is_none() {
                 state.local_matrix = Some(Arc::new(local_matrix));
@@ -4426,6 +4463,7 @@ impl AMG {
             local_matrix: Some(Arc::new(dist.local_matrix())),
             distributed_matrix: None,
             halo_plan: None,
+            hierarchy_meta: None,
         });
         self.state = AmgState::Uninitialized;
         self.csr = None;
