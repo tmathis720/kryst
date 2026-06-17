@@ -356,6 +356,13 @@ fn single_rank_distributed_csr_route_refreshes_numeric_values() {
     dist_amg
         .apply(PcSide::Left, &rhs, &mut actual)
         .expect("updated distributed CSR AMG apply");
+    let post_apply_stats = dist_amg
+        .dist_apply_stats()
+        .expect("non-instrumented distributed CSR apply should preserve setup stats");
+    assert_eq!(post_apply_stats.mode_label(), "distributed_csr");
+    assert_eq!(post_apply_stats.reductions, 2);
+    assert_eq!(post_apply_stats.gather, std::time::Duration::default());
+    assert_eq!(post_apply_stats.scatter, std::time::Duration::default());
     for (i, (expected, actual)) in expected.iter().zip(actual.iter()).enumerate() {
         let scale = expected.abs().max(actual.abs()).max(1.0);
         assert!(

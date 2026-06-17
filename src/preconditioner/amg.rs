@@ -4832,8 +4832,6 @@ impl AMG {
             if let Ok(mut rt) = self.runtime.lock() {
                 rt.last_dist_apply = stats;
             }
-        } else if let Ok(mut rt) = self.runtime.lock() {
-            rt.last_dist_apply = None;
         }
 
         result
