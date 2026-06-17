@@ -226,6 +226,10 @@ fn single_rank_distributed_csr_route_matches_residual_correction_contract() {
         setup_stats.selected_dist_coarse_route.as_deref(),
         Some("distributed_csr")
     );
+    assert_eq!(setup_stats.num_levels, 1);
+    assert_eq!(setup_stats.total_nnz, local_csr.nnz());
+    assert_eq!(setup_stats.grid_complexity, 1.0);
+    assert_eq!(setup_stats.operator_complexity, 1.0);
     assert_eq!(
         setup_stats.dist_route_fallback,
         vec![
@@ -331,6 +335,10 @@ fn single_rank_distributed_csr_route_refreshes_numeric_values() {
         public_refresh_stats.selected_dist_coarse_route.as_deref(),
         Some("distributed_csr")
     );
+    assert_eq!(public_refresh_stats.num_levels, 1);
+    assert_eq!(public_refresh_stats.total_nnz, updated_csr.nnz());
+    assert_eq!(public_refresh_stats.grid_complexity, 1.0);
+    assert_eq!(public_refresh_stats.operator_complexity, 1.0);
     assert_eq!(
         public_refresh_stats.dist_route_fallback,
         vec![

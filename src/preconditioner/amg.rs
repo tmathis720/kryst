@@ -3625,6 +3625,14 @@ struct DistAmgHierarchy {
 }
 
 #[cfg(not(feature = "complex"))]
+#[derive(Clone, Copy, Debug, Default)]
+struct DistAmgHierarchyShape {
+    levels: usize,
+    global_rows: usize,
+    local_nnz: usize,
+}
+
+#[cfg(not(feature = "complex"))]
 #[derive(Default)]
 struct DistCsrCorrectionSummary {
     local_apply: Duration,
@@ -3655,9 +3663,57 @@ impl DistAmgHierarchy {
             coarse_offsets: Vec::new(),
             coarse_global_size: 0,
         };
-        Self {
+        let hierarchy = Self {
             levels: vec![level],
             meta,
+        };
+        debug_assert!(hierarchy.validate_metadata().is_ok());
+        hierarchy
+    }
+
+    fn validate_metadata(&self) -> Result<(), KError> {
+        if self.levels.len() != self.meta.level_row_parts.len()
+            || self.levels.len() != self.meta.level_halos.len()
+        {
+            return Err(KError::InvalidInput(
+                "AMG distributed CSR hierarchy metadata level count mismatch".into(),
+            ));
+        }
+        for (ix, level) in self.levels.iter().enumerate() {
+            if level.row_part.as_ref() != self.meta.level_row_parts[ix].as_ref() {
+                return Err(KError::InvalidInput(format!(
+                    "AMG distributed CSR hierarchy row partition mismatch at level {ix}"
+                )));
+            }
+            if level.global_row_start
+                != level
+                    .row_part
+                    .get(self.meta.comm.rank())
+                    .copied()
+                    .unwrap_or_default()
+                || level.global_row_end
+                    != level
+                        .row_part
+                        .get(self.meta.comm.rank() + 1)
+                        .copied()
+                        .unwrap_or(level.global_row_start)
+            {
+                return Err(KError::InvalidInput(format!(
+                    "AMG distributed CSR hierarchy local row range mismatch at level {ix}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn shape(&self) -> DistAmgHierarchyShape {
+        DistAmgHierarchyShape {
+            levels: self.meta.level_row_parts.len(),
+            global_rows: self.meta.row_part.last().copied().unwrap_or_default(),
+            local_nnz: self
+                .finest()
+                .map(|level| level.a.local_matrix().nnz())
+                .unwrap_or_default(),
         }
     }
 
@@ -4133,6 +4189,21 @@ impl AMG {
     }
 
     #[cfg(not(feature = "complex"))]
+    fn set_dist_route_stats_from_apply_with_shape(
+        &mut self,
+        stats: &DistApplyStats,
+        shape: Option<DistAmgHierarchyShape>,
+    ) {
+        self.set_dist_route_stats_from_apply(stats);
+        if let (Some(amg_stats), Some(shape)) = (self.stats.as_mut(), shape) {
+            amg_stats.num_levels = shape.levels;
+            amg_stats.total_nnz = shape.local_nnz;
+            amg_stats.grid_complexity = if shape.global_rows > 0 { 1.0 } else { 0.0 };
+            amg_stats.operator_complexity = if shape.local_nnz > 0 { 1.0 } else { 0.0 };
+        }
+    }
+
+    #[cfg(not(feature = "complex"))]
     fn setup_dist(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
         let setup_t0 = tic();
         let (strategy, selected_route) = self.resolve_dist_coarse_strategy(&dist.comm())?;
@@ -4411,6 +4482,7 @@ impl AMG {
         let distributed_hierarchy = distributed_matrix
             .as_ref()
             .map(|op| DistAmgHierarchy::from_fine(comm.clone(), row_part.clone(), op.clone()));
+        let distributed_shape = distributed_hierarchy.as_ref().map(DistAmgHierarchy::shape);
 
         let local_failure = if local_stage.is_none() { 0.0 } else { 1.0 };
         let failure_sum = comm.all_reduce_f64(local_failure);
@@ -4458,7 +4530,7 @@ impl AMG {
         };
         ds.setup_total = toc(setup_t0);
         ds.reductions = 1;
-        self.set_dist_route_stats_from_apply(&ds);
+        self.set_dist_route_stats_from_apply_with_shape(&ds, distributed_shape);
         if let Ok(mut rt) = self.runtime.lock() {
             rt.last_dist_apply = Some(ds);
         }
@@ -4565,7 +4637,12 @@ impl AMG {
         };
         ds.setup_total = toc(setup_t0);
         ds.reductions = 2;
-        self.set_dist_route_stats_from_apply(&ds);
+        let distributed_shape = self
+            .dist
+            .as_ref()
+            .and_then(|state| state.distributed_hierarchy.as_ref())
+            .map(DistAmgHierarchy::shape);
+        self.set_dist_route_stats_from_apply_with_shape(&ds, distributed_shape);
         if let Ok(mut rt) = self.runtime.lock() {
             rt.last_dist_apply = Some(ds);
         }
