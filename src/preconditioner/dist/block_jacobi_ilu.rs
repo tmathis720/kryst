@@ -536,7 +536,14 @@ pub fn build_block_jacobi_ilu_pc(
     local_apply_mode: DistLocalApplyMode,
     supports_native: bool,
 ) -> Result<BlockJacobiLocalPc<Ilu>, KError> {
-    let mut ilu = Ilu::new_with_config(config.clone())?;
+    let mut local_config = config.clone();
+    local_config.enable_distributed = true;
+    #[cfg(feature = "rayon")]
+    {
+        local_config.enable_parallel_factorization = true;
+        local_config.enable_parallel_triangular_solve = true;
+    }
+    let mut ilu = Ilu::new_with_config(local_config)?;
     let local = dist_op.local_block_dense();
     LegacyPreconditioner::setup(&mut ilu, &local)?;
     Ok(BlockJacobiLocalPc::new(

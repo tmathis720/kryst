@@ -58,8 +58,6 @@ use crate::utils::monitor::{Event, Monitor};
 use crate::utils::permutation::{Permutation, amd_from_adj, permutation_from_order, rcm_from_adj};
 use faer::Mat;
 use std::collections::{BTreeMap, HashMap};
-#[cfg(feature = "rayon")]
-use std::sync::Arc;
 use std::sync::Mutex;
 
 #[cfg(feature = "rayon")]
@@ -1093,56 +1091,25 @@ impl Ilu {
         let chunk_size = self.config.parallel_chunk_size.max(1);
         let blocks = Self::partition_rows(n, chunk_size);
 
-        let row_inf = Arc::new(self.row_inf_a.clone());
-        let row_gersh = Arc::new(self.row_gersh_a.clone());
-        let pivot_policy = Arc::new(self.config.pivot_policy.clone());
+        let row_inf = &self.row_inf_a;
+        let row_gersh = &self.row_gersh_a;
+        let pivot_policy = &self.config.pivot_policy;
         let max_diag = self.max_diag_a;
 
-        let results = Arc::new(Mutex::new(Vec::with_capacity(blocks.len())));
-        let first_error = Arc::new(Mutex::new(None::<KError>));
-
-        rayon::scope(|scope| {
-            for rows in blocks.iter().cloned() {
-                let results = Arc::clone(&results);
-                let first_error = Arc::clone(&first_error);
-                let row_inf = Arc::clone(&row_inf);
-                let row_gersh = Arc::clone(&row_gersh);
-                let policy = Arc::clone(&pivot_policy);
-                let matrix = matrix;
-                scope.spawn(move |_| {
-                    if first_error.lock().unwrap().is_some() {
-                        return;
-                    }
-                    match Self::factor_block(
-                        matrix,
-                        rows.clone(),
-                        policy.as_ref(),
-                        max_diag,
-                        row_inf.as_ref(),
-                        row_gersh.as_ref(),
-                    ) {
-                        Ok(res) => {
-                            results.lock().unwrap().push((rows, res));
-                        }
-                        Err(e) => {
-                            let mut guard = first_error.lock().unwrap();
-                            if guard.is_none() {
-                                *guard = Some(e);
-                            }
-                        }
-                    }
-                });
-            }
-        });
-
-        if let Some(err) = first_error.lock().unwrap().take() {
-            return Err(err);
-        }
-
-        let mut block_results = {
-            let mut guard = results.lock().unwrap();
-            std::mem::take(&mut *guard)
-        };
+        let mut block_results: Vec<_> = blocks
+            .into_par_iter()
+            .map(|rows| {
+                Self::factor_block(
+                    matrix,
+                    rows.clone(),
+                    pivot_policy,
+                    max_diag,
+                    row_inf,
+                    row_gersh,
+                )
+                .map(|res| (rows, res))
+            })
+            .collect::<Result<Vec<_>, KError>>()?;
 
         block_results.sort_by_key(|(range, _)| range.start);
 
@@ -2192,26 +2159,20 @@ impl Ilu {
                 continue;
             }
 
-            let updates: Vec<(usize, S)> = {
-                let x_ref: &[S] = &*x;
-                rows.par_iter()
-                    .with_min_len(chunk_size)
-                    .map(|&i| {
-                        let mut sum = x_ref[i];
-                        let (cols, vals) = self.l.row(i);
-                        for (&j, &val) in cols.iter().zip(vals.iter()) {
-                            if j < i {
-                                sum -= val * x_ref[j];
-                            }
-                        }
-                        (i, sum)
-                    })
-                    .collect()
-            };
-
-            for (i, val) in updates {
-                x[i] = val;
-            }
+            let x_addr = x.as_mut_ptr() as usize;
+            rows.par_iter().with_min_len(chunk_size).for_each(|&i| {
+                let x_ptr = x_addr as *mut S;
+                let mut sum = unsafe { *x_ptr.add(i) };
+                let (cols, vals) = self.l.row(i);
+                for (&j, &val) in cols.iter().zip(vals.iter()) {
+                    if j < i {
+                        sum -= val * unsafe { *x_ptr.add(j) };
+                    }
+                }
+                // Rows in the same level have no triangular dependencies on each other,
+                // so each task writes a distinct row after reading only earlier levels.
+                unsafe { *x_ptr.add(i) = sum };
+            });
         }
     }
 
@@ -2233,27 +2194,21 @@ impl Ilu {
                 continue;
             }
 
-            let updates: Vec<(usize, S)> = {
-                let x_ref: &[S] = &*x;
-                rows.par_iter()
-                    .with_min_len(chunk_size)
-                    .map(|&i| {
-                        let mut sum = x_ref[i];
-                        let (cols, vals) = self.u.row(i);
-                        for (&j, &val) in cols.iter().zip(vals.iter()) {
-                            if j <= i {
-                                continue;
-                            }
-                            sum -= val * x_ref[j];
-                        }
-                        (i, sum * self.inv_diag_u[i])
-                    })
-                    .collect()
-            };
-
-            for (i, val) in updates {
-                x[i] = val;
-            }
+            let x_addr = x.as_mut_ptr() as usize;
+            rows.par_iter().with_min_len(chunk_size).for_each(|&i| {
+                let x_ptr = x_addr as *mut S;
+                let mut sum = unsafe { *x_ptr.add(i) };
+                let (cols, vals) = self.u.row(i);
+                for (&j, &val) in cols.iter().zip(vals.iter()) {
+                    if j <= i {
+                        continue;
+                    }
+                    sum -= val * unsafe { *x_ptr.add(j) };
+                }
+                // Rows in the same level have no triangular dependencies on each other,
+                // so each task writes a distinct row after reading only earlier levels.
+                unsafe { *x_ptr.add(i) = sum * self.inv_diag_u[i] };
+            });
         }
     }
 
