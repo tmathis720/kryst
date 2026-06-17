@@ -3625,6 +3625,14 @@ struct DistAmgHierarchy {
 }
 
 #[cfg(not(feature = "complex"))]
+#[derive(Default)]
+struct DistCsrCorrectionSummary {
+    local_apply: Duration,
+    halo_exchange: Duration,
+    comm_bytes: usize,
+}
+
+#[cfg(not(feature = "complex"))]
 impl DistAmgHierarchy {
     fn from_fine(comm: UniverseComm, row_part: Arc<Vec<usize>>, fine: Arc<DistCsrOp>) -> Self {
         let halo = Arc::new(HaloPlan::from_shared_index(fine.halo_index()));
@@ -3702,6 +3710,50 @@ impl DistAmgHierarchy {
             residual[i] = rhs[i] - residual[i];
         }
         Ok(())
+    }
+
+    fn apply_finest_residual_correction(
+        &self,
+        local_amg: &AMG,
+        side: PcSide,
+        rhs: &[f64],
+        out: &mut [f64],
+        work: &mut DistCsrApplyWorkspace,
+    ) -> Result<DistCsrCorrectionSummary, KError> {
+        let n = self
+            .finest_local_nrows()
+            .ok_or_else(|| KError::InvalidInput("AMG distributed CSR hierarchy is empty".into()))?;
+        if rhs.len() != n || out.len() != n {
+            return Err(KError::InvalidInput(
+                "AMG distributed CSR apply length mismatch".into(),
+            ));
+        }
+        work.ensure(n);
+
+        let mut summary = DistCsrCorrectionSummary::default();
+        let t_local = tic();
+        local_amg.apply_local(side, rhs, out)?;
+        summary.local_apply += toc(t_local);
+
+        let t_halo = tic();
+        self.finest_residual(out, rhs, &mut work.residual[..n])?;
+        summary.halo_exchange += toc(t_halo);
+        summary.comm_bytes = summary.comm_bytes.saturating_add(self.finest_comm_bytes());
+
+        let t_local = tic();
+        local_amg.apply_local(side, &work.residual[..n], &mut work.correction[..n])?;
+        summary.local_apply += toc(t_local);
+
+        #[cfg(feature = "rayon")]
+        out.par_iter_mut()
+            .zip(work.correction[..n].par_iter())
+            .for_each(|(zi, correction)| *zi += *correction);
+        #[cfg(not(feature = "rayon"))]
+        for i in 0..n {
+            out[i] += work.correction[i];
+        }
+
+        Ok(summary)
     }
 }
 
@@ -4739,59 +4791,21 @@ impl AMG {
             .unwrap_or_default();
         ws.ensure(n);
 
-        let t_local = stats.as_ref().map(|_| tic());
-        let result = local_amg.apply_local(side, r, z);
-        if let (Some(stats), Some(t0)) = (stats.as_mut(), t_local) {
-            stats.local_apply += toc(t0);
+        let result = hierarchy.apply_finest_residual_correction(local_amg, side, r, z, &mut ws);
+        if let (Some(stats), Ok(summary)) = (stats.as_mut(), result.as_ref()) {
+            stats.local_apply += summary.local_apply;
+            stats.halo_exchange += summary.halo_exchange;
+            stats.comm_bytes = stats.comm_bytes.saturating_add(summary.comm_bytes);
+            if !stats.per_level_comm_bytes.is_empty() {
+                stats.per_level_comm_bytes[0] =
+                    stats.per_level_comm_bytes[0].saturating_add(summary.comm_bytes);
+            }
         }
-        if result.is_ok() {
-            let t_halo = stats.as_ref().map(|_| tic());
-            let residual_result = hierarchy.finest_residual(z, r, &mut ws.residual[..n]);
-            if let (Some(stats), Some(t0)) = (stats.as_mut(), t_halo) {
-                stats.halo_exchange += toc(t0);
-                let bytes = hierarchy.finest_comm_bytes();
-                stats.comm_bytes = stats.comm_bytes.saturating_add(bytes);
-                if !stats.per_level_comm_bytes.is_empty() {
-                    stats.per_level_comm_bytes[0] =
-                        stats.per_level_comm_bytes[0].saturating_add(bytes);
-                }
-            }
-            if let Err(err) = residual_result {
-                self.dist_csr_workspace_pool
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(ws);
-                return Err(err);
-            }
-
-            let t_local = stats.as_ref().map(|_| tic());
-            let correction_result =
-                local_amg.apply_local(side, &ws.residual[..n], &mut ws.correction[..n]);
-            if let (Some(stats), Some(t0)) = (stats.as_mut(), t_local) {
-                stats.local_apply += toc(t0);
-            }
-            if correction_result.is_ok() {
-                #[cfg(feature = "rayon")]
-                z.par_iter_mut()
-                    .zip(ws.correction[..n].par_iter())
-                    .for_each(|(zi, correction)| *zi += *correction);
-                #[cfg(not(feature = "rayon"))]
-                for i in 0..n {
-                    z[i] += ws.correction[i];
-                }
-            }
-            self.dist_csr_workspace_pool
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(ws);
-            correction_result
-        } else {
-            self.dist_csr_workspace_pool
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(ws);
-            result
-        }
+        self.dist_csr_workspace_pool
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ws);
+        result.map(|_| ())
     }
 
     #[cfg(not(feature = "complex"))]
