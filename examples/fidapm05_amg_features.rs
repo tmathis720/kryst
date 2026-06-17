@@ -131,11 +131,16 @@ mod real {
             let global_bytes = comm.all_reduce_f64(stats.comm_bytes as f64) as usize;
             if comm.rank() == 0 {
                 println!(
-                    "  distributed route: mode={} coarse_route={} native_support={} root_gather={}",
+                    "  distributed route: mode={} coarse_route={} native_support={} root_route={}",
                     stats.mode_label(),
                     stats.coarse_solver_route_label(),
                     stats.reports_distributed_support(),
                     stats.uses_root_gather()
+                );
+                println!(
+                    "  gather diagnostics: setup_fine_matrix={} apply_vectors={}",
+                    stats.setup_uses_fine_matrix_gather(),
+                    stats.apply_uses_root_vector_gather()
                 );
                 println!(
                     "  rank-0 apply timings: local={:?} halo/matvec={:?} gather={:?} scatter={:?}",
