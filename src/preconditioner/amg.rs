@@ -3978,6 +3978,10 @@ impl AMG {
         Ok(Box::new(hier))
     }
 
+    fn set_dist_route_stats_from_apply(&mut self, stats: &DistApplyStats) {
+        self.stats = Some(AmgStats::from_dist_apply(stats));
+    }
+
     #[cfg(not(feature = "complex"))]
     fn setup_dist(&mut self, dist: &DistCsrOp) -> Result<(), KError> {
         let setup_t0 = tic();
@@ -4121,15 +4125,15 @@ impl AMG {
         }
         if rank != root {
             self.state = AmgState::Uninitialized;
-            self.stats = None;
             self.csr = None;
+            let mut ds = DistApplyStats::default();
+            ds.mode = strategy;
+            ds.coarse_repartition = self.cfg.dist_coarse_repartition;
+            ds.coarse_solver_route = selected_route;
+            ds.setup_total = toc(setup_t0);
+            ds.reductions = 1;
+            self.set_dist_route_stats_from_apply(&ds);
             if let Ok(mut rt) = self.runtime.lock() {
-                let mut ds = DistApplyStats::default();
-                ds.mode = strategy;
-                ds.coarse_repartition = self.cfg.dist_coarse_repartition;
-                ds.coarse_solver_route = selected_route;
-                ds.setup_total = toc(setup_t0);
-                ds.reductions = 1;
                 rt.last_dist_apply = Some(ds);
             }
             return Ok(());
@@ -4144,10 +4148,18 @@ impl AMG {
             pattern_hash,
         };
         self.csr = Some(Arc::new(fine));
+        let mut ds = DistApplyStats::default();
+        ds.mode = strategy;
+        ds.coarse_repartition = self.cfg.dist_coarse_repartition;
+        ds.coarse_solver_route = selected_route;
+        ds.setup_total = toc(setup_t0);
+        ds.reductions = 1;
         if let Some(stats) = self.stats.as_mut() {
             stats.selected_dist_coarse_route =
                 Some(dist_route_label(selected_route, strategy).to_string());
             stats.dist_route_fallback = dist_route_fallback_labels(selected_route, strategy);
+        } else {
+            self.set_dist_route_stats_from_apply(&ds);
         }
         if let Some(profile) = setup_profile
             && profile == "permissive"
@@ -4162,12 +4174,6 @@ impl AMG {
             print_setup_tables(s);
         }
         if let Ok(mut rt) = self.runtime.lock() {
-            let mut ds = DistApplyStats::default();
-            ds.mode = strategy;
-            ds.coarse_repartition = self.cfg.dist_coarse_repartition;
-            ds.coarse_solver_route = selected_route;
-            ds.setup_total = toc(setup_t0);
-            ds.reductions = 1;
             rt.last_dist_apply = Some(ds);
         }
         Ok(())
@@ -4286,19 +4292,19 @@ impl AMG {
             halo_plan,
         });
         self.state = AmgState::Uninitialized;
-        self.stats = None;
         self.csr = None;
+        let mut ds = DistApplyStats::default();
+        ds.mode = strategy;
+        ds.coarse_repartition = self.cfg.dist_coarse_repartition;
+        ds.coarse_solver_route = if matches!(strategy, DistCoarseStrategy::DistributedCsr) {
+            DistCoarseSolverRoute::Auto
+        } else {
+            DistCoarseSolverRoute::Local
+        };
+        ds.setup_total = toc(setup_t0);
+        ds.reductions = 1;
+        self.set_dist_route_stats_from_apply(&ds);
         if let Ok(mut rt) = self.runtime.lock() {
-            let mut ds = DistApplyStats::default();
-            ds.mode = strategy;
-            ds.coarse_repartition = self.cfg.dist_coarse_repartition;
-            ds.coarse_solver_route = if matches!(strategy, DistCoarseStrategy::DistributedCsr) {
-                DistCoarseSolverRoute::Auto
-            } else {
-                DistCoarseSolverRoute::Local
-            };
-            ds.setup_total = toc(setup_t0);
-            ds.reductions = 1;
             rt.last_dist_apply = Some(ds);
         }
 
@@ -4384,17 +4390,18 @@ impl AMG {
         if comm.all_reduce_f64(if local_error.is_some() { 1.0 } else { 0.0 }) > 0.0 {
             return Ok(false);
         }
+        let mut ds = DistApplyStats::default();
+        ds.mode = strategy;
+        ds.coarse_repartition = self.cfg.dist_coarse_repartition;
+        ds.coarse_solver_route = if matches!(strategy, DistCoarseStrategy::DistributedCsr) {
+            DistCoarseSolverRoute::Auto
+        } else {
+            DistCoarseSolverRoute::Local
+        };
+        ds.setup_total = toc(setup_t0);
+        ds.reductions = 2;
+        self.set_dist_route_stats_from_apply(&ds);
         if let Ok(mut rt) = self.runtime.lock() {
-            let mut ds = DistApplyStats::default();
-            ds.mode = strategy;
-            ds.coarse_repartition = self.cfg.dist_coarse_repartition;
-            ds.coarse_solver_route = if matches!(strategy, DistCoarseStrategy::DistributedCsr) {
-                DistCoarseSolverRoute::Auto
-            } else {
-                DistCoarseSolverRoute::Local
-            };
-            ds.setup_total = toc(setup_t0);
-            ds.reductions = 2;
             rt.last_dist_apply = Some(ds);
         }
         Ok(true)
@@ -4421,14 +4428,14 @@ impl AMG {
             halo_plan: None,
         });
         self.state = AmgState::Uninitialized;
-        self.stats = None;
         self.csr = None;
+        let mut ds = DistApplyStats::default();
+        ds.mode = DistCoarseStrategy::SuperLuDist;
+        ds.coarse_repartition = self.cfg.dist_coarse_repartition;
+        ds.coarse_solver_route = selected_route;
+        ds.setup_total = toc(setup_t0);
+        self.set_dist_route_stats_from_apply(&ds);
         if let Ok(mut rt) = self.runtime.lock() {
-            let mut ds = DistApplyStats::default();
-            ds.mode = DistCoarseStrategy::SuperLuDist;
-            ds.coarse_repartition = self.cfg.dist_coarse_repartition;
-            ds.coarse_solver_route = selected_route;
-            ds.setup_total = toc(setup_t0);
             rt.last_dist_apply = Some(ds);
         }
         Ok(())
@@ -10560,6 +10567,26 @@ pub struct AmgStats {
 }
 
 impl AmgStats {
+    fn from_dist_apply(stats: &DistApplyStats) -> Self {
+        Self {
+            grid_complexity: 0.0,
+            operator_complexity: 0.0,
+            total_nnz: 0,
+            total_smoothing_work: 0.0,
+            num_levels: 0,
+            levels: Vec::new(),
+            diagnostics: Vec::new(),
+            setup: SetupTimings::default(),
+            last_cycle: None,
+            selected_dist_coarse_route: Some(stats.coarse_solver_route_label().to_string()),
+            dist_route_fallback: dist_route_fallback_labels(stats.coarse_solver_route, stats.mode),
+            #[cfg(feature = "complex")]
+            complex_setup_mode: AmgComplexSetupMode::Unset,
+            #[cfg(feature = "complex")]
+            complex_setup_fallback_reason: None,
+        }
+    }
+
     fn from_hierarchy(h: &AmgHierarchy) -> Self {
         let n0 = h.levels.first().map(|l| l.a.nrows() as f64).unwrap_or(1.0);
         let nnz0 = h.levels.first().map(|l| l.a.nnz() as f64).unwrap_or(1.0);

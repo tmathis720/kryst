@@ -219,6 +219,21 @@ fn single_rank_distributed_csr_route_matches_residual_correction_contract() {
         dist_amg.distributed_support(),
         PcDistributedSupport::LocalOnly
     );
+    let setup_stats = dist_amg
+        .stats()
+        .expect("distributed CSR route stats after setup");
+    assert_eq!(
+        setup_stats.selected_dist_coarse_route.as_deref(),
+        Some("distributed_csr")
+    );
+    assert_eq!(
+        setup_stats.dist_route_fallback,
+        vec![
+            "local_prototype".to_string(),
+            "root_gather".to_string(),
+            "superlu_dist".to_string()
+        ]
+    );
 
     let mut actual = vec![0.0; n];
     dist_amg
@@ -309,6 +324,21 @@ fn single_rank_distributed_csr_route_refreshes_numeric_values() {
     assert!(!refresh_stats.reports_distributed_support());
     assert_eq!(refresh_stats.reductions, 2);
     assert!(refresh_stats.setup_total > std::time::Duration::default());
+    let public_refresh_stats = dist_amg
+        .stats()
+        .expect("distributed CSR public route stats after numeric refresh");
+    assert_eq!(
+        public_refresh_stats.selected_dist_coarse_route.as_deref(),
+        Some("distributed_csr")
+    );
+    assert_eq!(
+        public_refresh_stats.dist_route_fallback,
+        vec![
+            "local_prototype".to_string(),
+            "root_gather".to_string(),
+            "superlu_dist".to_string()
+        ]
+    );
 
     let mut actual = vec![0.0; n];
     dist_amg
