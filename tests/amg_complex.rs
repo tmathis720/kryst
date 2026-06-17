@@ -103,7 +103,7 @@ fn amg_complex_rejects_coarse_ilu_until_native_hierarchy_support() {
 }
 
 #[test]
-fn amg_complex_rejects_coarse_smoother_until_native_support() {
+fn amg_complex_native_hierarchy_supports_coarse_smoother() {
     let csr = CsrMatrix::from_csr(
         2,
         2,
@@ -117,18 +117,35 @@ fn amg_complex_rejects_coarse_smoother_until_native_support() {
         ],
     );
     let op = CsrOp::new(Arc::new(csr));
+    let rhs = vec![S::from_parts(1.0, -0.5), S::from_parts(-0.25, 0.75)];
     let mut amg = AMGBuilder::new()
         .coarse_solve(CoarseSolve::Smoother)
+        .max_coarse_size(1)
+        .grid_relax_type_all(kryst::preconditioner::amg::RelaxType::Jacobi)
+        .jacobi_omega(1.0)
+        .num_grid_sweeps(RelaxPhase::Coarsest, 1)
+        .require_native_complex_hierarchy(true)
         .build(&faer::Mat::<f64>::zeros(0, 0))
         .expect("amg build");
 
-    let err = amg
-        .setup(&op)
-        .expect_err("complex coarse smoother should be rejected");
-    assert!(
-        err.to_string().contains("coarse_solve=Smoother"),
-        "unexpected error: {err}"
+    amg.setup(&op).expect("complex coarse smoother setup");
+    assert_eq!(amg.complex_setup_mode_label(), "native_hierarchy");
+    let stats = amg.stats().expect("coarse smoother stats");
+    assert_eq!(
+        stats
+            .levels
+            .last()
+            .and_then(|level| level.coarse_solver.as_deref()),
+        Some("Smoother")
     );
+
+    let mut out = vec![S::zero(); rhs.len()];
+    amg.apply(PcSide::Left, &rhs, &mut out)
+        .expect("complex coarse smoother apply");
+    let expected = vec![rhs[0] / S::from_real(2.0), rhs[1] / S::from_real(2.0)];
+    for (got, exp) in out.iter().zip(expected.iter()) {
+        assert!((*got - *exp).abs() < 1e-12, "got={got:?}, expected={exp:?}");
+    }
 }
 
 #[test]
@@ -572,6 +589,7 @@ fn amg_complex_native_hierarchy_uses_hermitian_restriction() {
     let mut amg = AMGBuilder::new()
         .max_coarse_size(1)
         .max_levels(2)
+        .grid_relax_type_all(kryst::preconditioner::amg::RelaxType::Jacobi)
         .num_grid_sweeps(RelaxPhase::Coarsest, 0)
         .coarse_solve(CoarseSolve::DirectDense)
         .require_native_complex_hierarchy(true)
@@ -692,6 +710,69 @@ fn amg_complex_native_hierarchy_honors_l1_jacobi_smoother() {
             .zip(l1_out.iter())
             .any(|(&jacobi, &l1)| (jacobi - l1).abs() > 1e-10),
         "native hierarchy ignored L1-Jacobi smoother"
+    );
+}
+
+#[test]
+fn amg_complex_native_hierarchy_honors_gauss_seidel_smoother() {
+    let csr = CsrMatrix::from_csr(
+        3,
+        3,
+        vec![0, 3, 6, 9],
+        vec![0, 1, 2, 0, 1, 2, 0, 1, 2],
+        vec![
+            S::from_real(4.0),
+            S::from_parts(-1.5, 0.25),
+            S::from_parts(0.5, -0.5),
+            S::from_parts(-0.75, -0.2),
+            S::from_real(3.5),
+            S::from_parts(-1.25, 0.4),
+            S::from_parts(0.25, 0.5),
+            S::from_parts(-1.0, -0.3),
+            S::from_real(2.75),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let rhs = vec![
+        S::from_parts(0.5, -0.75),
+        S::from_parts(-1.25, 0.25),
+        S::from_parts(0.75, 0.5),
+    ];
+
+    let mut jacobi = AMGBuilder::new()
+        .max_coarse_size(1)
+        .grid_relax_type_all(kryst::preconditioner::amg::RelaxType::Jacobi)
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("jacobi amg build");
+    jacobi.setup(&op).expect("jacobi native hierarchy setup");
+    let mut jacobi_out = vec![S::zero(); rhs.len()];
+    jacobi
+        .apply(PcSide::Left, &rhs, &mut jacobi_out)
+        .expect("jacobi native hierarchy apply");
+
+    let mut gs = AMGBuilder::new()
+        .max_coarse_size(1)
+        .grid_relax_type_all(kryst::preconditioner::amg::RelaxType::GaussSeidel)
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("gs amg build");
+    gs.setup(&op).expect("gs native hierarchy setup");
+    assert_eq!(gs.complex_setup_mode_label(), "native_hierarchy");
+    let stats = gs.stats().expect("gs stats");
+    assert_eq!(stats.levels[0].selected_relax_pre, "GaussSeidel");
+    assert_eq!(stats.levels[0].selected_relax_post, "GaussSeidel");
+
+    let mut gs_out = vec![S::zero(); rhs.len()];
+    gs.apply(PcSide::Left, &rhs, &mut gs_out)
+        .expect("gs native hierarchy apply");
+
+    assert!(
+        jacobi_out
+            .iter()
+            .zip(gs_out.iter())
+            .any(|(&jacobi, &gs)| (jacobi - gs).abs() > 1e-10),
+        "native hierarchy ignored Gauss-Seidel smoother"
     );
 }
 

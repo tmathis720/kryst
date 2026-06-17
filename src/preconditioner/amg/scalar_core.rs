@@ -29,6 +29,7 @@ pub(crate) struct AmgCore<T: KrystScalar<Real = f64>> {
 enum ScalarCoarseSolver<T: KrystScalar<Real = f64>> {
     Cg(CoarseCg<T>),
     Dense(CoarseDenseLu<T>),
+    Smoother,
 }
 
 impl<T: KrystScalar<Real = f64>> ScalarCoarseSolver<T> {
@@ -39,10 +40,7 @@ impl<T: KrystScalar<Real = f64>> ScalarCoarseSolver<T> {
             CoarseSolve::ILU => Err(KError::Unsupported(
                 "AMG scalar core coarse_solve=ILU is not available for this scalar path".into(),
             )),
-            CoarseSolve::Smoother => Err(KError::Unsupported(
-                "AMG scalar core coarse_solve=Smoother is not implemented for native scalar hierarchy"
-                    .into(),
-            )),
+            CoarseSolve::Smoother => Ok(Self::Smoother),
         }
     }
 
@@ -50,6 +48,7 @@ impl<T: KrystScalar<Real = f64>> ScalarCoarseSolver<T> {
         match self {
             Self::Cg(solver) => solver.setup(a),
             Self::Dense(solver) => solver.setup(a),
+            Self::Smoother => Ok(()),
         }
     }
 
@@ -57,6 +56,9 @@ impl<T: KrystScalar<Real = f64>> ScalarCoarseSolver<T> {
         match self {
             Self::Cg(solver) => solver.solve(b, x),
             Self::Dense(solver) => solver.solve(b, x),
+            Self::Smoother => Err(KError::InvalidInput(
+                "AMG scalar core coarse_solve=Smoother is handled by coarsest relaxation".into(),
+            )),
         }
     }
 }
@@ -261,6 +263,19 @@ where
     ) -> Result<(), KError> {
         let n = self.levels[level].a.nrows();
         if level + 1 == self.levels.len() {
+            if matches!(self.cfg.coarse_solve, CoarseSolve::Smoother) {
+                let sweeps = self.cfg.num_grid_sweeps[RelaxPhase::Coarsest.ix()];
+                let mut work = vec![T::zero(); n];
+                return self.apply_relaxation(
+                    level,
+                    &self.levels[level].a,
+                    rhs,
+                    sol,
+                    RelaxPhase::Coarsest,
+                    sweeps,
+                    &mut work,
+                );
+            }
             return self.coarse_solver.solve(rhs, sol);
         }
         let (ws, child_workspaces) = workspaces.split_first_mut().ok_or_else(|| {
@@ -334,6 +349,19 @@ where
         work: &mut [T],
     ) -> Result<(), KError> {
         match self.cfg.grid_relax_type[phase.ix()] {
+            RelaxType::GaussSeidel => {
+                if matches!(phase, RelaxPhase::Down | RelaxPhase::Fine) {
+                    gs_forward(a, &self.levels[level].diag_inv, rhs, sol, 1.0, sweeps)
+                } else {
+                    gs_backward(a, &self.levels[level].diag_inv, rhs, sol, 1.0, sweeps)
+                }
+            }
+            RelaxType::GaussSeidelBackward => {
+                gs_backward(a, &self.levels[level].diag_inv, rhs, sol, 1.0, sweeps)
+            }
+            RelaxType::SymmetricGaussSeidel => {
+                sym_gs(a, &self.levels[level].diag_inv, rhs, sol, 1.0, sweeps)
+            }
             RelaxType::L1Jacobi => l1_jacobi(
                 a,
                 &self.levels[level].l1_inv,
@@ -513,6 +541,86 @@ fn l1_jacobi<T: KrystScalar<Real = f64>>(
         for i in 0..n {
             sol[i] = sol[i] + omega * l1_inv[i] * (rhs[i] - work[i]);
         }
+    }
+    Ok(())
+}
+
+fn gs_forward<T>(
+    a: &CsrMatrix<T>,
+    diag_inv: &[T],
+    rhs: &[T],
+    sol: &mut [T],
+    omega: f64,
+    sweeps: usize,
+) -> Result<(), KError>
+where
+    T: KrystScalar<Real = f64> + AddAssign,
+{
+    let n = a.nrows();
+    if diag_inv.len() != n || rhs.len() != n || sol.len() != n {
+        return Err(KError::InvalidInput(
+            "AMG scalar core Gauss-Seidel dimension mismatch".into(),
+        ));
+    }
+    let omega = T::from_real(omega);
+    for _ in 0..sweeps {
+        for i in 0..n {
+            let mut sum = T::zero();
+            let (cols, vals) = a.row(i);
+            for (&col, &val) in cols.iter().zip(vals.iter()) {
+                sum += val * sol[col];
+            }
+            sol[i] = sol[i] + omega * diag_inv[i] * (rhs[i] - sum);
+        }
+    }
+    Ok(())
+}
+
+fn gs_backward<T>(
+    a: &CsrMatrix<T>,
+    diag_inv: &[T],
+    rhs: &[T],
+    sol: &mut [T],
+    omega: f64,
+    sweeps: usize,
+) -> Result<(), KError>
+where
+    T: KrystScalar<Real = f64> + AddAssign,
+{
+    let n = a.nrows();
+    if diag_inv.len() != n || rhs.len() != n || sol.len() != n {
+        return Err(KError::InvalidInput(
+            "AMG scalar core Gauss-Seidel dimension mismatch".into(),
+        ));
+    }
+    let omega = T::from_real(omega);
+    for _ in 0..sweeps {
+        for i in (0..n).rev() {
+            let mut sum = T::zero();
+            let (cols, vals) = a.row(i);
+            for (&col, &val) in cols.iter().zip(vals.iter()) {
+                sum += val * sol[col];
+            }
+            sol[i] = sol[i] + omega * diag_inv[i] * (rhs[i] - sum);
+        }
+    }
+    Ok(())
+}
+
+fn sym_gs<T>(
+    a: &CsrMatrix<T>,
+    diag_inv: &[T],
+    rhs: &[T],
+    sol: &mut [T],
+    omega: f64,
+    sweeps: usize,
+) -> Result<(), KError>
+where
+    T: KrystScalar<Real = f64> + AddAssign,
+{
+    for _ in 0..sweeps {
+        gs_forward(a, diag_inv, rhs, sol, omega, 1)?;
+        gs_backward(a, diag_inv, rhs, sol, omega, 1)?;
     }
     Ok(())
 }

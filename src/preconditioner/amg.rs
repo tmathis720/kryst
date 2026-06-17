@@ -7617,13 +7617,7 @@ impl AMG {
                         .into(),
                 ));
             }
-            CoarseSolve::Smoother => {
-                return Err(KError::InvalidInput(
-                    "AMG complex setup does not support coarse_solve=Smoother yet; use CG for HPD problems or DirectDense for nonsymmetric complex problems"
-                        .into(),
-                ));
-            }
-            CoarseSolve::CG | CoarseSolve::DirectDense => {}
+            CoarseSolve::CG | CoarseSolve::DirectDense | CoarseSolve::Smoother => {}
         }
         self.cfg.validate()?;
         let csr_complex = csr_from_linop_complex(op, self.cfg.drop_tol)?;
