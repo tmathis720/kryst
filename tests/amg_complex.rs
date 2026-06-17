@@ -149,6 +149,50 @@ fn amg_complex_native_hierarchy_supports_coarse_smoother() {
 }
 
 #[test]
+fn amg_complex_native_hierarchy_rejects_unsupported_smoothers() {
+    let csr = CsrMatrix::from_csr(
+        3,
+        3,
+        vec![0, 3, 6, 9],
+        vec![0, 1, 2, 0, 1, 2, 0, 1, 2],
+        vec![
+            S::from_real(4.0),
+            S::from_parts(-1.5, 0.25),
+            S::from_parts(0.5, -0.5),
+            S::from_parts(-0.75, -0.2),
+            S::from_real(3.5),
+            S::from_parts(-1.25, 0.4),
+            S::from_parts(0.25, 0.5),
+            S::from_parts(-1.0, -0.3),
+            S::from_real(2.75),
+        ],
+    );
+
+    for relax in [
+        kryst::preconditioner::amg::RelaxType::Ilu0,
+        kryst::preconditioner::amg::RelaxType::Ras,
+        kryst::preconditioner::amg::RelaxType::Fsai,
+    ] {
+        let op = CsrOp::new(Arc::new(csr.clone()));
+        let mut amg = AMGBuilder::new()
+            .max_coarse_size(1)
+            .grid_relax_type_all(relax)
+            .require_spd(false)
+            .require_native_complex_hierarchy(true)
+            .build(&faer::Mat::<f64>::zeros(0, 0))
+            .expect("amg build");
+
+        let err = amg
+            .setup(&op)
+            .expect_err("unsupported native complex smoother should fail");
+        assert!(
+            err.to_string().contains(&format!("{relax:?}")),
+            "unexpected error for {relax:?}: {err}"
+        );
+    }
+}
+
+#[test]
 fn amg_complex_native_hierarchy_required_uses_native_hierarchy_for_imaginary_coupling() {
     let csr = CsrMatrix::from_csr(
         2,

@@ -24,43 +24,33 @@ fn poisson_1d_complex(n: usize) -> CsrMatrix<S> {
 }
 
 #[test]
-fn complex_amg_cycle_supports_ilu0_smoother() {
+fn complex_amg_cycle_rejects_ilu0_smoother_until_scalar_support() {
     let a = poisson_1d_complex(48);
     let mut amg = AMGBuilder::new()
         .grid_relax_type_all(RelaxType::Ilu0)
         .coarse_solve(CoarseSolve::DirectDense)
         .build(&Mat::<f64>::zeros(0, 0))
         .expect("amg build");
-    amg.setup(&a).expect("complex AMG setup with ILU0");
 
-    let rhs: Vec<S> = (0..a.nrows())
-        .map(|i| S::from_parts((i as f64).sin(), (0.5 * i as f64).cos()))
-        .collect();
-    let mut out = vec![S::zero(); rhs.len()];
-    amg.apply(PcSide::Left, &rhs, &mut out)
-        .expect("complex AMG apply with ILU0");
-
-    assert!(out.iter().all(|v| v.is_finite()));
+    let err = amg
+        .setup(&a)
+        .expect_err("complex AMG setup with ILU0 should fail");
+    assert!(err.to_string().contains("Ilu0"), "unexpected error: {err}");
 }
 
 #[test]
-fn complex_amg_cycle_supports_ras_smoother() {
+fn complex_amg_cycle_rejects_ras_smoother_until_scalar_support() {
     let a = poisson_1d_complex(48);
     let mut amg = AMGBuilder::new()
         .grid_relax_type_all(RelaxType::Ras)
         .coarse_solve(CoarseSolve::DirectDense)
         .build(&Mat::<f64>::zeros(0, 0))
         .expect("amg build");
-    amg.setup(&a).expect("complex AMG setup with RAS");
 
-    let rhs: Vec<S> = (0..a.nrows())
-        .map(|i| S::from_parts((0.25 * i as f64).cos(), (i as f64).sin()))
-        .collect();
-    let mut out = vec![S::zero(); rhs.len()];
-    amg.apply(PcSide::Left, &rhs, &mut out)
-        .expect("complex AMG apply with RAS");
-
-    assert!(out.iter().all(|v| v.is_finite()));
+    let err = amg
+        .setup(&a)
+        .expect_err("complex AMG setup with RAS should fail");
+    assert!(err.to_string().contains("Ras"), "unexpected error: {err}");
 }
 
 #[test]

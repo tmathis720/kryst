@@ -116,6 +116,7 @@ where
                 "AMG scalar core requires a square matrix".into(),
             ));
         }
+        validate_scalar_core_relax_policy(cfg)?;
         let mut levels = Vec::with_capacity(cfg.max_levels.max(1));
         let mut a_cur = fine.clone();
         let max_levels = cfg.max_levels.max(1);
@@ -368,6 +369,15 @@ where
         work: &mut [T],
     ) -> Result<(), KError> {
         match self.cfg.grid_relax_type[phase.ix()] {
+            RelaxType::Jacobi => jacobi(
+                a,
+                &self.levels[level].diag_inv,
+                rhs,
+                sol,
+                self.cfg.jacobi_omega,
+                sweeps,
+                work,
+            ),
             RelaxType::GaussSeidel => {
                 if matches!(phase, RelaxPhase::Down | RelaxPhase::Fine) {
                     gs_forward(a, &self.levels[level].diag_inv, rhs, sol, 1.0, sweeps)
@@ -420,17 +430,31 @@ where
                     work,
                 )
             }
-            _ => jacobi(
-                a,
-                &self.levels[level].diag_inv,
-                rhs,
-                sol,
-                self.cfg.jacobi_omega,
-                sweeps,
-                work,
-            ),
+            other => Err(KError::InvalidInput(format!(
+                "AMG scalar core does not support relax type {other:?}"
+            ))),
         }
     }
+}
+
+fn validate_scalar_core_relax_policy(cfg: &AMGConfig) -> Result<(), KError> {
+    for (phase, &relax) in cfg.grid_relax_type.iter().enumerate() {
+        match relax {
+            RelaxType::Jacobi
+            | RelaxType::GaussSeidel
+            | RelaxType::GaussSeidelBackward
+            | RelaxType::SymmetricGaussSeidel
+            | RelaxType::L1Jacobi
+            | RelaxType::Chebyshev
+            | RelaxType::ChebyshevSafe => {}
+            other => {
+                return Err(KError::InvalidInput(format!(
+                    "AMG scalar core does not support relax type {other:?} for phase index {phase}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn transfer_override_for_level(
