@@ -3592,7 +3592,7 @@ struct DistAmgInfo {
     distributed_matrix: Option<Arc<DistCsrOp>>,
     halo_plan: Option<HaloPlan>,
     #[cfg(not(feature = "complex"))]
-    hierarchy_meta: Option<DistHierarchyMeta>,
+    distributed_hierarchy: Option<DistAmgHierarchy>,
 }
 
 impl DistAmgInfo {
@@ -3610,20 +3610,51 @@ impl DistAmgInfo {
 }
 
 #[cfg(not(feature = "complex"))]
-fn dist_amg_fine_level_meta(
-    comm: UniverseComm,
+struct DistAmgLevel {
+    a: Arc<DistCsrOp>,
     row_part: Arc<Vec<usize>>,
-    dist_op: &DistCsrOp,
-) -> DistHierarchyMeta {
-    let halo = Arc::new(HaloPlan::from_shared_index(dist_op.halo_index()));
-    DistHierarchyMeta {
-        comm,
-        row_part: row_part.clone(),
-        level_row_parts: vec![row_part],
-        level_halos: vec![halo],
-        coarse_owners: Vec::new(),
-        coarse_offsets: Vec::new(),
-        coarse_global_size: 0,
+    halo: Arc<HaloPlan>,
+    global_row_start: usize,
+    global_row_end: usize,
+}
+
+#[cfg(not(feature = "complex"))]
+struct DistAmgHierarchy {
+    levels: Vec<DistAmgLevel>,
+    meta: DistHierarchyMeta,
+}
+
+#[cfg(not(feature = "complex"))]
+impl DistAmgHierarchy {
+    fn from_fine(comm: UniverseComm, row_part: Arc<Vec<usize>>, fine: Arc<DistCsrOp>) -> Self {
+        let halo = Arc::new(HaloPlan::from_shared_index(fine.halo_index()));
+        let level = DistAmgLevel {
+            a: fine,
+            row_part: row_part.clone(),
+            halo: halo.clone(),
+            global_row_start: row_part.get(comm.rank()).copied().unwrap_or_default(),
+            global_row_end: row_part
+                .get(comm.rank() + 1)
+                .copied()
+                .unwrap_or_else(|| row_part.get(comm.rank()).copied().unwrap_or_default()),
+        };
+        let meta = DistHierarchyMeta {
+            comm,
+            row_part: row_part.clone(),
+            level_row_parts: vec![row_part],
+            level_halos: vec![halo],
+            coarse_owners: Vec::new(),
+            coarse_offsets: Vec::new(),
+            coarse_global_size: 0,
+        };
+        Self {
+            levels: vec![level],
+            meta,
+        }
+    }
+
+    fn finest(&self) -> Option<&DistAmgLevel> {
+        self.levels.first()
     }
 }
 
@@ -4035,7 +4066,7 @@ impl AMG {
             local_matrix: Some(Arc::new(dist.local_matrix())),
             distributed_matrix: None,
             halo_plan: None,
-            hierarchy_meta: None,
+            distributed_hierarchy: None,
         });
         let prev_cfg = self.cfg.clone();
         let mut local_stage: Option<&'static str> = None;
@@ -4280,9 +4311,9 @@ impl AMG {
         } else {
             None
         };
-        let hierarchy_meta = distributed_matrix
+        let distributed_hierarchy = distributed_matrix
             .as_ref()
-            .map(|op| dist_amg_fine_level_meta(comm.clone(), row_part.clone(), op.as_ref()));
+            .map(|op| DistAmgHierarchy::from_fine(comm.clone(), row_part.clone(), op.clone()));
 
         let local_failure = if local_stage.is_none() { 0.0 } else { 1.0 };
         let failure_sum = comm.all_reduce_f64(local_failure);
@@ -4316,7 +4347,7 @@ impl AMG {
             local_matrix: Some(Arc::new(local_matrix)),
             distributed_matrix,
             halo_plan,
-            hierarchy_meta,
+            distributed_hierarchy,
         });
         self.state = AmgState::Uninitialized;
         self.csr = None;
@@ -4405,10 +4436,10 @@ impl AMG {
                 ) {
                     Ok(op) => {
                         let op = Arc::new(op);
-                        state.hierarchy_meta = Some(dist_amg_fine_level_meta(
+                        state.distributed_hierarchy = Some(DistAmgHierarchy::from_fine(
                             comm.clone(),
                             state.row_part.clone(),
-                            op.as_ref(),
+                            op.clone(),
                         ));
                         state.distributed_matrix = Some(op);
                     }
@@ -4417,7 +4448,7 @@ impl AMG {
                     }
                 }
             } else if local_error.is_none() {
-                state.hierarchy_meta = None;
+                state.distributed_hierarchy = None;
             }
             if local_error.is_none() {
                 state.local_matrix = Some(Arc::new(local_matrix));
@@ -4463,7 +4494,7 @@ impl AMG {
             local_matrix: Some(Arc::new(dist.local_matrix())),
             distributed_matrix: None,
             halo_plan: None,
-            hierarchy_meta: None,
+            distributed_hierarchy: None,
         });
         self.state = AmgState::Uninitialized;
         self.csr = None;
@@ -4637,9 +4668,15 @@ impl AMG {
         let local_amg = dist.local_amg.as_ref().ok_or_else(|| {
             KError::InvalidInput("AMG distributed CSR local solver not initialized".into())
         })?;
-        let distributed_matrix = dist.distributed_matrix.as_ref().ok_or_else(|| {
-            KError::InvalidInput("AMG distributed CSR matrix state not initialized".into())
-        })?;
+        let distributed_matrix = dist
+            .distributed_hierarchy
+            .as_ref()
+            .and_then(DistAmgHierarchy::finest)
+            .map(|level| level.a.as_ref())
+            .or_else(|| dist.distributed_matrix.as_ref().map(Arc::as_ref))
+            .ok_or_else(|| {
+                KError::InvalidInput("AMG distributed CSR matrix state not initialized".into())
+            })?;
         let n = local_amg.dims().0;
         if r.len() != n || z.len() != n {
             return Err(KError::InvalidInput(
