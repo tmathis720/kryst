@@ -18,6 +18,7 @@ struct ScalarLevel<T: KrystScalar<Real = f64>> {
 pub(crate) struct AmgCore<T: KrystScalar<Real = f64>> {
     levels: Vec<ScalarLevel<T>>,
     coarse_solver: ScalarCoarseSolver<T>,
+    workspaces: Vec<ScalarWorkspace<T>>,
     cfg: AMGConfig,
 }
 
@@ -73,6 +74,14 @@ impl<T: KrystScalar<Real = f64>> ScalarWorkspace<T> {
             coarse_sol: vec![T::zero(); max_n],
             fine_corr: vec![T::zero(); max_n],
         }
+    }
+
+    fn ensure(&mut self, n: usize) {
+        self.az.resize(n, T::zero());
+        self.residual.resize(n, T::zero());
+        self.coarse_rhs.resize(n, T::zero());
+        self.coarse_sol.resize(n, T::zero());
+        self.fine_corr.resize(n, T::zero());
     }
 }
 
@@ -150,6 +159,7 @@ where
         Ok(Self {
             levels,
             coarse_solver,
+            workspaces: Vec::new(),
             cfg: cfg.clone(),
         })
     }
@@ -201,13 +211,11 @@ where
             ));
         }
         out.fill(T::zero());
-        let mut workspaces = self
-            .levels
-            .iter()
-            .take(self.levels.len().saturating_sub(1))
-            .map(|level| ScalarWorkspace::new(level.a.nrows()))
-            .collect::<Vec<_>>();
-        self.v_cycle(0, rhs, out, &mut workspaces)
+        self.ensure_apply_workspaces();
+        let mut workspaces = std::mem::take(&mut self.workspaces);
+        let result = self.v_cycle(0, rhs, out, &mut workspaces);
+        self.workspaces = workspaces;
+        result
     }
 
     pub(crate) fn stats(&self) -> AmgStats {
@@ -217,6 +225,22 @@ where
                 .map(|level| (&level.a, level.p.nnz(), level.r.nnz())),
             &self.cfg,
         )
+    }
+
+    fn ensure_apply_workspaces(&mut self) {
+        let needed = self.levels.len().saturating_sub(1);
+        if self.workspaces.len() != needed {
+            self.workspaces = self
+                .levels
+                .iter()
+                .take(needed)
+                .map(|level| ScalarWorkspace::new(level.a.nrows()))
+                .collect();
+            return;
+        }
+        for (ws, level) in self.workspaces.iter_mut().zip(self.levels.iter()) {
+            ws.ensure(level.a.nrows());
+        }
     }
 
     fn v_cycle(
