@@ -713,6 +713,18 @@ fn amg_complex_apply_residual_acceptance() {
     let stats = amg.stats().expect("stats");
     assert!(stats.levels[0].max_row_sum_a > 0.0);
     assert_eq!(stats.levels[0].eff_nnz_a, Some(csr.nnz()));
+    assert_eq!(
+        stats.selected_dist_coarse_route.as_deref(),
+        Some("root_gather")
+    );
+    assert_eq!(
+        stats.dist_route_fallback,
+        vec![
+            "root_gather".to_string(),
+            "local_prototype".to_string(),
+            "superlu_dist".to_string()
+        ]
+    );
 
     let rhs = vec![
         S::from_parts(1.0, -0.3),

@@ -6,7 +6,10 @@ use crate::matrix::sparse::CsrMatrix;
 
 use super::coarse_solver::{CoarseCg, CoarseDenseLu, CoarseSolver};
 use super::rap_ops::{CsrPattern, adjoint_csr_with_pos, galerkin_numeric, galerkin_symbolic};
-use super::{AMGConfig, AmgStats, AmgTransferOperators, CoarseSolve, LevelStats, RelaxPhase};
+use super::{
+    AMGConfig, AmgStats, AmgTransferOperators, CoarseSolve, LevelStats, RelaxPhase,
+    dist_route_fallback_labels, dist_route_label,
+};
 
 struct ScalarLevel<T: KrystScalar<Real = f64>> {
     a: CsrMatrix<T>,
@@ -511,8 +514,14 @@ impl AmgStats {
             diagnostics: Vec::new(),
             setup: Default::default(),
             last_cycle: None,
-            selected_dist_coarse_route: None,
-            dist_route_fallback: Vec::new(),
+            selected_dist_coarse_route: Some(
+                dist_route_label(cfg.dist_coarse_solver_route, cfg.dist_coarse_strategy)
+                    .to_string(),
+            ),
+            dist_route_fallback: dist_route_fallback_labels(
+                cfg.dist_coarse_solver_route,
+                cfg.dist_coarse_strategy,
+            ),
             #[cfg(feature = "complex")]
             complex_setup_mode: super::AmgComplexSetupMode::Unset,
             #[cfg(feature = "complex")]
