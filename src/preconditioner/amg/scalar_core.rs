@@ -201,9 +201,13 @@ where
             ));
         }
         out.fill(T::zero());
-        let max_n = self.levels.iter().map(|l| l.a.nrows()).max().unwrap_or(n);
-        let mut ws = ScalarWorkspace::new(max_n);
-        self.v_cycle(0, rhs, out, &mut ws)
+        let mut workspaces = self
+            .levels
+            .iter()
+            .take(self.levels.len().saturating_sub(1))
+            .map(|level| ScalarWorkspace::new(level.a.nrows()))
+            .collect::<Vec<_>>();
+        self.v_cycle(0, rhs, out, &mut workspaces)
     }
 
     pub(crate) fn stats(&self) -> AmgStats {
@@ -220,12 +224,15 @@ where
         level: usize,
         rhs: &[T],
         sol: &mut [T],
-        ws: &mut ScalarWorkspace<T>,
+        workspaces: &mut [ScalarWorkspace<T>],
     ) -> Result<(), KError> {
         let n = self.levels[level].a.nrows();
         if level + 1 == self.levels.len() {
             return self.coarse_solver.solve(rhs, sol);
         }
+        let (ws, child_workspaces) = workspaces.split_first_mut().ok_or_else(|| {
+            KError::InvalidInput("AMG scalar core missing apply workspace".into())
+        })?;
 
         let pre = self.cfg.num_grid_sweeps[RelaxPhase::Down.ix()];
         let post = self.cfg.num_grid_sweeps[RelaxPhase::Up.ix()];
@@ -256,12 +263,11 @@ where
         for value in &mut ws.coarse_sol[..nc] {
             *value = T::zero();
         }
-        let mut child_ws = ScalarWorkspace::new(ws.az.len());
         self.v_cycle(
             level + 1,
             &ws.coarse_rhs[..nc],
             &mut ws.coarse_sol[..nc],
-            &mut child_ws,
+            child_workspaces,
         )?;
         self.levels[level].p.spmv_scaled(
             T::one(),
