@@ -103,6 +103,7 @@ fn dist_apply_stats_expose_stable_route_labels() {
     assert!(!distributed.reports_distributed_support());
     assert!(!distributed.setup_uses_fine_matrix_gather());
     assert!(!distributed.apply_uses_root_vector_gather());
+    assert!(distributed.uses_distributed_fine_spmv());
 
     let true_distributed = DistApplyStats {
         mode: DistCoarseStrategy::DistributedCsr,
@@ -111,6 +112,7 @@ fn dist_apply_stats_expose_stable_route_labels() {
         ..Default::default()
     };
     assert!(true_distributed.reports_distributed_support());
+    assert!(true_distributed.uses_distributed_fine_spmv());
 
     let root = DistApplyStats {
         mode: DistCoarseStrategy::RootGather,
@@ -123,6 +125,7 @@ fn dist_apply_stats_expose_stable_route_labels() {
     assert!(!root.reports_distributed_support());
     assert!(!root.setup_uses_fine_matrix_gather());
     assert!(!root.apply_uses_root_vector_gather());
+    assert!(!root.uses_distributed_fine_spmv());
 
     let root_after_setup = DistApplyStats {
         mode: DistCoarseStrategy::RootGather,
@@ -131,6 +134,7 @@ fn dist_apply_stats_expose_stable_route_labels() {
         ..Default::default()
     };
     assert!(root_after_setup.setup_uses_fine_matrix_gather());
+    assert!(!root_after_setup.uses_distributed_fine_spmv());
 
     let local = DistApplyStats {
         mode: DistCoarseStrategy::LocalPrototype,
@@ -141,6 +145,7 @@ fn dist_apply_stats_expose_stable_route_labels() {
     assert_eq!(local.coarse_solver_route_label(), "local_prototype");
     assert!(!local.uses_root_gather());
     assert!(!local.reports_distributed_support());
+    assert!(!local.uses_distributed_fine_spmv());
 
     let superlu = DistApplyStats {
         mode: DistCoarseStrategy::SuperLuDist,
@@ -151,6 +156,7 @@ fn dist_apply_stats_expose_stable_route_labels() {
     assert_eq!(superlu.coarse_solver_route_label(), "superlu_dist");
     assert!(!superlu.uses_root_gather());
     assert!(superlu.reports_distributed_support());
+    assert!(!superlu.uses_distributed_fine_spmv());
 }
 
 #[test]

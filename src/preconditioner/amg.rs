@@ -10751,6 +10751,19 @@ impl DistApplyStats {
             || amg_dist_route_reports_distributed(self.coarse_solver_route, self.mode)
     }
 
+    /// True when the route uses rank-local `DistCsrOp` SpMV for the fine-grid
+    /// residual instead of gathering the fine matrix or vectors to a root rank.
+    ///
+    /// This is weaker than [`Self::reports_distributed_support`]: the current
+    /// `distributed_csr` milestone uses the canonical distributed CSR operator
+    /// for fine residual correction, while the multilevel AMG hierarchy itself
+    /// is still local-block based.
+    pub fn uses_distributed_fine_spmv(&self) -> bool {
+        matches!(self.mode, DistCoarseStrategy::DistributedCsr)
+            && !self.setup_uses_fine_matrix_gather()
+            && !self.apply_uses_root_vector_gather()
+    }
+
     /// True when setup used a non-scalable gather of the fine distributed matrix.
     pub fn setup_uses_fine_matrix_gather(&self) -> bool {
         self.setup_gathered_fine_matrix

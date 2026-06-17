@@ -131,10 +131,11 @@ mod real {
             let global_bytes = comm.all_reduce_f64(stats.comm_bytes as f64) as usize;
             if comm.rank() == 0 {
                 println!(
-                    "  distributed route: mode={} coarse_route={} native_support={} root_route={}",
+                    "  distributed route: mode={} coarse_route={} native_support={} fine_spmv={} root_route={}",
                     stats.mode_label(),
                     stats.coarse_solver_route_label(),
                     stats.reports_distributed_support(),
+                    stats.uses_distributed_fine_spmv(),
                     stats.uses_root_gather()
                 );
                 println!(

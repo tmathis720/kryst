@@ -262,6 +262,7 @@ fn single_rank_distributed_csr_route_matches_residual_correction_contract() {
     assert!(!stats.uses_root_gather());
     assert!(!stats.setup_uses_fine_matrix_gather());
     assert!(!stats.apply_uses_root_vector_gather());
+    assert!(stats.uses_distributed_fine_spmv());
     assert_eq!(stats.gather, std::time::Duration::default());
     assert_eq!(stats.scatter, std::time::Duration::default());
     assert_eq!(stats.reductions, 1);
@@ -330,6 +331,7 @@ fn single_rank_distributed_csr_route_refreshes_numeric_values() {
     assert_eq!(refresh_stats.mode_label(), "distributed_csr");
     assert_eq!(refresh_stats.coarse_solver_route_label(), "distributed_csr");
     assert!(!refresh_stats.reports_distributed_support());
+    assert!(refresh_stats.uses_distributed_fine_spmv());
     assert_eq!(refresh_stats.reductions, 2);
     assert!(refresh_stats.setup_total > std::time::Duration::default());
     let public_refresh_stats = dist_amg
@@ -361,6 +363,7 @@ fn single_rank_distributed_csr_route_refreshes_numeric_values() {
         .expect("non-instrumented distributed CSR apply should preserve setup stats");
     assert_eq!(post_apply_stats.mode_label(), "distributed_csr");
     assert_eq!(post_apply_stats.reductions, 2);
+    assert!(post_apply_stats.uses_distributed_fine_spmv());
     assert_eq!(post_apply_stats.gather, std::time::Duration::default());
     assert_eq!(post_apply_stats.scatter, std::time::Duration::default());
     for (i, (expected, actual)) in expected.iter().zip(actual.iter()).enumerate() {
@@ -423,6 +426,7 @@ fn single_rank_distributed_csr_pattern_change_rebuilds_setup() {
         .expect("changed-pattern distributed CSR rebuild stats");
     assert_eq!(rebuild_stats.mode_label(), "distributed_csr");
     assert_eq!(rebuild_stats.coarse_solver_route_label(), "distributed_csr");
+    assert!(rebuild_stats.uses_distributed_fine_spmv());
     assert_eq!(rebuild_stats.reductions, 1);
 
     let mut actual = vec![0.0; n];
