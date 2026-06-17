@@ -4,6 +4,9 @@ use crate::algebra::prelude::*;
 use crate::error::KError;
 use crate::matrix::sparse::CsrMatrix;
 
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
+
 use super::coarse_solver::{CoarseCg, CoarseDenseLu, CoarseSolver};
 use super::rap_ops::{CsrPattern, adjoint_csr_with_pos, galerkin_numeric, galerkin_symbolic};
 use super::{
@@ -317,6 +320,12 @@ where
         self.levels[level]
             .a
             .spmv_scaled(T::one(), sol, T::zero(), &mut ws.az[..n])?;
+        #[cfg(feature = "rayon")]
+        ws.residual[..n]
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, value)| *value = rhs[i] - ws.az[i]);
+        #[cfg(not(feature = "rayon"))]
         for i in 0..n {
             ws.residual[i] = rhs[i] - ws.az[i];
         }
@@ -328,6 +337,11 @@ where
             T::zero(),
             &mut ws.coarse_rhs[..nc],
         )?;
+        #[cfg(feature = "rayon")]
+        ws.coarse_sol[..nc]
+            .par_iter_mut()
+            .for_each(|value| *value = T::zero());
+        #[cfg(not(feature = "rayon"))]
         for value in &mut ws.coarse_sol[..nc] {
             *value = T::zero();
         }
@@ -343,6 +357,11 @@ where
             T::zero(),
             &mut ws.fine_corr[..n],
         )?;
+        #[cfg(feature = "rayon")]
+        sol.par_iter_mut()
+            .zip(ws.fine_corr[..n].par_iter())
+            .for_each(|(zi, correction)| *zi = *zi + *correction);
+        #[cfg(not(feature = "rayon"))]
         for i in 0..n {
             sol[i] = sol[i] + ws.fine_corr[i];
         }
@@ -531,32 +550,74 @@ fn diag_inv_from_csr<T: KrystScalar<Real = f64>>(
     a: &CsrMatrix<T>,
     drop_tol: f64,
 ) -> Result<Vec<T>, KError> {
-    let mut out = Vec::with_capacity(a.nrows());
-    for i in 0..a.nrows() {
-        let (cols, vals) = a.row(i);
-        let diag = cols
-            .iter()
-            .zip(vals.iter())
-            .find_map(|(&j, &v)| (j == i).then_some(v))
-            .ok_or_else(|| KError::InvalidInput("AMG scalar core missing diagonal".into()))?;
-        if diag.abs() <= drop_tol.max(1e-30) {
-            return Err(KError::InvalidInput(
-                "AMG scalar core encountered near-zero diagonal".into(),
-            ));
-        }
-        out.push(diag.inv());
+    #[cfg(feature = "rayon")]
+    {
+        let threshold = drop_tol.max(1e-30);
+        return (0..a.nrows())
+            .into_par_iter()
+            .map(|i| {
+                let (cols, vals) = a.row(i);
+                let diag = cols
+                    .iter()
+                    .zip(vals.iter())
+                    .find_map(|(&j, &v)| (j == i).then_some(v))
+                    .ok_or_else(|| {
+                        KError::InvalidInput("AMG scalar core missing diagonal".into())
+                    })?;
+                if diag.abs() <= threshold {
+                    return Err(KError::InvalidInput(
+                        "AMG scalar core encountered near-zero diagonal".into(),
+                    ));
+                }
+                Ok(diag.inv())
+            })
+            .collect();
     }
-    Ok(out)
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        let mut out = Vec::with_capacity(a.nrows());
+        for i in 0..a.nrows() {
+            let (cols, vals) = a.row(i);
+            let diag = cols
+                .iter()
+                .zip(vals.iter())
+                .find_map(|(&j, &v)| (j == i).then_some(v))
+                .ok_or_else(|| KError::InvalidInput("AMG scalar core missing diagonal".into()))?;
+            if diag.abs() <= drop_tol.max(1e-30) {
+                return Err(KError::InvalidInput(
+                    "AMG scalar core encountered near-zero diagonal".into(),
+                ));
+            }
+            out.push(diag.inv());
+        }
+        Ok(out)
+    }
 }
 
 fn l1_diag_inv_from_csr<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>) -> Vec<T> {
-    let mut out = Vec::with_capacity(a.nrows());
-    for i in 0..a.nrows() {
-        let (_, vals) = a.row(i);
-        let row_sum = vals.iter().map(|v| v.abs()).sum::<f64>().max(1e-30);
-        out.push(T::from_real(1.0 / row_sum));
+    #[cfg(feature = "rayon")]
+    {
+        return (0..a.nrows())
+            .into_par_iter()
+            .map(|i| {
+                let (_, vals) = a.row(i);
+                let row_sum = vals.iter().map(|v| v.abs()).sum::<f64>().max(1e-30);
+                T::from_real(1.0 / row_sum)
+            })
+            .collect();
     }
-    out
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        let mut out = Vec::with_capacity(a.nrows());
+        for i in 0..a.nrows() {
+            let (_, vals) = a.row(i);
+            let row_sum = vals.iter().map(|v| v.abs()).sum::<f64>().max(1e-30);
+            out.push(T::from_real(1.0 / row_sum));
+        }
+        out
+    }
 }
 
 fn scalar_core_needs_chebyshev(cfg: &AMGConfig) -> bool {
@@ -568,28 +629,56 @@ fn compute_scalar_cheb_data<T: KrystScalar<Real = f64>>(
     a: &CsrMatrix<T>,
     cfg: &AMGConfig,
 ) -> ScalarChebData {
-    let mut lam_max = 0.0f64;
-    for i in 0..a.nrows() {
-        let (cols, vals) = a.row(i);
-        let mut diag = 0.0f64;
-        let mut offdiag = 0.0f64;
-        for (&col, &val) in cols.iter().zip(vals.iter()) {
-            let mag = val.abs();
-            if col == i {
-                diag = mag;
+    #[cfg(feature = "rayon")]
+    let mut lam_max = (0..a.nrows())
+        .into_par_iter()
+        .map(|i| {
+            let (cols, vals) = a.row(i);
+            let mut diag = 0.0f64;
+            let mut offdiag = 0.0f64;
+            for (&col, &val) in cols.iter().zip(vals.iter()) {
+                let mag = val.abs();
+                if col == i {
+                    diag = mag;
+                } else {
+                    offdiag += mag;
+                }
+            }
+            if diag > 0.0 {
+                (diag + offdiag) / diag
             } else {
-                offdiag += mag;
+                diag + offdiag
+            }
+        })
+        .filter(|row_bound| row_bound.is_finite())
+        .reduce(|| 0.0f64, f64::max);
+
+    #[cfg(not(feature = "rayon"))]
+    let mut lam_max = {
+        let mut lam_max = 0.0f64;
+        for i in 0..a.nrows() {
+            let (cols, vals) = a.row(i);
+            let mut diag = 0.0f64;
+            let mut offdiag = 0.0f64;
+            for (&col, &val) in cols.iter().zip(vals.iter()) {
+                let mag = val.abs();
+                if col == i {
+                    diag = mag;
+                } else {
+                    offdiag += mag;
+                }
+            }
+            let row_bound = if diag > 0.0 {
+                (diag + offdiag) / diag
+            } else {
+                diag + offdiag
+            };
+            if row_bound.is_finite() {
+                lam_max = lam_max.max(row_bound);
             }
         }
-        let row_bound = if diag > 0.0 {
-            (diag + offdiag) / diag
-        } else {
-            diag + offdiag
-        };
-        if row_bound.is_finite() {
-            lam_max = lam_max.max(row_bound);
-        }
-    }
+        lam_max
+    };
     if !lam_max.is_finite() || lam_max <= 0.0 {
         lam_max = 1.0;
     }
@@ -627,11 +716,15 @@ fn jacobi<T: KrystScalar<Real = f64>>(
     sweeps: usize,
     work: &mut [T],
 ) -> Result<(), KError> {
-    let n = a.nrows();
     let omega = T::from_real(omega);
     for _ in 0..sweeps {
         a.spmv_scaled(T::one(), sol, T::zero(), work)?;
-        for i in 0..n {
+        #[cfg(feature = "rayon")]
+        sol.par_iter_mut().enumerate().for_each(|(i, sol_i)| {
+            *sol_i = *sol_i + omega * diag_inv[i] * (rhs[i] - work[i]);
+        });
+        #[cfg(not(feature = "rayon"))]
+        for i in 0..a.nrows() {
             sol[i] = sol[i] + omega * diag_inv[i] * (rhs[i] - work[i]);
         }
     }
@@ -656,6 +749,11 @@ fn l1_jacobi<T: KrystScalar<Real = f64>>(
     let omega = T::from_real(omega);
     for _ in 0..sweeps {
         a.spmv_scaled(T::one(), sol, T::zero(), work)?;
+        #[cfg(feature = "rayon")]
+        sol.par_iter_mut().enumerate().for_each(|(i, sol_i)| {
+            *sol_i = *sol_i + omega * l1_inv[i] * (rhs[i] - work[i]);
+        });
+        #[cfg(not(feature = "rayon"))]
         for i in 0..n {
             sol[i] = sol[i] + omega * l1_inv[i] * (rhs[i] - work[i]);
         }
@@ -698,17 +796,39 @@ where
 
     for _ in 0..sweeps {
         a.spmv_scaled(T::one(), sol, T::zero(), &mut work_aq[..n])?;
+        #[cfg(feature = "rayon")]
+        residual
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, value)| *value = rhs[i] - work_aq[i]);
+        #[cfg(not(feature = "rayon"))]
         for i in 0..n {
             residual[i] = rhs[i] - work_aq[i];
         }
 
         let mut alpha = 1.0 / theta;
         let alpha_t = T::from_real(alpha);
+        #[cfg(feature = "rayon")]
+        direction
+            .par_iter_mut()
+            .zip(sol.par_iter_mut())
+            .enumerate()
+            .for_each(|(i, (direction_i, sol_i))| {
+                *direction_i = diag_inv[i] * residual[i];
+                *sol_i = *sol_i + alpha_t * *direction_i;
+            });
+        #[cfg(not(feature = "rayon"))]
         for i in 0..n {
             direction[i] = diag_inv[i] * residual[i];
             sol[i] = sol[i] + alpha_t * direction[i];
         }
         a.spmv_scaled(T::one(), &direction, T::zero(), &mut work_aq[..n])?;
+        #[cfg(feature = "rayon")]
+        residual
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, value)| *value = *value - alpha_t * work_aq[i]);
+        #[cfg(not(feature = "rayon"))]
         for i in 0..n {
             residual[i] = residual[i] - alpha_t * work_aq[i];
         }
@@ -716,15 +836,33 @@ where
         for _ in 1..degree {
             let beta = 0.25 * delta * delta * alpha;
             let beta_t = T::from_real(beta);
+            #[cfg(feature = "rayon")]
+            direction.par_iter_mut().enumerate().for_each(|(i, value)| {
+                *value = diag_inv[i] * residual[i] + beta_t * *value;
+            });
+            #[cfg(not(feature = "rayon"))]
             for i in 0..n {
                 direction[i] = diag_inv[i] * residual[i] + beta_t * direction[i];
             }
             alpha = 1.0 / (theta - beta);
             let alpha_t = T::from_real(alpha);
+            #[cfg(feature = "rayon")]
+            sol.par_iter_mut()
+                .zip(direction.par_iter())
+                .for_each(|(sol_i, direction_i)| {
+                    *sol_i = *sol_i + alpha_t * *direction_i;
+                });
+            #[cfg(not(feature = "rayon"))]
             for i in 0..n {
                 sol[i] = sol[i] + alpha_t * direction[i];
             }
             a.spmv_scaled(T::one(), &direction, T::zero(), &mut work_aq[..n])?;
+            #[cfg(feature = "rayon")]
+            residual
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, value)| *value = *value - alpha_t * work_aq[i]);
+            #[cfg(not(feature = "rayon"))]
             for i in 0..n {
                 residual[i] = residual[i] - alpha_t * work_aq[i];
             }
@@ -900,15 +1038,35 @@ impl AmgStats {
 }
 
 fn max_row_sum_abs_scalar<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>) -> f64 {
-    let mut max_sum = 0.0f64;
-    for row in 0..a.nrows() {
-        let (_, vals) = a.row(row);
-        let sum = vals.iter().map(|v| v.abs()).sum::<f64>();
-        max_sum = max_sum.max(sum);
+    #[cfg(feature = "rayon")]
+    {
+        return (0..a.nrows())
+            .into_par_iter()
+            .map(|row| {
+                let (_, vals) = a.row(row);
+                vals.iter().map(|v| v.abs()).sum::<f64>()
+            })
+            .reduce(|| 0.0f64, f64::max);
     }
-    max_sum
+
+    #[cfg(not(feature = "rayon"))]
+    {
+        let mut max_sum = 0.0f64;
+        for row in 0..a.nrows() {
+            let (_, vals) = a.row(row);
+            let sum = vals.iter().map(|v| v.abs()).sum::<f64>();
+            max_sum = max_sum.max(sum);
+        }
+        max_sum
+    }
 }
 
 fn eff_nnz_scalar<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>, eps: f64) -> usize {
+    #[cfg(feature = "rayon")]
+    {
+        return a.values().par_iter().filter(|v| v.abs() > eps).count();
+    }
+
+    #[cfg(not(feature = "rayon"))]
     a.values().iter().filter(|v| v.abs() > eps).count()
 }

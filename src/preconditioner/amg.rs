@@ -3369,6 +3369,15 @@ fn gather_vector(
             "distributed vector length does not match local row partition".into(),
         ));
     }
+    if let Some(chunk) = uniform_positive_partition_len(row_part) {
+        debug_assert_eq!(chunk, local.len());
+        let mut gathered = Vec::new();
+        comm.gather(local, &mut gathered, root);
+        if rank == root {
+            return Ok(Some(gathered));
+        }
+        return Ok(None);
+    }
     if rank != root {
         let mut reqs = vec![comm.isend_to(local, root as i32)];
         comm.wait_all(&mut reqs);
@@ -3413,6 +3422,23 @@ fn scatter_vector(
             "distributed vector length does not match local row partition".into(),
         ));
     }
+    if uniform_positive_partition_len(row_part).is_some() {
+        if rank == root {
+            let global = global.ok_or_else(|| {
+                KError::InvalidInput("root rank missing global vector for scatter".into())
+            })?;
+            let n_global = *row_part.last().unwrap_or(&0);
+            if global.len() < n_global {
+                return Err(KError::InvalidInput(
+                    "global vector length does not match distributed partition".into(),
+                ));
+            }
+            comm.scatter(&global[..n_global], local_out, root);
+        } else {
+            comm.scatter(&[], local_out, root);
+        }
+        return Ok(());
+    }
     if rank == root {
         let global = global.ok_or_else(|| {
             KError::InvalidInput("root rank missing global vector for scatter".into())
@@ -3438,6 +3464,18 @@ fn scatter_vector(
     let mut reqs = vec![comm.irecv_from(local_out, root as i32)];
     comm.wait_all(&mut reqs);
     Ok(())
+}
+
+#[cfg(not(feature = "complex"))]
+fn uniform_positive_partition_len(row_part: &[usize]) -> Option<usize> {
+    let first = *row_part.get(1)? - *row_part.first()?;
+    if first == 0 {
+        return None;
+    }
+    row_part
+        .windows(2)
+        .all(|w| w[1].saturating_sub(w[0]) == first)
+        .then_some(first)
 }
 
 #[cfg(not(feature = "complex"))]
