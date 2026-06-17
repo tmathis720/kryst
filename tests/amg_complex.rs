@@ -633,6 +633,69 @@ fn amg_complex_native_hierarchy_uses_hermitian_restriction() {
 }
 
 #[test]
+fn amg_complex_native_hierarchy_honors_l1_jacobi_smoother() {
+    let csr = CsrMatrix::from_csr(
+        3,
+        3,
+        vec![0, 3, 6, 9],
+        vec![0, 1, 2, 0, 1, 2, 0, 1, 2],
+        vec![
+            S::from_real(4.0),
+            S::from_parts(-1.5, 0.25),
+            S::from_parts(0.5, -0.5),
+            S::from_parts(-0.75, -0.2),
+            S::from_real(3.5),
+            S::from_parts(-1.25, 0.4),
+            S::from_parts(0.25, 0.5),
+            S::from_parts(-1.0, -0.3),
+            S::from_real(2.75),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let rhs = vec![
+        S::from_parts(1.0, -0.3),
+        S::from_parts(-0.5, 0.7),
+        S::from_parts(0.25, 0.4),
+    ];
+
+    let mut jacobi = AMGBuilder::new()
+        .max_coarse_size(1)
+        .grid_relax_type_all(kryst::preconditioner::amg::RelaxType::Jacobi)
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("jacobi amg build");
+    jacobi.setup(&op).expect("jacobi native hierarchy setup");
+    let mut jacobi_out = vec![S::zero(); rhs.len()];
+    jacobi
+        .apply(PcSide::Left, &rhs, &mut jacobi_out)
+        .expect("jacobi native hierarchy apply");
+
+    let mut l1 = AMGBuilder::new()
+        .max_coarse_size(1)
+        .grid_relax_type_all(kryst::preconditioner::amg::RelaxType::L1Jacobi)
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("l1 amg build");
+    l1.setup(&op).expect("l1 native hierarchy setup");
+    assert_eq!(l1.complex_setup_mode_label(), "native_hierarchy");
+    let stats = l1.stats().expect("l1 stats");
+    assert_eq!(stats.levels[0].selected_relax_pre, "L1Jacobi");
+    assert_eq!(stats.levels[0].selected_relax_post, "L1Jacobi");
+
+    let mut l1_out = vec![S::zero(); rhs.len()];
+    l1.apply(PcSide::Left, &rhs, &mut l1_out)
+        .expect("l1 native hierarchy apply");
+
+    assert!(
+        jacobi_out
+            .iter()
+            .zip(l1_out.iter())
+            .any(|(&jacobi, &l1)| (jacobi - l1).abs() > 1e-10),
+        "native hierarchy ignored L1-Jacobi smoother"
+    );
+}
+
+#[test]
 fn amg_complex_transfer_override_rejects_zero_coarse_columns() {
     let csr = CsrMatrix::from_csr(
         2,

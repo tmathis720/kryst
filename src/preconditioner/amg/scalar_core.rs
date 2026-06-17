@@ -7,7 +7,7 @@ use crate::matrix::sparse::CsrMatrix;
 use super::coarse_solver::{CoarseCg, CoarseDenseLu, CoarseSolver};
 use super::rap_ops::{CsrPattern, adjoint_csr_with_pos, galerkin_numeric, galerkin_symbolic};
 use super::{
-    AMGConfig, AmgStats, AmgTransferOperators, CoarseSolve, LevelStats, RelaxPhase,
+    AMGConfig, AmgStats, AmgTransferOperators, CoarseSolve, LevelStats, RelaxPhase, RelaxType,
     dist_route_fallback_labels, dist_route_label,
 };
 
@@ -16,6 +16,7 @@ struct ScalarLevel<T: KrystScalar<Real = f64>> {
     p: CsrMatrix<T>,
     r: CsrMatrix<T>,
     diag_inv: Vec<T>,
+    l1_inv: Vec<T>,
 }
 
 pub(crate) struct AmgCore<T: KrystScalar<Real = f64>> {
@@ -111,6 +112,7 @@ where
         let max_levels = cfg.max_levels.max(1);
         for level in 0..max_levels {
             let diag_inv = diag_inv_from_csr(&a_cur, cfg.drop_tol)?;
+            let l1_inv = l1_diag_inv_from_csr(&a_cur);
             let n = a_cur.nrows();
             let override_ops = transfer_override_for_level(transfer_overrides, level);
             let terminal = override_ops.is_none()
@@ -121,6 +123,7 @@ where
                     p: CsrMatrix::identity(n),
                     r: CsrMatrix::identity(n),
                     diag_inv,
+                    l1_inv,
                 });
                 break;
             }
@@ -147,6 +150,7 @@ where
                 p,
                 r,
                 diag_inv,
+                l1_inv,
             });
             if a_next.nrows() >= n {
                 break;
@@ -180,6 +184,7 @@ where
 
         self.levels[0].a.values_mut().copy_from_slice(fine.values());
         self.levels[0].diag_inv = diag_inv_from_csr(&self.levels[0].a, self.cfg.drop_tol)?;
+        self.levels[0].l1_inv = l1_diag_inv_from_csr(&self.levels[0].a);
 
         for level in 0..self.levels.len().saturating_sub(1) {
             let (fine_levels, coarse_levels) = self.levels.split_at_mut(level + 1);
@@ -193,6 +198,7 @@ where
                 coarse_level.a.values_mut(),
             );
             coarse_level.diag_inv = diag_inv_from_csr(&coarse_level.a, self.cfg.drop_tol)?;
+            coarse_level.l1_inv = l1_diag_inv_from_csr(&coarse_level.a);
         }
 
         let coarsest = self
@@ -263,12 +269,12 @@ where
 
         let pre = self.cfg.num_grid_sweeps[RelaxPhase::Down.ix()];
         let post = self.cfg.num_grid_sweeps[RelaxPhase::Up.ix()];
-        jacobi(
+        self.apply_relaxation(
+            level,
             &self.levels[level].a,
-            &self.levels[level].diag_inv,
             rhs,
             sol,
-            self.cfg.jacobi_omega,
+            RelaxPhase::Down,
             pre,
             &mut ws.az[..n],
         )?;
@@ -306,15 +312,47 @@ where
             sol[i] = sol[i] + ws.fine_corr[i];
         }
 
-        jacobi(
+        self.apply_relaxation(
+            level,
             &self.levels[level].a,
-            &self.levels[level].diag_inv,
             rhs,
             sol,
-            self.cfg.jacobi_omega,
+            RelaxPhase::Up,
             post,
             &mut ws.az[..n],
         )
+    }
+
+    fn apply_relaxation(
+        &self,
+        level: usize,
+        a: &CsrMatrix<T>,
+        rhs: &[T],
+        sol: &mut [T],
+        phase: RelaxPhase,
+        sweeps: usize,
+        work: &mut [T],
+    ) -> Result<(), KError> {
+        match self.cfg.grid_relax_type[phase.ix()] {
+            RelaxType::L1Jacobi => l1_jacobi(
+                a,
+                &self.levels[level].l1_inv,
+                rhs,
+                sol,
+                self.cfg.jacobi_omega,
+                sweeps,
+                work,
+            ),
+            _ => jacobi(
+                a,
+                &self.levels[level].diag_inv,
+                rhs,
+                sol,
+                self.cfg.jacobi_omega,
+                sweeps,
+                work,
+            ),
+        }
     }
 }
 
@@ -410,6 +448,16 @@ fn diag_inv_from_csr<T: KrystScalar<Real = f64>>(
     Ok(out)
 }
 
+fn l1_diag_inv_from_csr<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>) -> Vec<T> {
+    let mut out = Vec::with_capacity(a.nrows());
+    for i in 0..a.nrows() {
+        let (_, vals) = a.row(i);
+        let row_sum = vals.iter().map(|v| v.abs()).sum::<f64>().max(1e-30);
+        out.push(T::from_real(1.0 / row_sum));
+    }
+    out
+}
+
 fn pairwise_piecewise_constant_p<T: KrystScalar<Real = f64>>(n: usize) -> CsrMatrix<T> {
     let nc = n.div_ceil(2);
     let mut row_ptr = Vec::with_capacity(n + 1);
@@ -439,6 +487,31 @@ fn jacobi<T: KrystScalar<Real = f64>>(
         a.spmv_scaled(T::one(), sol, T::zero(), work)?;
         for i in 0..n {
             sol[i] = sol[i] + omega * diag_inv[i] * (rhs[i] - work[i]);
+        }
+    }
+    Ok(())
+}
+
+fn l1_jacobi<T: KrystScalar<Real = f64>>(
+    a: &CsrMatrix<T>,
+    l1_inv: &[T],
+    rhs: &[T],
+    sol: &mut [T],
+    omega: f64,
+    sweeps: usize,
+    work: &mut [T],
+) -> Result<(), KError> {
+    let n = a.nrows();
+    if l1_inv.len() != n || rhs.len() != n || sol.len() != n || work.len() < n {
+        return Err(KError::InvalidInput(
+            "AMG scalar core L1-Jacobi dimension mismatch".into(),
+        ));
+    }
+    let omega = T::from_real(omega);
+    for _ in 0..sweeps {
+        a.spmv_scaled(T::one(), sol, T::zero(), work)?;
+        for i in 0..n {
+            sol[i] = sol[i] + omega * l1_inv[i] * (rhs[i] - work[i]);
         }
     }
     Ok(())
