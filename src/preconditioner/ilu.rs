@@ -27,11 +27,11 @@
 //! # Parallel execution
 //! [`IluConfig::enable_parallel_factorization`] and
 //! [`IluConfig::enable_parallel_triangular_solve`] control optional parallel behavior when the
-//! `rayon` feature is enabled. Factorization remains mostly sequential today and the flag is held
-//! for future ParILU-style experiments, while triangular solves currently level-schedule the
-//! substitutions and only expose true concurrency when built with `rayon`.
+//! `rayon` feature is enabled. ILU(0) factorization can use independent block factorization,
+//! ParILU refinement uses row-parallel sweeps, and exact triangular solves use level-scheduled
+//! substitutions with parallel rows inside each level.
 //! The [`IluConfig::parallel_chunk_size`] parameter caps the number of rows each task touches; it
-//! is mainly a tuning knob for these experimental paths.
+//! is the main tuning knob for these paths.
 //!
 //! # References
 //! - HYPRE ParILU implementation
@@ -2368,6 +2368,12 @@ impl Ilu {
 }
 
 impl Ilu {
+    /// Internal access to the effective configuration, used by distributed builder tests.
+    #[cfg(test)]
+    pub(crate) fn config(&self) -> &IluConfig {
+        &self.config
+    }
+
     /// Quick factory method for common ILU configurations
     pub fn create_quick(ilu_type: IluType, fill_or_drop: Real) -> Result<Self, KError> {
         let mut config = IluConfig::default();

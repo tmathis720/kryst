@@ -696,3 +696,61 @@ pub fn build_block_jacobi_pc(
 }
 
 // Builder helpers and distributed wrappers are defined below.
+
+#[cfg(all(test, feature = "backend-faer", not(feature = "complex")))]
+mod tests {
+    use super::*;
+    use crate::matrix::sparse::CsrMatrix;
+    use crate::parallel::{NoComm, UniverseComm};
+
+    fn one_rank_dist_tridiag(n: usize) -> DistCsrOp {
+        let mut row_ptr = Vec::with_capacity(n + 1);
+        let mut col_idx = Vec::new();
+        let mut vals = Vec::new();
+        row_ptr.push(0);
+        for i in 0..n {
+            if i > 0 {
+                col_idx.push(i - 1);
+                vals.push(-1.0);
+            }
+            col_idx.push(i);
+            vals.push(4.0);
+            if i + 1 < n {
+                col_idx.push(i + 1);
+                vals.push(-1.0);
+            }
+            row_ptr.push(col_idx.len());
+        }
+
+        let local = CsrMatrix::from_csr(n, n, row_ptr, col_idx, vals);
+        DistCsrOp::from_local_rows(n, 0, &local, &[0, n], UniverseComm::NoComm(NoComm))
+            .expect("one-rank dist csr")
+    }
+
+    #[test]
+    fn block_jacobi_ilu_builder_enables_distributed_rayon_local_ilu() {
+        let dist = one_rank_dist_tridiag(8);
+        let mut cfg = IluConfig::default();
+        cfg.parallel_chunk_size = 3;
+        cfg.enable_parallel_factorization = false;
+        cfg.enable_parallel_triangular_solve = false;
+        cfg.enable_distributed = false;
+
+        let pc = build_block_jacobi_ilu_pc(&dist, &cfg, DistLocalApplyMode::NativeLocalHalo, true)
+            .expect("block jacobi ilu");
+        let effective = pc.local_pc.config();
+
+        assert!(effective.enable_distributed);
+        assert_eq!(effective.parallel_chunk_size, 3);
+        #[cfg(feature = "rayon")]
+        {
+            assert!(effective.enable_parallel_factorization);
+            assert!(effective.enable_parallel_triangular_solve);
+        }
+        #[cfg(not(feature = "rayon"))]
+        {
+            assert!(!effective.enable_parallel_factorization);
+            assert!(!effective.enable_parallel_triangular_solve);
+        }
+    }
+}
