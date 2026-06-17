@@ -714,6 +714,70 @@ fn amg_complex_native_hierarchy_honors_l1_jacobi_smoother() {
 }
 
 #[test]
+fn amg_complex_native_hierarchy_honors_chebyshev_smoother() {
+    let csr = CsrMatrix::from_csr(
+        3,
+        3,
+        vec![0, 3, 6, 9],
+        vec![0, 1, 2, 0, 1, 2, 0, 1, 2],
+        vec![
+            S::from_real(4.0),
+            S::from_parts(-1.5, 0.25),
+            S::from_parts(0.5, -0.5),
+            S::from_parts(-0.75, -0.2),
+            S::from_real(3.5),
+            S::from_parts(-1.25, 0.4),
+            S::from_parts(0.25, 0.5),
+            S::from_parts(-1.0, -0.3),
+            S::from_real(2.75),
+        ],
+    );
+    let op = CsrOp::new(Arc::new(csr));
+    let rhs = vec![
+        S::from_parts(0.5, -0.75),
+        S::from_parts(-1.25, 0.25),
+        S::from_parts(0.75, 0.5),
+    ];
+
+    let mut jacobi = AMGBuilder::new()
+        .max_coarse_size(1)
+        .grid_relax_type_all(kryst::preconditioner::amg::RelaxType::Jacobi)
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("jacobi amg build");
+    jacobi.setup(&op).expect("jacobi native hierarchy setup");
+    let mut jacobi_out = vec![S::zero(); rhs.len()];
+    jacobi
+        .apply(PcSide::Left, &rhs, &mut jacobi_out)
+        .expect("jacobi native hierarchy apply");
+
+    let mut cheb = AMGBuilder::new()
+        .max_coarse_size(1)
+        .grid_relax_type_all(kryst::preconditioner::amg::RelaxType::Chebyshev)
+        .chebyshev_degree(2)
+        .require_native_complex_hierarchy(true)
+        .build(&faer::Mat::<f64>::zeros(0, 0))
+        .expect("chebyshev amg build");
+    cheb.setup(&op).expect("chebyshev native hierarchy setup");
+    assert_eq!(cheb.complex_setup_mode_label(), "native_hierarchy");
+    let stats = cheb.stats().expect("chebyshev stats");
+    assert_eq!(stats.levels[0].selected_relax_pre, "Chebyshev");
+    assert_eq!(stats.levels[0].selected_relax_post, "Chebyshev");
+
+    let mut cheb_out = vec![S::zero(); rhs.len()];
+    cheb.apply(PcSide::Left, &rhs, &mut cheb_out)
+        .expect("chebyshev native hierarchy apply");
+
+    assert!(
+        jacobi_out
+            .iter()
+            .zip(cheb_out.iter())
+            .any(|(&jacobi, &cheb)| (jacobi - cheb).abs() > 1e-10),
+        "native hierarchy ignored Chebyshev smoother"
+    );
+}
+
+#[test]
 fn amg_complex_native_hierarchy_honors_gauss_seidel_smoother() {
     let csr = CsrMatrix::from_csr(
         3,

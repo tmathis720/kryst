@@ -17,6 +17,7 @@ struct ScalarLevel<T: KrystScalar<Real = f64>> {
     r: CsrMatrix<T>,
     diag_inv: Vec<T>,
     l1_inv: Vec<T>,
+    cheb: Option<ScalarChebData>,
 }
 
 pub(crate) struct AmgCore<T: KrystScalar<Real = f64>> {
@@ -24,6 +25,12 @@ pub(crate) struct AmgCore<T: KrystScalar<Real = f64>> {
     coarse_solver: ScalarCoarseSolver<T>,
     workspaces: Vec<ScalarWorkspace<T>>,
     cfg: AMGConfig,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScalarChebData {
+    lambda_max: f64,
+    lambda_min: f64,
 }
 
 enum ScalarCoarseSolver<T: KrystScalar<Real = f64>> {
@@ -112,9 +119,11 @@ where
         let mut levels = Vec::with_capacity(cfg.max_levels.max(1));
         let mut a_cur = fine.clone();
         let max_levels = cfg.max_levels.max(1);
+        let need_cheb = scalar_core_needs_chebyshev(cfg);
         for level in 0..max_levels {
             let diag_inv = diag_inv_from_csr(&a_cur, cfg.drop_tol)?;
             let l1_inv = l1_diag_inv_from_csr(&a_cur);
+            let cheb = need_cheb.then(|| compute_scalar_cheb_data(&a_cur, cfg));
             let n = a_cur.nrows();
             let override_ops = transfer_override_for_level(transfer_overrides, level);
             let terminal = override_ops.is_none()
@@ -126,6 +135,7 @@ where
                     r: CsrMatrix::identity(n),
                     diag_inv,
                     l1_inv,
+                    cheb,
                 });
                 break;
             }
@@ -153,6 +163,7 @@ where
                 r,
                 diag_inv,
                 l1_inv,
+                cheb,
             });
             if a_next.nrows() >= n {
                 break;
@@ -187,6 +198,10 @@ where
         self.levels[0].a.values_mut().copy_from_slice(fine.values());
         self.levels[0].diag_inv = diag_inv_from_csr(&self.levels[0].a, self.cfg.drop_tol)?;
         self.levels[0].l1_inv = l1_diag_inv_from_csr(&self.levels[0].a);
+        if self.cfg.chebyshev_recompute_esteig || self.levels[0].cheb.is_some() {
+            self.levels[0].cheb = scalar_core_needs_chebyshev(&self.cfg)
+                .then(|| compute_scalar_cheb_data(&self.levels[0].a, &self.cfg));
+        }
 
         for level in 0..self.levels.len().saturating_sub(1) {
             let (fine_levels, coarse_levels) = self.levels.split_at_mut(level + 1);
@@ -201,6 +216,10 @@ where
             );
             coarse_level.diag_inv = diag_inv_from_csr(&coarse_level.a, self.cfg.drop_tol)?;
             coarse_level.l1_inv = l1_diag_inv_from_csr(&coarse_level.a);
+            if self.cfg.chebyshev_recompute_esteig || coarse_level.cheb.is_some() {
+                coarse_level.cheb = scalar_core_needs_chebyshev(&self.cfg)
+                    .then(|| compute_scalar_cheb_data(&coarse_level.a, &self.cfg));
+            }
         }
 
         let coarsest = self
@@ -371,6 +390,36 @@ where
                 sweeps,
                 work,
             ),
+            RelaxType::Chebyshev => {
+                let cheb = self.levels[level].cheb.as_ref().ok_or_else(|| {
+                    KError::InvalidInput("AMG scalar core Chebyshev cache missing".into())
+                })?;
+                chebyshev(
+                    a,
+                    &self.levels[level].diag_inv,
+                    rhs,
+                    sol,
+                    self.cfg.chebyshev_degree.max(1),
+                    cheb,
+                    sweeps,
+                    work,
+                )
+            }
+            RelaxType::ChebyshevSafe => {
+                let cheb = self.levels[level].cheb.as_ref().ok_or_else(|| {
+                    KError::InvalidInput("AMG scalar core ChebyshevSafe cache missing".into())
+                })?;
+                chebyshev(
+                    a,
+                    &self.levels[level].l1_inv,
+                    rhs,
+                    sol,
+                    self.cfg.chebyshev_degree.max(1),
+                    cheb,
+                    sweeps,
+                    work,
+                )
+            }
             _ => jacobi(
                 a,
                 &self.levels[level].diag_inv,
@@ -486,6 +535,51 @@ fn l1_diag_inv_from_csr<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>) -> Vec<T> 
     out
 }
 
+fn scalar_core_needs_chebyshev(cfg: &AMGConfig) -> bool {
+    cfg.grid_relax_type.contains(&RelaxType::Chebyshev)
+        || cfg.grid_relax_type.contains(&RelaxType::ChebyshevSafe)
+}
+
+fn compute_scalar_cheb_data<T: KrystScalar<Real = f64>>(
+    a: &CsrMatrix<T>,
+    cfg: &AMGConfig,
+) -> ScalarChebData {
+    let mut lam_max = 0.0f64;
+    for i in 0..a.nrows() {
+        let (cols, vals) = a.row(i);
+        let mut diag = 0.0f64;
+        let mut offdiag = 0.0f64;
+        for (&col, &val) in cols.iter().zip(vals.iter()) {
+            let mag = val.abs();
+            if col == i {
+                diag = mag;
+            } else {
+                offdiag += mag;
+            }
+        }
+        let row_bound = if diag > 0.0 {
+            (diag + offdiag) / diag
+        } else {
+            diag + offdiag
+        };
+        if row_bound.is_finite() {
+            lam_max = lam_max.max(row_bound);
+        }
+    }
+    if !lam_max.is_finite() || lam_max <= 0.0 {
+        lam_max = 1.0;
+    }
+    lam_max *= cfg.chebyshev_safety.max(1.0);
+    if !lam_max.is_finite() || lam_max <= 0.0 {
+        lam_max = cfg.chebyshev_safety.max(1.0);
+    }
+    let ratio = cfg.chebyshev_lower_ratio.clamp(1e-6, 0.99);
+    ScalarChebData {
+        lambda_max: lam_max,
+        lambda_min: (ratio * lam_max).max(1e-30),
+    }
+}
+
 fn pairwise_piecewise_constant_p<T: KrystScalar<Real = f64>>(n: usize) -> CsrMatrix<T> {
     let nc = n.div_ceil(2);
     let mut row_ptr = Vec::with_capacity(n + 1);
@@ -540,6 +634,76 @@ fn l1_jacobi<T: KrystScalar<Real = f64>>(
         a.spmv_scaled(T::one(), sol, T::zero(), work)?;
         for i in 0..n {
             sol[i] = sol[i] + omega * l1_inv[i] * (rhs[i] - work[i]);
+        }
+    }
+    Ok(())
+}
+
+fn chebyshev<T>(
+    a: &CsrMatrix<T>,
+    diag_inv: &[T],
+    rhs: &[T],
+    sol: &mut [T],
+    degree: usize,
+    data: &ScalarChebData,
+    sweeps: usize,
+    work_aq: &mut [T],
+) -> Result<(), KError>
+where
+    T: KrystScalar<Real = f64> + AddAssign,
+{
+    let n = a.nrows();
+    if diag_inv.len() != n || rhs.len() != n || sol.len() != n || work_aq.len() < n {
+        return Err(KError::InvalidInput(
+            "AMG scalar core Chebyshev dimension mismatch".into(),
+        ));
+    }
+    if degree == 0 || sweeps == 0 {
+        return Ok(());
+    }
+    if !data.lambda_max.is_finite() || !data.lambda_min.is_finite() || data.lambda_max <= 0.0 {
+        return Err(KError::InvalidInput(
+            "AMG scalar core Chebyshev invalid eigenvalue bounds".into(),
+        ));
+    }
+
+    let theta = (0.5 * (data.lambda_max + data.lambda_min)).max(1e-12);
+    let delta = 0.5 * (data.lambda_max - data.lambda_min);
+    let mut residual = vec![T::zero(); n];
+    let mut direction = vec![T::zero(); n];
+
+    for _ in 0..sweeps {
+        a.spmv_scaled(T::one(), sol, T::zero(), &mut work_aq[..n])?;
+        for i in 0..n {
+            residual[i] = rhs[i] - work_aq[i];
+        }
+
+        let mut alpha = 1.0 / theta;
+        let alpha_t = T::from_real(alpha);
+        for i in 0..n {
+            direction[i] = diag_inv[i] * residual[i];
+            sol[i] = sol[i] + alpha_t * direction[i];
+        }
+        a.spmv_scaled(T::one(), &direction, T::zero(), &mut work_aq[..n])?;
+        for i in 0..n {
+            residual[i] = residual[i] - alpha_t * work_aq[i];
+        }
+
+        for _ in 1..degree {
+            let beta = 0.25 * delta * delta * alpha;
+            let beta_t = T::from_real(beta);
+            for i in 0..n {
+                direction[i] = diag_inv[i] * residual[i] + beta_t * direction[i];
+            }
+            alpha = 1.0 / (theta - beta);
+            let alpha_t = T::from_real(alpha);
+            for i in 0..n {
+                sol[i] = sol[i] + alpha_t * direction[i];
+            }
+            a.spmv_scaled(T::one(), &direction, T::zero(), &mut work_aq[..n])?;
+            for i in 0..n {
+                residual[i] = residual[i] - alpha_t * work_aq[i];
+            }
         }
     }
     Ok(())
