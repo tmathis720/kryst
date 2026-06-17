@@ -3656,18 +3656,63 @@ impl DistAmgHierarchy {
     fn finest(&self) -> Option<&DistAmgLevel> {
         self.levels.first()
     }
+
+    fn num_levels(&self) -> usize {
+        self.levels.len()
+    }
+
+    fn finest_local_nrows(&self) -> Option<usize> {
+        self.finest()
+            .map(|level| level.global_row_end.saturating_sub(level.global_row_start))
+    }
+
+    fn finest_comm_bytes(&self) -> usize {
+        self.finest()
+            .map(|level| {
+                level
+                    .halo
+                    .index
+                    .recv_map
+                    .values()
+                    .chain(level.halo.index.send_map.values())
+                    .map(|cols| cols.len() * std::mem::size_of::<f64>())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    fn finest_residual(&self, x: &[f64], rhs: &[f64], residual: &mut [f64]) -> Result<(), KError> {
+        let level = self
+            .finest()
+            .ok_or_else(|| KError::InvalidInput("AMG distributed CSR hierarchy is empty".into()))?;
+        let n = level.global_row_end.saturating_sub(level.global_row_start);
+        if x.len() != n || rhs.len() != n || residual.len() < n {
+            return Err(KError::InvalidInput(
+                "AMG distributed CSR finest residual length mismatch".into(),
+            ));
+        }
+        level.a.try_matvec(x, &mut residual[..n])?;
+        #[cfg(feature = "rayon")]
+        residual[..n]
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(i, value)| *value = rhs[i] - *value);
+        #[cfg(not(feature = "rayon"))]
+        for i in 0..n {
+            residual[i] = rhs[i] - residual[i];
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
 struct DistCsrApplyWorkspace {
-    matvec: Vec<f64>,
     residual: Vec<f64>,
     correction: Vec<f64>,
 }
 
 impl DistCsrApplyWorkspace {
     fn ensure(&mut self, n: usize) {
-        self.matvec.resize(n, 0.0);
         self.residual.resize(n, 0.0);
         self.correction.resize(n, 0.0);
     }
@@ -4605,7 +4650,13 @@ impl AMG {
         if let Some(stats_ref) = stats.as_mut()
             && stats_ref.per_level_comm_bytes.is_empty()
         {
-            stats_ref.per_level_comm_bytes = vec![0; 1];
+            let levels = dist
+                .distributed_hierarchy
+                .as_ref()
+                .map(DistAmgHierarchy::num_levels)
+                .unwrap_or(1)
+                .max(1);
+            stats_ref.per_level_comm_bytes = vec![0; levels];
         }
 
         let result = match strategy {
@@ -4668,16 +4719,12 @@ impl AMG {
         let local_amg = dist.local_amg.as_ref().ok_or_else(|| {
             KError::InvalidInput("AMG distributed CSR local solver not initialized".into())
         })?;
-        let distributed_matrix = dist
-            .distributed_hierarchy
-            .as_ref()
-            .and_then(DistAmgHierarchy::finest)
-            .map(|level| level.a.as_ref())
-            .or_else(|| dist.distributed_matrix.as_ref().map(Arc::as_ref))
-            .ok_or_else(|| {
-                KError::InvalidInput("AMG distributed CSR matrix state not initialized".into())
-            })?;
-        let n = local_amg.dims().0;
+        let hierarchy = dist.distributed_hierarchy.as_ref().ok_or_else(|| {
+            KError::InvalidInput("AMG distributed CSR hierarchy state not initialized".into())
+        })?;
+        let n = hierarchy
+            .finest_local_nrows()
+            .ok_or_else(|| KError::InvalidInput("AMG distributed CSR hierarchy is empty".into()))?;
         if r.len() != n || z.len() != n {
             return Err(KError::InvalidInput(
                 "AMG distributed CSR apply length mismatch".into(),
@@ -4699,34 +4746,22 @@ impl AMG {
         }
         if result.is_ok() {
             let t_halo = stats.as_ref().map(|_| tic());
-            let matvec_result = distributed_matrix.try_matvec(z, &mut ws.matvec[..n]);
+            let residual_result = hierarchy.finest_residual(z, r, &mut ws.residual[..n]);
             if let (Some(stats), Some(t0)) = (stats.as_mut(), t_halo) {
                 stats.halo_exchange += toc(t0);
-                let diag = distributed_matrix.plan_diagnostics();
-                let bytes =
-                    (diag.halo_recv_volume + diag.halo_send_volume) * std::mem::size_of::<f64>();
+                let bytes = hierarchy.finest_comm_bytes();
                 stats.comm_bytes = stats.comm_bytes.saturating_add(bytes);
                 if !stats.per_level_comm_bytes.is_empty() {
                     stats.per_level_comm_bytes[0] =
                         stats.per_level_comm_bytes[0].saturating_add(bytes);
                 }
             }
-            if let Err(err) = matvec_result {
+            if let Err(err) = residual_result {
                 self.dist_csr_workspace_pool
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(ws);
                 return Err(err);
-            }
-
-            #[cfg(feature = "rayon")]
-            ws.residual[..n]
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(i, residual)| *residual = r[i] - ws.matvec[i]);
-            #[cfg(not(feature = "rayon"))]
-            for i in 0..n {
-                ws.residual[i] = r[i] - ws.matvec[i];
             }
 
             let t_local = stats.as_ref().map(|_| tic());
