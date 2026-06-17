@@ -31,7 +31,7 @@ mod real {
         AMG, AMGBuilder, CoarseSolve, CoarsenType, InterpType, RelaxPhase, RelaxType,
     };
     use kryst::preconditioner::dist::DistCoarseStrategy;
-    use kryst::preconditioner::{PcDistributedSupport, PcSide, Preconditioner};
+    use kryst::preconditioner::{PcSide, Preconditioner};
     use kryst::solver::FgmresSolver;
     use kryst::utils::convergence::SolveStats;
     use kryst::utils::matrix_market::read_matrix_market;
@@ -353,16 +353,21 @@ mod real {
         let setup_started = Instant::now();
         dist_amg.setup(&dist)?;
         if rank == 0 {
+            let support = dist_amg.distributed_support();
             println!(
                 "  rank-0 setup elapsed={:?} distributed_support={:?}",
                 setup_started.elapsed(),
-                dist_amg.distributed_support()
+                support
             );
+            if !dist_amg
+                .dist_apply_stats()
+                .is_some_and(|stats| stats.reports_distributed_support())
+            {
+                println!(
+                    "  note: distributed_csr currently uses distributed SpMV residual correction around local AMG"
+                );
+            }
         }
-        assert_eq!(
-            dist_amg.distributed_support(),
-            PcDistributedSupport::LocalOnly
-        );
         let (dist_x, _) = solve(
             "distributed_csr AMG",
             &dist,
