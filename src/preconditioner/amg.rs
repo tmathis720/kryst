@@ -2022,25 +2022,6 @@ impl AMGWorkspace {
     }
 }
 
-#[cfg(feature = "complex")]
-#[derive(Debug, Default)]
-struct ComplexApplyWorkspace {
-    r_re: Vec<f64>,
-    r_im: Vec<f64>,
-    z_re: Vec<f64>,
-    z_im: Vec<f64>,
-}
-
-#[cfg(feature = "complex")]
-impl ComplexApplyWorkspace {
-    fn ensure(&mut self, n: usize) {
-        self.r_re.resize(n, 0.0);
-        self.r_im.resize(n, 0.0);
-        self.z_re.resize(n, 0.0);
-        self.z_im.resize(n, 0.0);
-    }
-}
-
 #[derive(Debug)]
 struct MixedWs {
     temp32: Vec<f32>,
@@ -3038,7 +3019,10 @@ fn csr_from_linop_complex(op: &dyn LinOp<S = S>, drop_tol: R) -> Result<Arc<CsrM
 }
 
 #[cfg(feature = "complex")]
-fn csr_real_from_complex(csr: &CsrMatrix<S>) -> CsrMatrix<f64> {
+// Compatibility cache for APIs that still store a real CSR for dimensions,
+// pattern checks, or legacy real-only hierarchy setup. Native complex setup and
+// apply use the original complex CSR values.
+fn csr_real_metadata_from_complex(csr: &CsrMatrix<S>) -> CsrMatrix<f64> {
     let values = csr.values().iter().map(|v| v.real()).collect();
     CsrMatrix::from_csr(
         csr.nrows(),
@@ -7657,7 +7641,9 @@ impl AMG {
             core.update_numeric(csr_complex.as_ref())?;
             self.stats = Some(core.stats());
             self.complex_setup_fallback_reason = None;
-            self.csr = Some(Arc::new(csr_real_from_complex(csr_complex.as_ref())));
+            self.csr = Some(Arc::new(csr_real_metadata_from_complex(
+                csr_complex.as_ref(),
+            )));
             self.state = AmgState::Uninitialized;
             return Ok(());
         }
@@ -7670,7 +7656,9 @@ impl AMG {
         self.complex_core = None;
         if self.complex_diag_inv.is_some() {
             self.complex_setup_mode = AmgComplexSetupMode::NativeDiagonal;
-            self.csr = Some(Arc::new(csr_real_from_complex(csr_complex.as_ref())));
+            self.csr = Some(Arc::new(csr_real_metadata_from_complex(
+                csr_complex.as_ref(),
+            )));
             self.state = AmgState::Uninitialized;
             self.stats = None;
             return Ok(());
@@ -7680,7 +7668,9 @@ impl AMG {
             solver.setup(csr_complex.as_ref())?;
             self.complex_coarse_solver = Some(Mutex::new(solver));
             self.complex_setup_mode = AmgComplexSetupMode::NativeCoarse;
-            self.csr = Some(Arc::new(csr_real_from_complex(csr_complex.as_ref())));
+            self.csr = Some(Arc::new(csr_real_metadata_from_complex(
+                csr_complex.as_ref(),
+            )));
             self.state = AmgState::Uninitialized;
             self.stats = None;
             return Ok(());
@@ -7700,7 +7690,9 @@ impl AMG {
         self.complex_core = Some(Mutex::new(core));
         self.complex_setup_mode = AmgComplexSetupMode::NativeHierarchy;
         self.complex_setup_fallback_reason = None;
-        self.csr = Some(Arc::new(csr_real_from_complex(csr_complex.as_ref())));
+        self.csr = Some(Arc::new(csr_real_metadata_from_complex(
+            csr_complex.as_ref(),
+        )));
         self.state = AmgState::Uninitialized;
         Ok(())
     }
@@ -8364,7 +8356,7 @@ fn build_hierarchy(
             }
             #[cfg(feature = "complex")]
             {
-                p = csr_real_from_complex(&override_ops.prolongation);
+                p = csr_real_metadata_from_complex(&override_ops.prolongation);
                 p_csr = Pcsr {
                     m: p.nrows(),
                     n: p.ncols(),
@@ -12096,8 +12088,8 @@ mod tests {
 #[cfg(all(test, feature = "complex"))]
 mod tests_complex {
     use super::{
-        ComplexApplyWorkspace, RowScaleMode, csr_pattern_hash, eff_nnz, local_qr, max_row_sum_abs,
-        p_column_norms2, row_scaling, sync_adjoint_values_from_forward,
+        RowScaleMode, csr_pattern_hash, eff_nnz, local_qr, max_row_sum_abs, p_column_norms2,
+        row_scaling, sync_adjoint_values_from_forward,
     };
     use crate::algebra::prelude::*;
     use crate::matrix::sparse::CsrMatrix;
@@ -12120,43 +12112,6 @@ mod tests_complex {
                 S::from_parts(2.0, 0.1),
             ],
         )
-    }
-
-    #[test]
-    fn complex_apply_workspace_reuses_conversion_buffers() {
-        let mut ws = ComplexApplyWorkspace::default();
-        ws.ensure(32);
-        let ptrs = [
-            ws.r_re.as_ptr(),
-            ws.r_im.as_ptr(),
-            ws.z_re.as_ptr(),
-            ws.z_im.as_ptr(),
-        ];
-        let caps = [
-            ws.r_re.capacity(),
-            ws.r_im.capacity(),
-            ws.z_re.capacity(),
-            ws.z_im.capacity(),
-        ];
-        ws.ensure(16);
-        assert_eq!(
-            [
-                ws.r_re.as_ptr(),
-                ws.r_im.as_ptr(),
-                ws.z_re.as_ptr(),
-                ws.z_im.as_ptr(),
-            ],
-            ptrs
-        );
-        assert_eq!(
-            [
-                ws.r_re.capacity(),
-                ws.r_im.capacity(),
-                ws.z_re.capacity(),
-                ws.z_im.capacity(),
-            ],
-            caps
-        );
     }
 
     #[test]
