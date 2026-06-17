@@ -3468,13 +3468,13 @@ fn scatter_vector(
 
 #[cfg(not(feature = "complex"))]
 fn uniform_positive_partition_len(row_part: &[usize]) -> Option<usize> {
-    let first = *row_part.get(1)? - *row_part.first()?;
+    let first = row_part.get(1)?.checked_sub(*row_part.first()?)?;
     if first == 0 {
         return None;
     }
     row_part
         .windows(2)
-        .all(|w| w[1].saturating_sub(w[0]) == first)
+        .all(|w| w[1].checked_sub(w[0]) == Some(first))
         .then_some(first)
 }
 
@@ -12051,6 +12051,44 @@ mod tests {
             ws.coarse_sol.iter().map(Vec::capacity).collect::<Vec<_>>(),
             coarse_caps
         );
+    }
+
+    #[test]
+    fn uniform_partition_detection_rejects_irregular_or_empty_parts() {
+        assert_eq!(uniform_positive_partition_len(&[0, 3, 6, 9]), Some(3));
+        assert_eq!(uniform_positive_partition_len(&[2, 5, 8]), Some(3));
+        assert_eq!(uniform_positive_partition_len(&[0, 2, 5]), None);
+        assert_eq!(uniform_positive_partition_len(&[0, 0, 0]), None);
+        assert_eq!(uniform_positive_partition_len(&[4, 2]), None);
+        assert_eq!(uniform_positive_partition_len(&[0]), None);
+    }
+
+    #[test]
+    fn root_vector_gather_scatter_uniform_fast_path_single_rank() {
+        let comm = UniverseComm::NoComm(crate::parallel::NoComm);
+        let row_part = vec![0usize, 4];
+        let local = vec![1.0, 2.0, 3.0, 4.0];
+
+        let gathered = gather_vector(&comm, &row_part, 0, &local)
+            .expect("uniform gather")
+            .expect("root receives gathered vector");
+        assert_eq!(gathered, local);
+
+        let mut scattered = vec![0.0; 4];
+        scatter_vector(&comm, &row_part, 0, Some(&gathered), &mut scattered)
+            .expect("uniform scatter");
+        assert_eq!(scattered, gathered);
+    }
+
+    #[test]
+    fn root_vector_gather_scatter_reject_partition_length_mismatch() {
+        let comm = UniverseComm::NoComm(crate::parallel::NoComm);
+        let row_part = vec![0usize, 2, 4];
+        let local = vec![1.0, 2.0];
+
+        assert!(gather_vector(&comm, &row_part, 0, &local).is_err());
+        let mut out = vec![0.0; 2];
+        assert!(scatter_vector(&comm, &row_part, 0, Some(&[1.0, 2.0]), &mut out).is_err());
     }
 
     #[test]
