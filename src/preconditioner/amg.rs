@@ -3675,8 +3675,6 @@ pub struct AMG {
     runtime: Mutex<AmgRuntime>,
     workspace_pool: Mutex<Vec<AMGWorkspace>>,
     dist_csr_workspace_pool: Mutex<Vec<DistCsrApplyWorkspace>>,
-    #[cfg(feature = "complex")]
-    complex_workspace_pool: Mutex<Vec<ComplexApplyWorkspace>>,
     dist: Option<DistAmgInfo>,
     transfer_overrides: BTreeMap<usize, AmgTransferOperators>,
     coarse_level_overrides: BTreeMap<usize, CoarseSolve>,
@@ -3727,8 +3725,6 @@ impl Default for AMG {
             runtime: Mutex::new(AmgRuntime::default()),
             workspace_pool: Mutex::new(Vec::new()),
             dist_csr_workspace_pool: Mutex::new(Vec::new()),
-            #[cfg(feature = "complex")]
-            complex_workspace_pool: Mutex::new(Vec::new()),
             dist: None,
             transfer_overrides: BTreeMap::new(),
             coarse_level_overrides: BTreeMap::new(),
@@ -7782,30 +7778,10 @@ impl Preconditioner for AMG {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .apply(r, z);
         }
-        let mut ws = self
-            .complex_workspace_pool
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pop()
-            .unwrap_or_default();
-        ws.ensure(n);
-        for (i, &ri) in r.iter().enumerate() {
-            ws.r_re[i] = ri.real();
-            ws.r_im[i] = ri.imag();
-        }
-        let result = self
-            .apply_local(side, &ws.r_re, &mut ws.z_re)
-            .and_then(|_| self.apply_local(side, &ws.r_im, &mut ws.z_im));
-        if result.is_ok() {
-            for i in 0..n {
-                z[i] = S::from_parts(ws.z_re[i], ws.z_im[i]);
-            }
-        }
-        self.complex_workspace_pool
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(ws);
-        result
+        Err(KError::InvalidInput(
+            "AMG complex apply requires native complex setup state; call setup/update_symbolic before apply"
+                .into(),
+        ))
     }
 
     fn capabilities(&self) -> PcCaps {

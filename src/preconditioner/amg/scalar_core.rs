@@ -210,7 +210,7 @@ where
         AmgStats::from_scalar_core(
             self.levels
                 .iter()
-                .map(|level| (level.a.nrows(), level.a.nnz(), level.p.nnz(), level.r.nnz())),
+                .map(|level| (&level.a, level.p.nnz(), level.r.nnz())),
             &self.cfg,
         )
     }
@@ -412,34 +412,60 @@ fn jacobi<T: KrystScalar<Real = f64>>(
 }
 
 impl AmgStats {
-    pub(crate) fn from_scalar_core(
-        levels_iter: impl IntoIterator<Item = (usize, usize, usize, usize)>,
+    pub(crate) fn from_scalar_core<'a, T>(
+        levels_iter: impl IntoIterator<Item = (&'a CsrMatrix<T>, usize, usize)>,
         cfg: &AMGConfig,
-    ) -> Self {
-        let raw: Vec<_> = levels_iter.into_iter().collect();
-        let n0 = raw.first().map(|(n, _, _, _)| *n as f64).unwrap_or(1.0);
-        let nnz0 = raw.first().map(|(_, nnz, _, _)| *nnz as f64).unwrap_or(1.0);
-        let total_n = raw.iter().map(|(n, _, _, _)| *n as f64).sum::<f64>();
-        let total_nnz = raw.iter().map(|(_, nnz, _, _)| *nnz).sum::<usize>();
+    ) -> Self
+    where
+        T: KrystScalar<Real = f64> + 'a,
+    {
+        let raw = levels_iter
+            .into_iter()
+            .map(|(a, nnz_p, nnz_r)| {
+                (
+                    a.nrows(),
+                    a.nnz(),
+                    nnz_p,
+                    nnz_r,
+                    max_row_sum_abs_scalar(a),
+                    eff_nnz_scalar(a, cfg.stats_eps),
+                )
+            })
+            .collect::<Vec<_>>();
+        let n0 = raw
+            .first()
+            .map(|(n, _, _, _, _, _)| *n as f64)
+            .unwrap_or(1.0);
+        let nnz0 = raw
+            .first()
+            .map(|(_, nnz, _, _, _, _)| *nnz as f64)
+            .unwrap_or(1.0);
+        let total_n = raw.iter().map(|(n, _, _, _, _, _)| *n as f64).sum::<f64>();
+        let total_nnz = raw.iter().map(|(_, nnz, _, _, _, _)| *nnz).sum::<usize>();
         let levels = raw
             .iter()
             .enumerate()
-            .map(|(level, &(n, nnz_a, nnz_p, nnz_r))| LevelStats {
-                level,
-                n,
-                nnz_a,
-                nnz_p: if level + 1 == raw.len() { 0 } else { nnz_p },
-                nnz_r: if level + 1 == raw.len() { 0 } else { nnz_r },
-                max_row_sum_a: 0.0,
-                eff_nnz_a: None,
-                pre_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
-                post_sweeps: cfg.num_grid_sweeps[RelaxPhase::Up.ix()],
-                pre_work_estimate: cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64 * nnz_a as f64,
-                post_work_estimate: cfg.num_grid_sweeps[RelaxPhase::Up.ix()] as f64 * nnz_a as f64,
-                selected_relax_pre: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
-                selected_relax_post: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Up.ix()]),
-                coarse_solver: (level + 1 == raw.len()).then(|| format!("{:?}", cfg.coarse_solve)),
-            })
+            .map(
+                |(level, &(n, nnz_a, nnz_p, nnz_r, max_row_sum_a, eff_nnz_a))| LevelStats {
+                    level,
+                    n,
+                    nnz_a,
+                    nnz_p: if level + 1 == raw.len() { 0 } else { nnz_p },
+                    nnz_r: if level + 1 == raw.len() { 0 } else { nnz_r },
+                    max_row_sum_a,
+                    eff_nnz_a: Some(eff_nnz_a),
+                    pre_sweeps: cfg.num_grid_sweeps[RelaxPhase::Down.ix()],
+                    post_sweeps: cfg.num_grid_sweeps[RelaxPhase::Up.ix()],
+                    pre_work_estimate: cfg.num_grid_sweeps[RelaxPhase::Down.ix()] as f64
+                        * nnz_a as f64,
+                    post_work_estimate: cfg.num_grid_sweeps[RelaxPhase::Up.ix()] as f64
+                        * nnz_a as f64,
+                    selected_relax_pre: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Down.ix()]),
+                    selected_relax_post: format!("{:?}", cfg.grid_relax_type[RelaxPhase::Up.ix()]),
+                    coarse_solver: (level + 1 == raw.len())
+                        .then(|| format!("{:?}", cfg.coarse_solve)),
+                },
+            )
             .collect::<Vec<_>>();
         let total_smoothing_work = levels
             .iter()
@@ -463,4 +489,18 @@ impl AmgStats {
             complex_setup_fallback_reason: None,
         }
     }
+}
+
+fn max_row_sum_abs_scalar<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>) -> f64 {
+    let mut max_sum = 0.0f64;
+    for row in 0..a.nrows() {
+        let (_, vals) = a.row(row);
+        let sum = vals.iter().map(|v| v.abs()).sum::<f64>();
+        max_sum = max_sum.max(sum);
+    }
+    max_sum
+}
+
+fn eff_nnz_scalar<T: KrystScalar<Real = f64>>(a: &CsrMatrix<T>, eps: f64) -> usize {
+    a.values().iter().filter(|v| v.abs() > eps).count()
 }

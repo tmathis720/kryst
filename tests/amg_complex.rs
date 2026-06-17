@@ -26,6 +26,21 @@ fn amg_complex_setup_apply_small() {
 }
 
 #[test]
+fn amg_complex_apply_without_setup_rejects_missing_native_state() {
+    let amg = AMG::default();
+    let rhs = vec![S::from_parts(1.0, -1.0)];
+    let mut out = vec![S::zero(); rhs.len()];
+
+    let err = amg
+        .apply(PcSide::Left, &rhs, &mut out)
+        .expect_err("complex AMG apply should require native setup state");
+    assert!(
+        err.to_string().contains("native complex setup state"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn amg_complex_diagonal_uses_complex_inverse() {
     let csr = CsrMatrix::from_csr(
         2,
@@ -683,6 +698,9 @@ fn amg_complex_apply_residual_acceptance() {
             .as_deref(),
         None
     );
+    let stats = amg.stats().expect("stats");
+    assert!(stats.levels[0].max_row_sum_a > 0.0);
+    assert_eq!(stats.levels[0].eff_nnz_a, Some(csr.nnz()));
 
     let rhs = vec![
         S::from_parts(1.0, -0.3),
