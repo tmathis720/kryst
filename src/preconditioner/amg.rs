@@ -7540,6 +7540,13 @@ impl AMG {
         }
     }
 
+    /// True when the latest distributed setup used a non-scalable gather of the
+    /// fine matrix.
+    pub fn dist_setup_uses_fine_matrix_gather(&self) -> bool {
+        self.dist_apply_stats()
+            .is_some_and(|stats| stats.setup_uses_fine_matrix_gather())
+    }
+
     #[cfg(test)]
     pub(crate) fn debug_levels_r_equals_pt(&self) -> bool {
         let h = match &self.state {

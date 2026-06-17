@@ -219,6 +219,7 @@ fn single_rank_distributed_csr_route_matches_residual_correction_contract() {
         dist_amg.distributed_support(),
         PcDistributedSupport::LocalOnly
     );
+    assert!(!dist_amg.dist_setup_uses_fine_matrix_gather());
     let setup_stats = dist_amg
         .stats()
         .expect("distributed CSR route stats after setup");
@@ -243,6 +244,7 @@ fn single_rank_distributed_csr_route_matches_residual_correction_contract() {
     dist_amg
         .apply(PcSide::Left, &rhs, &mut actual)
         .expect("distributed CSR AMG apply");
+    assert!(!dist_amg.dist_setup_uses_fine_matrix_gather());
 
     for (i, (expected, actual)) in expected.iter().zip(actual.iter()).enumerate() {
         let scale = expected.abs().max(actual.abs()).max(1.0);
