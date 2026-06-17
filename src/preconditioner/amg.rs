@@ -3034,6 +3034,11 @@ fn csr_real_metadata_from_complex(csr: &CsrMatrix<S>) -> CsrMatrix<f64> {
 }
 
 #[cfg(feature = "complex")]
+fn complex_single_level_stats(csr: &CsrMatrix<S>, cfg: &AMGConfig) -> AmgStats {
+    AmgStats::from_scalar_core(std::iter::once((csr, 0, 0)), cfg)
+}
+
+#[cfg(feature = "complex")]
 fn complex_diagonal_inverse(csr: &CsrMatrix<S>, drop_tol: R) -> Result<Option<Vec<S>>, KError> {
     if csr.nrows() != csr.ncols() {
         return Ok(None);
@@ -7660,7 +7665,7 @@ impl AMG {
                 csr_complex.as_ref(),
             )));
             self.state = AmgState::Uninitialized;
-            self.stats = None;
+            self.stats = Some(complex_single_level_stats(csr_complex.as_ref(), &self.cfg));
             return Ok(());
         }
         if csr_complex.nrows() <= self.cfg.max_coarse_size && self.transfer_overrides.is_empty() {
@@ -7672,7 +7677,7 @@ impl AMG {
                 csr_complex.as_ref(),
             )));
             self.state = AmgState::Uninitialized;
-            self.stats = None;
+            self.stats = Some(complex_single_level_stats(csr_complex.as_ref(), &self.cfg));
             return Ok(());
         }
 

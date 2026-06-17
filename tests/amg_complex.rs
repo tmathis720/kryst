@@ -16,6 +16,10 @@ fn amg_complex_setup_apply_small() {
     amg.setup(&op).unwrap();
     assert_eq!(amg.complex_setup_mode_label(), "native_diagonal");
     assert_eq!(amg.complex_setup_fallback_reason(), None);
+    let stats = amg.stats().expect("native diagonal stats");
+    assert_eq!(stats.num_levels, 1);
+    assert_eq!(stats.levels[0].nnz_a, 1);
+    assert_eq!(stats.complex_setup_mode.as_str(), "native_diagonal");
 
     let rhs = vec![S::from_parts(1.0, -2.0)];
     let mut out = vec![S::zero(); rhs.len()];
@@ -54,6 +58,10 @@ fn amg_complex_diagonal_uses_complex_inverse() {
     amg.setup(&op).unwrap();
     assert_eq!(amg.complex_setup_mode_label(), "native_diagonal");
     assert_eq!(amg.complex_setup_fallback_reason(), None);
+    let stats = amg.stats().expect("native diagonal stats");
+    assert_eq!(stats.num_levels, 1);
+    assert_eq!(stats.levels[0].eff_nnz_a, Some(csr.nnz()));
+    assert!(stats.levels[0].max_row_sum_a > 3.0);
 
     let rhs = vec![S::from_parts(3.0, -4.0), S::from_parts(2.0, 5.0)];
     let mut out = vec![S::zero(); rhs.len()];
@@ -174,6 +182,10 @@ fn amg_complex_native_coarse_solve_preserves_imaginary_coupling() {
         .expect("small complex operator should use native coarse algebra");
     assert_eq!(amg.complex_setup_mode_label(), "native_coarse");
     assert_eq!(amg.complex_setup_fallback_reason(), None);
+    let stats = amg.stats().expect("native coarse stats");
+    assert_eq!(stats.num_levels, 1);
+    assert_eq!(stats.levels[0].nnz_a, csr.nnz());
+    assert_eq!(stats.complex_setup_mode.as_str(), "native_coarse");
 
     let rhs = vec![S::from_parts(1.0, -0.5), S::from_parts(-0.25, 0.75)];
     let mut out = vec![S::zero(); rhs.len()];
