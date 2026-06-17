@@ -101,6 +101,8 @@ fn dist_apply_stats_expose_stable_route_labels() {
     assert_eq!(distributed.coarse_solver_route_label(), "distributed_csr");
     assert!(!distributed.uses_root_gather());
     assert!(!distributed.reports_distributed_support());
+    assert!(!distributed.setup_uses_fine_matrix_gather());
+    assert!(!distributed.apply_uses_root_vector_gather());
 
     let true_distributed = DistApplyStats {
         mode: DistCoarseStrategy::DistributedCsr,
@@ -119,6 +121,16 @@ fn dist_apply_stats_expose_stable_route_labels() {
     assert_eq!(root.coarse_solver_route_label(), "root_gather");
     assert!(root.uses_root_gather());
     assert!(!root.reports_distributed_support());
+    assert!(!root.setup_uses_fine_matrix_gather());
+    assert!(!root.apply_uses_root_vector_gather());
+
+    let root_after_setup = DistApplyStats {
+        mode: DistCoarseStrategy::RootGather,
+        coarse_solver_route: DistCoarseSolverRoute::Root,
+        setup_gathered_fine_matrix: true,
+        ..Default::default()
+    };
+    assert!(root_after_setup.setup_uses_fine_matrix_gather());
 
     let local = DistApplyStats {
         mode: DistCoarseStrategy::LocalPrototype,

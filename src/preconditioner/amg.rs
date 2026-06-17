@@ -4354,6 +4354,7 @@ impl AMG {
             ds.coarse_solver_route = selected_route;
             ds.setup_total = toc(setup_t0);
             ds.reductions = 1;
+            ds.setup_gathered_fine_matrix = true;
             self.set_dist_route_stats_from_apply(&ds);
             if let Ok(mut rt) = self.runtime.lock() {
                 rt.last_dist_apply = Some(ds);
@@ -4376,6 +4377,7 @@ impl AMG {
         ds.coarse_solver_route = selected_route;
         ds.setup_total = toc(setup_t0);
         ds.reductions = 1;
+        ds.setup_gathered_fine_matrix = true;
         if let Some(stats) = self.stats.as_mut() {
             stats.selected_dist_coarse_route =
                 Some(dist_route_label(selected_route, strategy).to_string());
@@ -4770,6 +4772,7 @@ impl AMG {
             {
                 stats.setup_total = setup_stats.setup_total;
                 stats.reductions = setup_stats.reductions;
+                stats.setup_gathered_fine_matrix = setup_stats.setup_gathered_fine_matrix;
             }
             Some(stats)
         } else {
@@ -10693,6 +10696,7 @@ pub struct DistApplyStats {
     pub comm_bytes: usize,
     pub per_level_comm_bytes: Vec<usize>,
     pub reductions: usize,
+    pub setup_gathered_fine_matrix: bool,
     pub true_distributed_hierarchy: bool,
 }
 
@@ -10711,6 +10715,7 @@ impl Default for DistApplyStats {
             comm_bytes: 0,
             per_level_comm_bytes: Vec::new(),
             reductions: 0,
+            setup_gathered_fine_matrix: false,
             true_distributed_hierarchy: false,
         }
     }
@@ -10739,6 +10744,16 @@ impl DistApplyStats {
     pub fn reports_distributed_support(&self) -> bool {
         self.true_distributed_hierarchy
             || amg_dist_route_reports_distributed(self.coarse_solver_route, self.mode)
+    }
+
+    /// True when setup used a non-scalable gather of the fine distributed matrix.
+    pub fn setup_uses_fine_matrix_gather(&self) -> bool {
+        self.setup_gathered_fine_matrix
+    }
+
+    /// True when the latest apply used root-centric vector gather/scatter.
+    pub fn apply_uses_root_vector_gather(&self) -> bool {
+        self.gather > Duration::default() || self.scatter > Duration::default()
     }
 }
 

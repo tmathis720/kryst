@@ -258,6 +258,8 @@ fn single_rank_distributed_csr_route_matches_residual_correction_contract() {
     assert_eq!(stats.coarse_solver_route_label(), "distributed_csr");
     assert!(!stats.reports_distributed_support());
     assert!(!stats.uses_root_gather());
+    assert!(!stats.setup_uses_fine_matrix_gather());
+    assert!(!stats.apply_uses_root_vector_gather());
     assert_eq!(stats.gather, std::time::Duration::default());
     assert_eq!(stats.scatter, std::time::Duration::default());
     assert_eq!(stats.reductions, 1);
