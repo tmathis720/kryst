@@ -16,6 +16,7 @@ use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::prelude::*;
 use crate::context::ksp_context::Workspace;
 use crate::error::KError;
+#[cfg(not(feature = "complex"))]
 use crate::matrix::format::OpFormat;
 use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
@@ -25,11 +26,16 @@ use crate::parallel::UniverseComm;
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
-use crate::solver::common::exit_checks::{reconcile_reason_with_true_residual, true_residual_norm};
-use crate::solver::common::{ReductCtx, call_monitors, dot2_async_s};
+#[cfg(not(feature = "complex"))]
+use crate::solver::common::dot2_async_s;
+use crate::solver::common::exit_checks::{
+    reconcile_reason_with_true_residual, true_residual_converged_reason, true_residual_norm,
+};
+use crate::solver::common::{ReductCtx, call_monitors};
 use crate::utils::convergence::{
     AcceptanceStatus, ConvergedReason, ReasonEmitter, ReductionModel, SolveStats, SolverCounters,
 };
+#[cfg(not(feature = "complex"))]
 use crate::utils::reduction::{AllreduceHandle, AllreduceOps, ReductOptions};
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
@@ -501,7 +507,10 @@ impl BiCgStabSolver {
         let eps_s_norm = eps_omega;
 
         let mut sync_reductions = 2usize;
+        #[cfg(not(feature = "complex"))]
         let mut async_reduction_waits = 0usize;
+        #[cfg(feature = "complex")]
+        let async_reduction_waits = 0usize;
         let mut residual_replacements = 0usize;
         let mut rho_refreshes_remaining = match self.breakdown_policy {
             BiCgStabBreakdownPolicy::Strict => 0,
@@ -591,16 +600,10 @@ impl BiCgStabSolver {
             }
 
             if need_left {
-                let yp_ref: &mut [S] = if let (Some(pc), Some(zp)) = (pc, z_p.as_deref_mut()) {
-                    pc.apply_s(pc_apply_side, p, zp, &mut *scratch)?;
-                    zp
-                } else {
-                    p
-                };
                 let vr = v_raw
                     .as_deref_mut()
                     .expect("workspace: missing v_raw buffer");
-                a.matvec_s(&*yp_ref, vr, &mut *scratch);
+                a.matvec_s(p, vr, &mut *scratch);
                 if let Some(pc) = pc {
                     pc.apply_s(pc_apply_side, vr, v, &mut *scratch)?;
                 } else {
@@ -686,28 +689,64 @@ impl BiCgStabSolver {
                             }),
                     );
                 }
-                if s_norm <= thr {
-                    if need_left {
-                        if let Some(yp) = z_p.as_deref() {
-                            for i in 0..n {
-                                x[i] += alpha * yp[i];
-                            }
+                if need_left && s_norm <= thr {
+                    let x_trial = z_p.as_deref_mut().expect("workspace: missing z_p buffer");
+                    for i in 0..n {
+                        x_trial[i] = x[i] + alpha * p[i];
+                    }
+
+                    let true_residual = true_residual_norm(a, b, x_trial, &red, r, &mut *scratch);
+                    if let Some(reason) = ReasonEmitter::non_finite(true_residual) {
+                        return Ok(SolveStats::new(k, true_residual, reason).with_counters(
+                            SolverCounters {
+                                num_global_reductions: sync_reductions + async_reduction_waits,
+                                overlap_global_reductions: async_reduction_waits,
+                                residual_replacements,
+                            },
+                        ));
+                    }
+
+                    x.copy_from_slice(x_trial);
+                    if let Some(reason) =
+                        true_residual_converged_reason(true_residual, bnorm, self.atol, self.rtol)
+                    {
+                        return Ok(SolveStats::new(k, true_residual, reason).with_counters(
+                            SolverCounters {
+                                num_global_reductions: sync_reductions + async_reduction_waits,
+                                overlap_global_reductions: async_reduction_waits,
+                                residual_replacements,
+                            },
+                        ));
+                    }
+
+                    if let Some(zs) = z_s.as_deref_mut() {
+                        if let Some(pc) = pc {
+                            pc.apply_s(pc_apply_side, r, zs, &mut *scratch)?;
                         } else {
+                            zs.copy_from_slice(r);
+                        }
+                        s.copy_from_slice(zs);
+                    } else {
+                        s.copy_from_slice(r);
+                    }
+                    r_hat.copy_from_slice(s);
+                    rho_prev = S::one();
+                    alpha = S::one();
+                    omega_prev = S::one();
+                    refreshed_shadow = true;
+                    continue;
+                }
+
+                if !need_left && s_norm <= thr {
+                    match (side, pc, z_p.as_deref()) {
+                        (PcSide::Right, Some(_), Some(zp)) => {
                             for i in 0..n {
-                                x[i] += alpha * p[i];
+                                x[i] += alpha * zp[i];
                             }
                         }
-                    } else {
-                        match (side, pc, z_p.as_deref()) {
-                            (PcSide::Right, Some(_), Some(zp)) => {
-                                for i in 0..n {
-                                    x[i] += alpha * zp[i];
-                                }
-                            }
-                            _ => {
-                                for i in 0..n {
-                                    x[i] += alpha * p[i];
-                                }
+                        _ => {
+                            for i in 0..n {
+                                x[i] += alpha * p[i];
                             }
                         }
                     }
@@ -739,12 +778,12 @@ impl BiCgStabSolver {
 
             if need_left {
                 let zs = z_s.as_deref_mut().expect("workspace: missing z_s buffer");
+                a.matvec_s(s, zs, &mut *scratch);
                 if let Some(pc) = pc {
-                    pc.apply_s(pc_apply_side, s, zs, &mut *scratch)?;
+                    pc.apply_s(pc_apply_side, zs, t, &mut *scratch)?;
                 } else {
-                    zs.copy_from_slice(s);
+                    t.copy_from_slice(zs);
                 }
-                a.matvec_s(zs, &mut t[..], &mut *scratch);
             } else {
                 match (side, pc, z_s.as_deref_mut()) {
                     (PcSide::Right, Some(pc), Some(zs)) => {
@@ -757,20 +796,35 @@ impl BiCgStabSolver {
                 }
             }
 
-            let async_opt = ReductOptions {
-                mode: red.mode(),
-                ..ReductOptions::default()
+            #[cfg(not(feature = "complex"))]
+            let (omega_den, omega_num, t_norm) = {
+                let async_opt = ReductOptions {
+                    mode: red.mode(),
+                    ..ReductOptions::default()
+                };
+                let (omega_req, _omega_local) =
+                    dot2_async_s(comm, &t[..], &t[..], &t[..], &s[..], &async_opt)?;
+                let overlap_reduction = !matches!(omega_req, AllreduceHandle::Ready(_));
+                let omega_reds = <UniverseComm as AllreduceOps>::wait_pair(omega_req);
+                if overlap_reduction {
+                    async_reduction_waits += 1;
+                }
+                (
+                    S::from_real(omega_reds.0),
+                    S::from_real(omega_reds.1),
+                    omega_reds.0.abs().sqrt(),
+                )
             };
-            let (omega_req, _omega_local) =
-                dot2_async_s(comm, &t[..], &t[..], &t[..], &s[..], &async_opt)?;
-            let overlap_reduction = !matches!(omega_req, AllreduceHandle::Ready(_));
-            let omega_reds = <UniverseComm as AllreduceOps>::wait_pair(omega_req);
-            if overlap_reduction {
-                async_reduction_waits += 1;
-            }
 
-            let omega_den = S::from_real(omega_reds.0);
-            let t_norm = omega_reds.0.abs().sqrt();
+            #[cfg(feature = "complex")]
+            let (omega_den, omega_num, t_norm) = {
+                let mut omega_dots = [S::zero(); 2];
+                red.dot_many_into(&[(&t[..], &t[..]), (&t[..], &s[..])], &mut omega_dots);
+                sync_reductions += 1;
+                let den = omega_dots[0].real();
+                (S::from_real(den), omega_dots[1], den.abs().sqrt())
+            };
+
             if t_norm <= eps_t_norm {
                 let s_norm = red.norm2(s);
                 sync_reductions += 1;
@@ -796,14 +850,8 @@ impl BiCgStabSolver {
                 }
                 if s_norm <= eps_s_norm {
                     if need_left {
-                        if let Some(yp) = z_p.as_deref() {
-                            for i in 0..n {
-                                x[i] += alpha * yp[i];
-                            }
-                        } else {
-                            for i in 0..n {
-                                x[i] += alpha * p[i];
-                            }
+                        for i in 0..n {
+                            x[i] += alpha * p[i];
                         }
                     } else {
                         match (side, pc, z_p.as_deref()) {
@@ -886,7 +934,7 @@ impl BiCgStabSolver {
                     residual_replacements,
                 }));
             }
-            let omega = S::from_real(omega_reds.1) / omega_den;
+            let omega = omega_num / omega_den;
             if omega.abs() <= eps_omega || !omega.is_finite() {
                 #[cfg(feature = "logging")]
                 trace!("BiCGStab breakdown: omega ~ 0 at iter {k}");
@@ -912,20 +960,7 @@ impl BiCgStabSolver {
             }
 
             if need_left {
-                match (z_p.as_deref(), z_s.as_deref()) {
-                    (Some(y), Some(tpre)) => {
-                        bicgstab_update_x_alpha_y_omega_z(x, y, tpre, alpha, omega);
-                    }
-                    (Some(y), None) => {
-                        bicgstab_update_x_alpha_y_omega_z(x, y, s, alpha, omega);
-                    }
-                    (None, Some(tpre)) => {
-                        bicgstab_update_x_alpha_y_omega_z(x, p, tpre, alpha, omega);
-                    }
-                    (None, None) => {
-                        bicgstab_update_x_alpha_y_omega_z(x, p, s, alpha, omega);
-                    }
-                }
+                bicgstab_update_x_alpha_y_omega_z(x, p, s, alpha, omega);
             } else {
                 match (side, pc, z_p.as_deref(), z_s.as_deref()) {
                     (PcSide::Right, Some(_), Some(zp), Some(zs)) => {
@@ -939,8 +974,9 @@ impl BiCgStabSolver {
 
             if need_left {
                 let vr = v_raw.as_deref().expect("workspace: missing v_raw buffer");
+                let as_raw = z_s.as_deref().expect("workspace: missing z_s buffer");
                 for i in 0..n {
-                    r[i] -= alpha * vr[i] + omega * t[i];
+                    r[i] -= alpha * vr[i] + omega * as_raw[i];
                 }
                 if let Some(zs) = z_s.as_deref_mut() {
                     if let Some(pc) = pc {
@@ -1022,6 +1058,47 @@ impl BiCgStabSolver {
                 } else {
                     ConvergedReason::ConvergedRtol
                 };
+                if need_left {
+                    let true_residual = true_residual_norm(a, b, x, &red, r, &mut *scratch);
+                    if let Some(reason) = ReasonEmitter::non_finite(true_residual) {
+                        return Ok(SolveStats::new(k, true_residual, reason).with_counters(
+                            SolverCounters {
+                                num_global_reductions: sync_reductions + async_reduction_waits,
+                                overlap_global_reductions: async_reduction_waits,
+                                residual_replacements,
+                            },
+                        ));
+                    }
+                    if let Some(reason) =
+                        true_residual_converged_reason(true_residual, bnorm, self.atol, self.rtol)
+                    {
+                        return Ok(SolveStats::new(k, true_residual, reason).with_counters(
+                            SolverCounters {
+                                num_global_reductions: sync_reductions + async_reduction_waits,
+                                overlap_global_reductions: async_reduction_waits,
+                                residual_replacements,
+                            },
+                        ));
+                    }
+
+                    if let Some(zs) = z_s.as_deref_mut() {
+                        if let Some(pc) = pc {
+                            pc.apply_s(pc_apply_side, r, zs, &mut *scratch)?;
+                        } else {
+                            zs.copy_from_slice(r);
+                        }
+                        s.copy_from_slice(zs);
+                    } else {
+                        s.copy_from_slice(r);
+                    }
+                    r_hat.copy_from_slice(s);
+                    rho_prev = S::one();
+                    alpha = S::one();
+                    omega_prev = S::one();
+                    refreshed_shadow = true;
+                    residual_replacements += 1;
+                    continue;
+                }
                 let stats = finalize_true_residual_exit(
                     a,
                     b,
@@ -1482,6 +1559,60 @@ mod tests {
 
         assert_ne!(stats.reason, ConvergedReason::Continued);
         assert!(stats.counters.residual_replacements >= stats.iterations);
+    }
+
+    #[cfg(not(feature = "complex"))]
+    #[test]
+    fn bicgstab_left_ilu_exact_factor_converges_like_right_ilu() {
+        use crate::context::ksp_context::{KspContext, SolverType};
+        use crate::context::pc_context::PcType;
+
+        let a = Arc::new(CsrMatrix::from_csr(
+            4,
+            4,
+            vec![0, 2, 4, 5, 6],
+            vec![0, 1, 0, 1, 2, 3],
+            vec![1.0, 2.0, 2.0, 3.0, 4.0, 5.0],
+        ));
+        let b = vec![1.0, 2.0, 3.0, 4.0];
+
+        let solve = |side| -> (SolveStats<f64>, Vec<f64>) {
+            let mut ksp = KspContext::new();
+            ksp.set_type(SolverType::BiCgStab).unwrap();
+            ksp.set_tolerances(1e-12, 1e-12, 1e3, 20);
+            ksp.set_pc_type(PcType::Ilu, None).unwrap();
+            ksp.set_pc_side(side);
+            ksp.set_operators(a.clone(), None);
+
+            let mut x = vec![0.0; b.len()];
+            let stats = ksp.solve(&b, &mut x).unwrap();
+            (stats, x)
+        };
+
+        let (left_stats, left_x) = solve(PcSide::Left);
+        let (right_stats, right_x) = solve(PcSide::Right);
+
+        assert_eq!(
+            left_stats.iterations, 1,
+            "left ILU should solve this exactly factored system in one BiCGStab iteration"
+        );
+        assert_eq!(
+            right_stats.iterations, 1,
+            "right ILU regression sanity check"
+        );
+        assert!(
+            left_stats.final_residual <= 1e-12,
+            "left true residual too large: {:.3e}",
+            left_stats.final_residual
+        );
+        assert!(
+            right_stats.final_residual <= 1e-12,
+            "right true residual too large: {:.3e}",
+            right_stats.final_residual
+        );
+        for i in 0..b.len() {
+            assert_abs_diff_eq!(left_x[i], right_x[i], epsilon = 1e-12);
+        }
     }
 
     #[cfg(not(feature = "complex"))]
