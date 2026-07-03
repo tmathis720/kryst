@@ -347,6 +347,7 @@ pub struct KspContext {
     #[cfg(feature = "backend-faer")]
     dist_route_diag: DistRouteDiagnosticsState,
     // Pending/staged solver-specific options to apply when solver type is set
+    pending_cg: PendingCg,
     pending_gmres: PendingGmres,
     pending_fgmres: PendingFgmres,
     pending_pcg: PendingPcg,
@@ -389,6 +390,7 @@ impl fmt::Debug for KspContext {
         #[cfg(feature = "backend-faer")]
         dbg.field("pending_mpi_pc", &self.pending_mpi_pc);
         dbg.field("pending_gmres", &self.pending_gmres)
+            .field("pending_cg", &self.pending_cg)
             .field("pending_fgmres", &self.pending_fgmres)
             .field("pending_pcg", &self.pending_pcg)
             .field("pending_bicgstab", &self.pending_bicgstab)
@@ -404,6 +406,15 @@ enum PendingGmresVariant {
     Classical,
     Pipelined,
     SStep,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PendingCg {
+    variant: Option<CgVariant>,
+    replace_every: Option<usize>,
+    use_async: Option<bool>,
+    async_min_n: Option<usize>,
+    norm: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -671,6 +682,7 @@ impl KspContext {
             pending_mpi_pc: None,
             #[cfg(feature = "backend-faer")]
             dist_route_diag: DistRouteDiagnosticsState::default(),
+            pending_cg: PendingCg::default(),
             pending_gmres: PendingGmres::default(),
             pending_fgmres: PendingFgmres::default(),
             pending_pcg: PendingPcg::default(),
@@ -735,10 +747,12 @@ impl KspContext {
 
         self.solver_type = Some(solver_type);
         let solver: Option<Box<dyn LinearSolver<Error = KError> + 'static>> = match solver_type {
-            SolverType::Cg => Some(Box::new(
-                CgSolver::new(self.rtol, self.maxits)
-                    .with_norm(crate::solver::cg::CgNormType::Preconditioned),
-            )),
+            SolverType::Cg => Some(Box::new({
+                let mut s = CgSolver::new(self.rtol, self.maxits)
+                    .with_norm(crate::solver::cg::CgNormType::Preconditioned);
+                Self::apply_cg_pending(&self.pending_cg, &mut s)?;
+                s
+            })),
             SolverType::Cgnr => Some(Box::new(CgnrSolver::new(self.rtol, self.maxits))),
             SolverType::Gmres => {
                 let mut s = GmresSolver::new(self.restart, self.rtol, self.maxits);
@@ -1366,40 +1380,44 @@ impl KspContext {
             }
         }
 
-        if let Some(s) = self
-            .solver
-            .as_mut()
-            .and_then(|b| b.as_any_mut().downcast_mut::<CgSolver>())
+        let mut cg_pending_updated = false;
+        if let Some(variant) = requested_cg_variant {
+            self.pending_cg.variant = Some(variant);
+            cg_pending_updated = true;
+        }
+        if let Some(ref norm) = opts.cg_norm {
+            self.pending_cg.norm = Some(norm.clone());
+            cg_pending_updated = true;
+        }
+        if let Some(flag) = opts.cg_use_async {
+            self.pending_cg.use_async = Some(flag);
+            cg_pending_updated = true;
+        }
+        if let Some(min_n) = opts.cg_async_min_n {
+            self.pending_cg.async_min_n = Some(min_n);
+            cg_pending_updated = true;
+        }
+        if let Some(repl) = opts.cg_replace_every {
+            self.pending_cg.replace_every = Some(repl);
+            cg_pending_updated = true;
+        }
+        if cg_pending_updated {
+            let snapshot = self.pending_cg.clone();
+            if let Some(s) = self
+                .solver
+                .as_mut()
+                .and_then(|b| b.as_any_mut().downcast_mut::<CgSolver>())
+            {
+                Self::apply_cg_pending(&snapshot, s)?;
+            }
+        }
+        if let Some(r) = opts.trust_region
+            && let Some(s) = self
+                .solver
+                .as_mut()
+                .and_then(|b| b.as_any_mut().downcast_mut::<CgSolver>())
         {
-            if let Some(variant) = requested_cg_variant {
-                s.set_variant(variant);
-            }
-            if let Some(ref norm) = opts.cg_norm {
-                let n = match norm.as_str() {
-                    "precond" => crate::solver::cg::CgNormType::Preconditioned,
-                    "unprecond" => crate::solver::cg::CgNormType::Unpreconditioned,
-                    "natural" => crate::solver::cg::CgNormType::Natural,
-                    "none" => crate::solver::cg::CgNormType::None,
-                    other => {
-                        return Err(KError::SolveError(format!(
-                            "Unrecognized ksp_cg_norm: {other}"
-                        )));
-                    }
-                };
-                s.set_norm(n);
-            }
-            if let Some(r) = opts.trust_region {
-                s.set_trust_region(r);
-            }
-            if let Some(flag) = opts.cg_use_async {
-                s.set_async_enabled(flag);
-            }
-            if let Some(min_n) = opts.cg_async_min_n {
-                s.set_async_min_n(min_n);
-            }
-            if let Some(repl) = opts.cg_replace_every {
-                s.set_pipelined_residual_refresh_every(Some(repl));
-            }
+            s.set_trust_region(r);
         }
         let mut pcg_pending_updated = false;
         if let Some(variant) = requested_cg_variant {
@@ -1470,6 +1488,36 @@ impl KspContext {
         }
         self.invalidate_solver_setup();
         Ok(self)
+    }
+
+    fn apply_cg_pending(pending: &PendingCg, s: &mut CgSolver) -> Result<(), KError> {
+        if let Some(variant) = pending.variant {
+            s.set_variant(variant);
+        }
+        if let Some(ref norm) = pending.norm {
+            let n = match norm.as_str() {
+                "precond" => crate::solver::cg::CgNormType::Preconditioned,
+                "unprecond" => crate::solver::cg::CgNormType::Unpreconditioned,
+                "natural" => crate::solver::cg::CgNormType::Natural,
+                "none" => crate::solver::cg::CgNormType::None,
+                other => {
+                    return Err(KError::SolveError(format!(
+                        "Unrecognized ksp_cg_norm: {other}"
+                    )));
+                }
+            };
+            s.set_norm(n);
+        }
+        if let Some(flag) = pending.use_async {
+            s.set_async_enabled(flag);
+        }
+        if let Some(min_n) = pending.async_min_n {
+            s.set_async_min_n(min_n);
+        }
+        if let Some(repl) = pending.replace_every {
+            s.set_pipelined_residual_refresh_every(Some(repl));
+        }
+        Ok(())
     }
 
     fn apply_gmres_pending(pending: &PendingGmres, s: &mut GmresSolver) {
@@ -1707,6 +1755,43 @@ impl KspContext {
             "reduction_reproducible",
             self.reduction_opts.reproducible,
         );
+        match self.solver_type {
+            Some(SolverType::Cg) => {
+                let variant = self.pending_cg.variant.unwrap_or(CgVariant::Classic);
+                insert_value(&mut solver_config, "cg_variant", format!("{variant:?}"));
+                insert_value(
+                    &mut solver_config,
+                    "cg_async_enabled",
+                    self.pending_cg.use_async.unwrap_or(true),
+                );
+                insert_value(
+                    &mut solver_config,
+                    "cg_async_min_n",
+                    self.pending_cg.async_min_n.unwrap_or(10_000),
+                );
+                if let Some(every) = self.pending_cg.replace_every {
+                    insert_value(&mut solver_config, "cg_replace_every", every);
+                }
+            }
+            Some(SolverType::Pcg) => {
+                let pipelined = self.pending_pcg.pipelined.unwrap_or(false);
+                insert_value(
+                    &mut solver_config,
+                    "cg_variant",
+                    if pipelined { "Pipelined" } else { "Classic" },
+                );
+                if pipelined {
+                    insert_value(
+                        &mut solver_config,
+                        "cg_replace_every",
+                        self.pending_pcg
+                            .replace_every
+                            .unwrap_or(PCG_PIPELINED_DEFAULT_REPLACE_EVERY),
+                    );
+                }
+            }
+            _ => {}
+        }
         insert_value(&mut solver_config, "reproducible", self.reproducible);
         insert_value(
             &mut solver_config,

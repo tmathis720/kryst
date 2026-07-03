@@ -18,7 +18,7 @@
 use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::parallel::{
-    dot_conj_local_with_mode, par_axpby, par_axpy, par_copy, sum_abs2_local_with_mode,
+    dot_conj_local_with_mode, par_axpby, par_axpy, par_axpy2, par_copy, sum_abs2_local_with_mode,
 };
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -35,7 +35,7 @@ use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as Preconditi
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
 use crate::solver::common::{ReductCtx, dot_result_to_real};
-use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats};
+use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats, SolverCounters};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -368,8 +368,14 @@ impl CgSolver {
     pub fn set_async_enabled(&mut self, enabled: bool) {
         self.async_enabled = enabled;
     }
+    pub fn async_enabled(&self) -> bool {
+        self.async_enabled
+    }
     pub fn set_async_min_n(&mut self, n: usize) {
         self.async_min_n = n;
+    }
+    pub fn async_min_n(&self) -> usize {
+        self.async_min_n
     }
 
     /// For pipelined CG, optionally refresh the recursive residual every
@@ -380,12 +386,19 @@ impl CgSolver {
     pub fn set_pipelined_residual_refresh_every(&mut self, every: Option<usize>) {
         self.pipelined_residual_refresh_every = every.filter(|v| *v > 0);
     }
+    pub fn pipelined_residual_refresh_every(&self) -> Option<usize> {
+        self.pipelined_residual_refresh_every
+    }
     /// Set the nonzero initial guess flag after construction.
     pub fn set_nonzero_guess(&mut self, f: bool) {
         self.initial_guess_nonzero = f;
     }
     pub fn set_true_residual_monitor(&mut self, m: Option<Box<MonitorCallback<R>>>) {
         self.true_residual_monitor = m;
+    }
+
+    pub(crate) fn take_true_residual_monitor(&mut self) -> Option<Box<MonitorCallback<R>>> {
+        self.true_residual_monitor.take()
     }
 
     #[inline]
@@ -661,8 +674,7 @@ impl CgSolver {
                 if xnorm + alpha.abs() * pnorm > rmax {
                     let step: R = (rmax - xnorm) / (pnorm + 1e-300);
                     let step_s: S = S::from_real(step);
-                    par_axpy(p, step_s, x);
-                    par_axpy(ap, -step_s, r);
+                    par_axpy2(p, step_s, x, ap, -step_s, r);
                     stats.iterations = k;
                     stats.reason = ConvergedReason::ConvergedTrustRegion;
                     stats.final_residual = red.norm2(r);
@@ -670,8 +682,7 @@ impl CgSolver {
                 }
             }
 
-            par_axpy(p, alpha_s, x);
-            par_axpy(ap, -alpha_s, r);
+            par_axpy2(p, alpha_s, x, ap, -alpha_s, r);
             if self.trust_region.is_some() {
                 xnorm = red.norm2(x);
             }
@@ -918,6 +929,11 @@ impl CgSolver {
             });
             (gamma_scalar, delta_scalar, rsq, znorm)
         };
+        let mut counters = SolverCounters {
+            num_global_reductions: 1,
+            overlap_global_reductions: 0,
+            residual_replacements: 0,
+        };
 
         let mut rho: R = dot_result_to_real(gamma_scalar);
         if rho <= R::zero() || !rho.is_finite() {
@@ -968,7 +984,7 @@ impl CgSolver {
             if s_out.final_residual <= zero_floor {
                 s_out.final_residual = R::zero();
             }
-            return Ok(Self::attach_drift_stats(s_out));
+            return Ok(Self::attach_drift_stats(s_out.with_counters(counters)));
         }
 
         let mut rho_prev = rho;
@@ -988,20 +1004,19 @@ impl CgSolver {
                     .allreduce_sum_r(local_pnorm_sq)
                     .max(R::zero())
                     .sqrt();
+                counters.num_global_reductions += 1;
                 if xnorm + alpha.abs() * pnorm > rmax {
                     let step: R = (rmax - xnorm) / (pnorm + 1e-300);
                     let step_s: S = S::from_real(step);
-                    par_axpy(p, step_s, x);
-                    par_axpy(s, -step_s, r);
+                    par_axpy2(p, step_s, x, s, -step_s, r);
                     stats.iterations = k;
                     stats.reason = ConvergedReason::ConvergedTrustRegion;
                     stats.final_residual = red.norm2(r);
-                    return Ok(Self::attach_drift_stats(stats));
+                    return Ok(Self::attach_drift_stats(stats.with_counters(counters)));
                 }
             }
 
-            par_axpy(p, alpha_s, x);
-            par_axpy(s, -alpha_s, r);
+            par_axpy2(p, alpha_s, x, s, -alpha_s, r);
             if self.trust_region.is_some() {
                 xnorm = red.norm2(x);
             }
@@ -1056,6 +1071,10 @@ impl CgSolver {
             } else {
                 red.engine().sum_vec_r(payload)
             };
+            counters.num_global_reductions += 1;
+            if async_ok {
+                counters.overlap_global_reductions += 1;
+            }
 
             #[cfg(feature = "complex")]
             {
@@ -1097,7 +1116,7 @@ impl CgSolver {
             };
 
             let refresh_due = refresh_every.is_some_and(|every| k % every == 0);
-            let (mut rho_new, mut delta_new, _rsq_new, _znorm_new, refreshed) = if refresh_due {
+            let (mut rho_new, mut delta_new, _rsq_new, _znorm_new, _refreshed) = if refresh_due {
                 a.matvec_s(x, tmp, scratch);
                 for i in 0..nrows {
                     r[i] = b[i] - tmp[i];
@@ -1129,6 +1148,8 @@ impl CgSolver {
                 let mut vals: SmallVec<[S; 4]> = SmallVec::new();
                 vals.resize(pairs.len(), S::zero());
                 red.dot_many_into(pairs.as_slice(), vals.as_mut_slice());
+                counters.num_global_reductions += 1;
+                counters.residual_replacements += 1;
 
                 let rho_val = dot_result_to_real(vals[rho_idx]);
                 let delta_val = dot_result_to_real(vals[delta_idx]);
@@ -1215,7 +1236,7 @@ impl CgSolver {
                 if s_out.final_residual <= zero_floor {
                     s_out.final_residual = R::zero();
                 }
-                return Ok(Self::attach_drift_stats(s_out));
+                return Ok(Self::attach_drift_stats(s_out.with_counters(counters)));
             }
 
             if delta_new <= R::zero() || !delta_new.is_finite() {
@@ -1236,11 +1257,14 @@ impl CgSolver {
         }
 
         let true_res = red.norm2(r);
-        Ok(Self::attach_drift_stats(SolveStats::new(
-            self.conv.max_iters,
-            true_res,
-            ConvergedReason::DivergedMaxIts,
-        )))
+        Ok(Self::attach_drift_stats(
+            SolveStats::new(
+                self.conv.max_iters,
+                true_res,
+                ConvergedReason::DivergedMaxIts,
+            )
+            .with_counters(counters),
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]

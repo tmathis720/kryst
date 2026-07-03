@@ -1,8 +1,8 @@
 #![cfg(not(feature = "complex"))]
 //! Tests for the PETSc-style options parsing and integration.
 
-use kryst::config::options::{KspOptions, PcOptions, PcSide, parse_all_options};
-use kryst::context::ksp_context::KspContext;
+use kryst::config::options::{CgVariant, KspOptions, PcOptions, PcSide, parse_all_options};
+use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::error::KError;
 
 #[test]
@@ -21,6 +21,55 @@ fn test_ksp_options_from_args() {
     assert_eq!(opts.rtol, Some(1e-8));
     assert_eq!(opts.maxits, Some(500));
     assert_eq!(opts.atol, None); // Not specified
+}
+
+#[test]
+fn cg_variant_options_precedence_and_staging() {
+    let opts = KspOptions::from_args(&[
+        "-ksp_cg_pipelined",
+        "false",
+        "-ksp_cg_variant",
+        "pipelined",
+        "-ksp_cg_replace_every",
+        "7",
+        "-ksp_cg_use_async",
+        "false",
+        "-ksp_cg_async_min_n",
+        "123",
+    ])
+    .unwrap();
+    assert_eq!(opts.cg_variant, Some(CgVariant::Pipelined));
+    assert_eq!(opts.cg_pipelined, Some(true));
+    assert_eq!(opts.cg_replace_every, Some(7));
+
+    let mut ksp = KspContext::new();
+    ksp.set_from_options(&opts).unwrap();
+    ksp.set_type(SolverType::Cg).unwrap();
+    let view = ksp.view();
+    assert_eq!(
+        view.solver_config
+            .get("cg_variant")
+            .and_then(|v| v.as_str()),
+        Some("Pipelined")
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_replace_every")
+            .and_then(|v| v.as_u64()),
+        Some(7)
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_async_enabled")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_async_min_n")
+            .and_then(|v| v.as_u64()),
+        Some(123)
+    );
 }
 
 #[test]

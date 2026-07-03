@@ -1,12 +1,13 @@
+use kryst::config::options::CgVariant;
 use kryst::context::ksp_context::Workspace;
 use kryst::matrix::utils::poisson_3d;
 use kryst::parallel::{NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
-use kryst::solver::LinearSolver;
 use kryst::solver::pcg::{PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcgSolver, PcgVariant};
+use kryst::solver::{CgSolver, LinearSolver};
 use std::time::Instant;
 
-fn run_variant(
+fn run_pcg_variant(
     a: &dyn kryst::matrix::op::LinOp<S = f64>,
     b: &[f64],
     variant: PcgVariant,
@@ -22,8 +23,41 @@ fn run_variant(
     let comm = UniverseComm::NoComm(NoComm);
     let start = Instant::now();
     let stats = solver
-        .solve_with_comm(a, None, b, &mut x, PcSide::Left, &comm, None, Some(&mut wk))
+        .solve(a, None, b, &mut x, PcSide::Left, &comm, None, Some(&mut wk))
         .expect("PCG converged");
+    (start.elapsed(), stats)
+}
+
+fn run_cg_variant(
+    a: &dyn kryst::matrix::op::LinOp<S = f64>,
+    b: &[f64],
+    variant: CgVariant,
+) -> (
+    std::time::Duration,
+    kryst::utils::convergence::SolveStats<f64>,
+) {
+    let mut solver = CgSolver::new(1e-8, 2000);
+    solver.set_variant(variant);
+    if matches!(variant, CgVariant::Pipelined) {
+        solver.set_pipelined_residual_refresh_every(Some(PCG_PIPELINED_DEFAULT_REPLACE_EVERY));
+    }
+    let mut wk = Workspace::default();
+    solver.setup_workspace(&mut wk);
+    let mut x = vec![0.0; b.len()];
+    let comm = UniverseComm::NoComm(NoComm);
+    let start = Instant::now();
+    let stats = LinearSolver::solve(
+        &mut solver,
+        a,
+        None,
+        b,
+        &mut x,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut wk),
+    )
+    .expect("CG converged");
     (start.elapsed(), stats)
 }
 
@@ -44,8 +78,9 @@ fn solve_case(label: &str, ranks: usize, dims: (usize, usize, usize)) {
 
     println!("{label:>12} | ranks = {ranks:>3} | dims = {nx}×{ny}×{nz} | dofs = {n}");
 
-    let (classic_time, classic_stats) = run_variant(&a, &b, PcgVariant::Classic);
-    let (pipelined_time, pipelined_stats) = run_variant(
+    let (cg_time, cg_stats) = run_cg_variant(&a, &b, CgVariant::Classic);
+    let (classic_time, classic_stats) = run_pcg_variant(&a, &b, PcgVariant::Classic);
+    let (pipelined_time, pipelined_stats) = run_pcg_variant(
         &a,
         &b,
         PcgVariant::Pipelined {
@@ -66,6 +101,11 @@ fn solve_case(label: &str, ranks: usize, dims: (usize, usize, usize)) {
         "pipelined benchmark expected overlap-aware reductions"
     );
     let speedup = classic_time.as_secs_f64() / pipelined_time.as_secs_f64();
+    println!(
+        "    cg       : {:>6} iters | {:>8.3} ms",
+        cg_stats.iterations,
+        cg_time.as_secs_f64() * 1.0e3
+    );
     println!(
         "    classic  : {:>6} iters | {:>8.3} ms",
         classic_stats.iterations,

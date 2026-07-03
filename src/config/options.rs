@@ -3146,6 +3146,7 @@ mod tests {
                     "ksp_gmres_reorth" => "never",
                     "ksp_gmres_variant" => "classical",
                     "ksp_fgmres_variant" => "classical",
+                    "ksp_cg_variant" => "pipelined",
                     "ksp_reduction" => "fast",
                     "ksp_pc_side" => "left",
                     "matrix" => "A.mtx",

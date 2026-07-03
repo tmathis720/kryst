@@ -8,12 +8,15 @@ use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::matrix::op_bridge::matvec_s;
+use crate::ops::wrap::{as_s_op, as_s_pc_mut};
 use crate::parallel::{Comm, UniverseComm};
 use crate::preconditioner::bridge::apply_pc_s;
 use crate::preconditioner::{PcSide, Preconditioner};
+#[cfg(not(feature = "complex"))]
+use crate::reduction::DotEngine;
 #[cfg(feature = "complex")]
 use crate::reduction::Packet;
-use crate::reduction::{CommDeterministic, DotEngine, ReductionOptions, ReproMode};
+use crate::reduction::{CommDeterministic, ReductionOptions, ReproMode};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
 use crate::solver::cg::CgSolver;
@@ -174,6 +177,13 @@ impl PcgSolver {
         self.variant
     }
 
+    pub fn pipelined_residual_refresh_every(&self) -> Option<usize> {
+        match self.variant {
+            PcgVariant::Pipelined { replace_every } if replace_every > 0 => Some(replace_every),
+            _ => None,
+        }
+    }
+
     pub fn set_async_reduction_options(&mut self, opt: ReductOptions) {
         self.async_reduction = opt;
     }
@@ -188,7 +198,7 @@ impl PcgSolver {
             },
             PcgVariant::Pipelined { .. } => ReductionModel {
                 variant: "pcg-pipelined",
-                startup: 2,
+                startup: 1,
                 per_iteration: 1.0,
                 tail: 0,
             },
@@ -199,6 +209,74 @@ impl PcgSolver {
         let mut opt = self.async_reduction.clone();
         opt.mode = self.reduction.mode;
         opt
+    }
+
+    fn configured_cg(&self) -> CgSolver {
+        let mut cg = CgSolver::new(self.conv.rtol, self.conv.max_iters);
+        cg.conv.atol = self.conv.atol;
+        cg.conv.dtol = self.conv.dtol;
+        cg.set_nonzero_guess(self.initial_guess_nonzero);
+        cg.set_variant(match self.variant {
+            PcgVariant::Classic => CgVariant::Classic,
+            PcgVariant::Pipelined { .. } => CgVariant::Pipelined,
+        });
+        if let PcgVariant::Pipelined { replace_every } = self.variant {
+            cg.set_pipelined_residual_refresh_every((replace_every > 0).then_some(replace_every));
+        }
+        cg.set_norm(match self.norm_type {
+            CgNormType::Preconditioned => crate::solver::cg::CgNormType::Preconditioned,
+            CgNormType::Unpreconditioned => crate::solver::cg::CgNormType::Unpreconditioned,
+            CgNormType::Natural => crate::solver::cg::CgNormType::Natural,
+            CgNormType::None => crate::solver::cg::CgNormType::None,
+        });
+        cg
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_k_via_cg<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn crate::ops::kpc::KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: crate::ops::klinop::KLinOp<Scalar = S> + ?Sized,
+    {
+        let mut owned_workspace;
+        let work = match work {
+            Some(work) => work,
+            None => {
+                owned_workspace = Workspace::new(b.len());
+                &mut owned_workspace
+            }
+        };
+
+        let saved_reduction = work.reduction_options().clone();
+        let saved_engine = work.reduction_engine().cloned();
+        let reduction = self.async_options();
+        work.set_reduction_options(reduction.clone());
+        work.set_reduction_engine(comm.reduction_engine(&reduction));
+
+        let mut cg = self.configured_cg();
+        cg.set_true_residual_monitor(self.true_residual_monitor.take());
+        cg.setup_workspace(work);
+
+        let result = cg
+            .solve_with_comm(a, pc, b, x, pc_side, comm, monitors, Some(work))
+            .map(|stats| stats.with_reduction_model(self.reduction_model()));
+
+        self.true_residual_monitor = cg.take_true_residual_monitor();
+        work.set_reduction_options(saved_reduction);
+        if let Some(engine) = saved_engine {
+            work.set_reduction_engine(engine);
+        }
+
+        result
     }
 
     /// Indicate whether the supplied initial guess is nonzero.
@@ -231,6 +309,7 @@ impl PcgSolver {
     }
 
     #[inline]
+    #[cfg(not(feature = "complex"))]
     fn dot<C: Comm + CommDeterministic>(&self, u: &[f64], v: &[f64], comm: &C) -> f64 {
         let engine = DotEngine {
             opts: self.reduction,
@@ -1027,40 +1106,11 @@ impl PcgSolver {
     where
         A: crate::ops::klinop::KLinOp<Scalar = S> + ?Sized,
     {
-        let mut cg = CgSolver::new(self.conv.rtol, self.conv.max_iters);
-        cg.conv.atol = self.conv.atol;
-        cg.conv.dtol = self.conv.dtol;
-        cg.set_nonzero_guess(self.initial_guess_nonzero);
-        cg.set_variant(match self.variant {
-            PcgVariant::Classic => CgVariant::Classic,
-            PcgVariant::Pipelined { .. } => CgVariant::Pipelined,
-        });
-        cg.set_norm(match self.norm_type {
-            CgNormType::Preconditioned => crate::solver::cg::CgNormType::Preconditioned,
-            CgNormType::Unpreconditioned => crate::solver::cg::CgNormType::Unpreconditioned,
-            CgNormType::Natural => crate::solver::cg::CgNormType::Natural,
-            CgNormType::None => crate::solver::cg::CgNormType::None,
-        });
-        cg.solve_with_comm(a, pc, b, x, pc_side, comm, monitors, work)
+        self.solve_k_via_cg(a, pc, b, x, pc_side, comm, monitors, work)
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn solve_with_comm<C: Comm + CommDeterministic + AllreduceOps>(
-        &mut self,
-        a: &dyn LinOp<S = f64>,
-        pc: Option<&mut dyn Preconditioner>,
-        b: &[f64],
-        x: &mut [f64],
-        pc_side: PcSide,
-        comm: &C,
-        monitors: Option<&[Box<MonitorCallback<f64>>]>,
-        work: Option<&mut Workspace>,
-    ) -> Result<SolveStats<f64>, KError> {
-        self.solve_impl(a, pc, b, x, pc_side, comm, monitors, work)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn solve_impl<C: Comm + CommDeterministic + AllreduceOps>(
         &mut self,
         a: &dyn LinOp<S = f64>,
         pc: Option<&mut dyn Preconditioner>,
@@ -1076,6 +1126,55 @@ impl PcgSolver {
             PcgVariant::Pipelined { .. } => {
                 self.solve_pipelined(a, pc, b, x, pc_side, comm, monitors, work)
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_impl(
+        &mut self,
+        a: &dyn LinOp<S = f64>,
+        pc: Option<&mut dyn Preconditioner>,
+        b: &[f64],
+        x: &mut [f64],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<MonitorCallback<f64>>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<f64>, KError> {
+        let op = as_s_op(a);
+        let pc_wrapper = pc.map(as_s_pc_mut);
+        let pc_ref = pc_wrapper
+            .as_ref()
+            .map(|pc| pc as &dyn crate::ops::kpc::KPreconditioner<Scalar = S>);
+
+        let mut owned_workspace;
+        let work = match work {
+            Some(work) => Some(work),
+            None => {
+                owned_workspace = Workspace::new(b.len());
+                Some(&mut owned_workspace)
+            }
+        };
+
+        #[cfg(not(feature = "complex"))]
+        {
+            let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
+            let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
+            self.solve_k_via_cg(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+        }
+
+        #[cfg(feature = "complex")]
+        {
+            let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
+            let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
+            let result =
+                self.solve_k_via_cg(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work);
+            if result.is_ok() {
+                for (dst, src) in x.iter_mut().zip(x_s.iter()) {
+                    *dst = src.real();
+                }
+            }
+            result
         }
     }
 

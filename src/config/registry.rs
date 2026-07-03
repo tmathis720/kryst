@@ -274,6 +274,13 @@ pub static SPECS: &[Spec] = &[
         doc: "guard for zero residual",
     },
     Spec {
+        flag: "-ksp_cg_variant",
+        key: "ksp_cg_variant",
+        arity: Arity::One,
+        kind: ValueKind::Str,
+        doc: "CG variant: classic|pipelined",
+    },
+    Spec {
         flag: "-ksp_cg_norm",
         key: "ksp_cg_norm",
         arity: Arity::One,

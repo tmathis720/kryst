@@ -111,6 +111,42 @@ fn ksp_cg_hermitian_pd_complex() {
     }
 }
 
+#[test]
+fn ksp_pcg_hermitian_pd_complex_converges_to_known_solution() {
+    let row_ptr = vec![0, 2, 4];
+    let col_idx = vec![0, 1, 0, 1];
+    let values = vec![
+        S::from_real(4.0),
+        S::from_parts(1.0, 0.5),
+        S::from_parts(1.0, -0.5),
+        S::from_real(3.0),
+    ];
+    let csr = CsrMatrix::from_csr(2, 2, row_ptr, col_idx, values);
+    let op = Arc::new(CsrOp::new(Arc::new(csr.clone())));
+
+    let x_true = vec![S::from_parts(0.5, -0.25), S::from_parts(-1.0, 0.75)];
+    let b = apply_csr(&csr, &x_true);
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Pcg).unwrap();
+    ksp.set_pc_type(PcType::None, None).unwrap();
+    ksp.set_tolerances(1e-12, 1e-14, 1e8, 20);
+    ksp.set_operators(op, None);
+
+    let mut x = vec![S::zero(); 2];
+    let stats = ksp.solve(&b, &mut x).expect("PCG solve");
+    assert!(
+        stats.reason.is_converged(),
+        "unexpected PCG reason: {:?}",
+        stats.reason
+    );
+
+    for (xi, xt) in x.iter().zip(x_true.iter()) {
+        assert_abs_diff_eq!(xi.real(), xt.real(), epsilon = 1e-9);
+        assert_abs_diff_eq!(xi.imag(), xt.imag(), epsilon = 1e-9);
+    }
+}
+
 use kryst::config::options::KspOptions;
 
 fn hermitian_2x2() -> CsrMatrix<S> {

@@ -87,6 +87,17 @@ fn s_axpy(x: &[S], alpha: S, y: &mut [S]) {
 }
 
 #[inline]
+fn s_axpy2(x0: &[S], alpha0: S, y0: &mut [S], x1: &[S], alpha1: S, y1: &mut [S]) {
+    debug_assert_eq!(x0.len(), y0.len());
+    debug_assert_eq!(x1.len(), y1.len());
+    debug_assert_eq!(x0.len(), x1.len());
+    for (((y0i, &x0i), y1i), &x1i) in y0.iter_mut().zip(x0).zip(y1.iter_mut()).zip(x1) {
+        *y0i = *y0i + alpha0 * x0i;
+        *y1i = *y1i + alpha1 * x1i;
+    }
+}
+
+#[inline]
 fn s_axpby(x: &[S], alpha: S, y: &mut [S], beta: S) {
     debug_assert_eq!(x.len(), y.len());
     if beta == S::zero() {
@@ -283,6 +294,43 @@ pub fn par_axpy(x: &[S], alpha: S, y: &mut [S]) {
     s_axpy(x, alpha, y);
     crate::algebra::parallel_cfg::observe_vector_kernel_timing(
         x.len(),
+        used_parallel,
+        t0.elapsed().as_nanos() as u64,
+    );
+}
+
+#[inline]
+pub fn par_axpy2(x0: &[S], alpha0: S, y0: &mut [S], x1: &[S], alpha1: S, y1: &mut [S]) {
+    debug_assert_eq!(x0.len(), y0.len());
+    debug_assert_eq!(x1.len(), y1.len());
+    debug_assert_eq!(x0.len(), x1.len());
+    let t0 = Instant::now();
+    let mut used_parallel = false;
+    #[cfg(feature = "rayon")]
+    {
+        let n = x0.len();
+        let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            used_parallel = true;
+            y0.par_iter_mut()
+                .zip(x0.par_iter().copied())
+                .zip(y1.par_iter_mut())
+                .zip(x1.par_iter().copied())
+                .for_each(|(((y0i, x0i), y1i), x1i)| {
+                    *y0i = *y0i + alpha0 * x0i;
+                    *y1i = *y1i + alpha1 * x1i;
+                });
+            crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+                n.saturating_mul(2),
+                used_parallel,
+                t0.elapsed().as_nanos() as u64,
+            );
+            return;
+        }
+    }
+    s_axpy2(x0, alpha0, y0, x1, alpha1, y1);
+    crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+        x0.len().saturating_mul(2),
         used_parallel,
         t0.elapsed().as_nanos() as u64,
     );

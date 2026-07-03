@@ -41,7 +41,7 @@ fn pipelined_cg_uses_single_reduction_per_iteration() -> Result<(), KError> {
     )?;
     let counters = crate::utils::reduction::take_test_counter();
     crate::utils::reduction::install_test_counter(false);
-    let expected = 2 * stats.iterations + 2; // initial dot/norm plus per-iteration reductions
+    let expected = stats.iterations + 1; // fused startup tuple plus one fused tuple per iteration
     if counters.allreduces > 0 {
         assert!(
             counters.allreduces >= expected,
