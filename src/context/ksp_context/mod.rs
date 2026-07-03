@@ -444,6 +444,8 @@ struct PendingFgmres {
 struct PendingPcg {
     pipelined: Option<bool>,
     replace_every: Option<usize>,
+    use_async: Option<bool>,
+    async_min_n: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1435,6 +1437,14 @@ impl KspContext {
             self.pending_pcg.replace_every = Some(repl);
             pcg_pending_updated = true;
         }
+        if let Some(flag) = opts.cg_use_async {
+            self.pending_pcg.use_async = Some(flag);
+            pcg_pending_updated = true;
+        }
+        if let Some(min_n) = opts.cg_async_min_n {
+            self.pending_pcg.async_min_n = Some(min_n);
+            pcg_pending_updated = true;
+        }
         if pcg_pending_updated {
             let snapshot = self.pending_pcg.clone();
             if let Some(s) = self
@@ -1646,6 +1656,12 @@ impl KspContext {
         {
             s.set_variant(PcgVariant::Pipelined { replace_every });
         }
+        if let Some(flag) = pending.use_async {
+            s.set_async_enabled(flag);
+        }
+        if let Some(min_n) = pending.async_min_n {
+            s.set_async_min_n(min_n);
+        }
     }
 
     fn apply_pcg_pending_to(&self, s: &mut PcgSolver) {
@@ -1758,16 +1774,47 @@ impl KspContext {
         match self.solver_type {
             Some(SolverType::Cg) => {
                 let variant = self.pending_cg.variant.unwrap_or(CgVariant::Classic);
+                let async_enabled = self.pending_cg.use_async.unwrap_or(true);
+                let async_min_n = self.pending_cg.async_min_n.unwrap_or(10_000);
+                let bound_size = self
+                    .bound_comm
+                    .as_ref()
+                    .map(|comm| comm.size())
+                    .unwrap_or(1);
+                let async_effective = matches!(variant, CgVariant::Pipelined)
+                    && async_enabled
+                    && bound_size > 1
+                    && self
+                        .amat
+                        .as_ref()
+                        .map(|a| a.dims().0 >= async_min_n)
+                        .unwrap_or(false);
                 insert_value(&mut solver_config, "cg_variant", format!("{variant:?}"));
                 insert_value(
                     &mut solver_config,
-                    "cg_async_enabled",
-                    self.pending_cg.use_async.unwrap_or(true),
+                    "cg_reduction_model",
+                    match variant {
+                        CgVariant::Classic => serde_json::json!({
+                            "variant": "cg-classic",
+                            "startup": 2,
+                            "per_iteration": 2.0,
+                            "tail": 0,
+                        }),
+                        CgVariant::Pipelined => serde_json::json!({
+                            "variant": "cg-pipelined",
+                            "startup": 1,
+                            "per_iteration": 1.0,
+                            "tail": 0,
+                        }),
+                    },
                 );
+                insert_value(&mut solver_config, "cg_async_enabled", async_enabled);
+                insert_value(&mut solver_config, "cg_async_effective", async_effective);
+                insert_value(&mut solver_config, "cg_async_min_n", async_min_n);
                 insert_value(
                     &mut solver_config,
-                    "cg_async_min_n",
-                    self.pending_cg.async_min_n.unwrap_or(10_000),
+                    "cg_async_overlap_safe",
+                    !self.reproducible,
                 );
                 if let Some(every) = self.pending_cg.replace_every {
                     insert_value(&mut solver_config, "cg_replace_every", every);
@@ -1775,10 +1822,52 @@ impl KspContext {
             }
             Some(SolverType::Pcg) => {
                 let pipelined = self.pending_pcg.pipelined.unwrap_or(false);
+                let async_enabled = self.pending_pcg.use_async.unwrap_or(true);
+                let async_min_n = self.pending_pcg.async_min_n.unwrap_or(10_000);
+                let bound_size = self
+                    .bound_comm
+                    .as_ref()
+                    .map(|comm| comm.size())
+                    .unwrap_or(1);
+                let async_effective = pipelined
+                    && async_enabled
+                    && bound_size > 1
+                    && self
+                        .amat
+                        .as_ref()
+                        .map(|a| a.dims().0 >= async_min_n)
+                        .unwrap_or(false);
                 insert_value(
                     &mut solver_config,
                     "cg_variant",
                     if pipelined { "Pipelined" } else { "Classic" },
+                );
+                insert_value(
+                    &mut solver_config,
+                    "cg_reduction_model",
+                    if pipelined {
+                        serde_json::json!({
+                            "variant": "pcg-pipelined",
+                            "startup": 1,
+                            "per_iteration": 1.0,
+                            "tail": 0,
+                        })
+                    } else {
+                        serde_json::json!({
+                            "variant": "pcg-classic",
+                            "startup": 2,
+                            "per_iteration": 2.0,
+                            "tail": 0,
+                        })
+                    },
+                );
+                insert_value(&mut solver_config, "cg_async_enabled", async_enabled);
+                insert_value(&mut solver_config, "cg_async_effective", async_effective);
+                insert_value(&mut solver_config, "cg_async_min_n", async_min_n);
+                insert_value(
+                    &mut solver_config,
+                    "cg_async_overlap_safe",
+                    !self.reproducible,
                 );
                 if pipelined {
                     insert_value(
@@ -3195,6 +3284,7 @@ impl KspContext {
                             monitors,
                             work,
                         )?
+                        .with_reduction_model(s.reduction_model())
                     }
                     SolverType::Cgnr => {
                         let s = solver
@@ -4932,6 +5022,41 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn pcg_applies_cg_async_options_when_staged_or_immediate() {
+        let staged_opts = KspOptions {
+            cg_use_async: Some(false),
+            cg_async_min_n: Some(123),
+            ..Default::default()
+        };
+        let mut staged = KspContext::new();
+        staged.set_from_options(&staged_opts).unwrap();
+        staged.set_type(SolverType::Pcg).unwrap();
+        let staged_pcg = staged
+            .solver
+            .as_mut()
+            .and_then(|solver| solver.as_any_mut().downcast_mut::<PcgSolver>())
+            .expect("PCG solver");
+        assert!(!staged_pcg.async_enabled());
+        assert_eq!(staged_pcg.async_min_n(), 123);
+
+        let immediate_opts = KspOptions {
+            cg_use_async: Some(true),
+            cg_async_min_n: Some(456),
+            ..Default::default()
+        };
+        let mut immediate = KspContext::new();
+        immediate.set_type(SolverType::Pcg).unwrap();
+        immediate.set_from_options(&immediate_opts).unwrap();
+        let immediate_pcg = immediate
+            .solver
+            .as_mut()
+            .and_then(|solver| solver.as_any_mut().downcast_mut::<PcgSolver>())
+            .expect("PCG solver");
+        assert!(immediate_pcg.async_enabled());
+        assert_eq!(immediate_pcg.async_min_n(), 456);
     }
 
     #[test]

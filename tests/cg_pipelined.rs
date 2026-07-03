@@ -85,6 +85,22 @@ fn pipelined_matches_classic_solution() {
 
     let rel_res = stats_pipe.final_residual / stats_classic.final_residual.max(R::from(1e-30));
     assert!(rel_res < R::from(2.0));
+
+    let classic_model = stats_classic
+        .reduction_model
+        .as_ref()
+        .expect("classic CG reduction model");
+    assert_eq!(classic_model.variant, "cg-classic");
+    assert_eq!(classic_model.startup, 2);
+    assert_eq!(classic_model.per_iteration, 2.0);
+
+    let pipe_model = stats_pipe
+        .reduction_model
+        .as_ref()
+        .expect("pipelined CG reduction model");
+    assert_eq!(pipe_model.variant, "cg-pipelined");
+    assert_eq!(pipe_model.startup, 1);
+    assert_eq!(pipe_model.per_iteration, 1.0);
 }
 
 #[test]

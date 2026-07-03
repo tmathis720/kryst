@@ -74,6 +74,8 @@ pub struct PcgSolver {
     initial_guess_nonzero: bool,
     variant: PcgVariant,
     async_reduction: ReductOptions,
+    async_enabled: bool,
+    async_min_n: usize,
 }
 
 struct ClassicWorkspace<'a> {
@@ -127,6 +129,8 @@ impl PcgSolver {
             initial_guess_nonzero: false,
             variant: PcgVariant::Classic,
             async_reduction: ReductOptions::default(),
+            async_enabled: true,
+            async_min_n: 10_000,
         }
     }
 
@@ -188,6 +192,22 @@ impl PcgSolver {
         self.async_reduction = opt;
     }
 
+    pub fn set_async_enabled(&mut self, enabled: bool) {
+        self.async_enabled = enabled;
+    }
+
+    pub fn async_enabled(&self) -> bool {
+        self.async_enabled
+    }
+
+    pub fn set_async_min_n(&mut self, n: usize) {
+        self.async_min_n = n;
+    }
+
+    pub fn async_min_n(&self) -> usize {
+        self.async_min_n
+    }
+
     fn reduction_model(&self) -> ReductionModel {
         match self.variant {
             PcgVariant::Classic => ReductionModel {
@@ -216,6 +236,8 @@ impl PcgSolver {
         cg.conv.atol = self.conv.atol;
         cg.conv.dtol = self.conv.dtol;
         cg.set_nonzero_guess(self.initial_guess_nonzero);
+        cg.set_async_enabled(self.async_enabled);
+        cg.set_async_min_n(self.async_min_n);
         cg.set_variant(match self.variant {
             PcgVariant::Classic => CgVariant::Classic,
             PcgVariant::Pipelined { .. } => CgVariant::Pipelined,

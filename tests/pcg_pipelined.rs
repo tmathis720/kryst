@@ -152,6 +152,18 @@ fn pipelined_reports_reduction_counts() -> Result<(), KError> {
 }
 
 #[test]
+fn pcg_async_configuration_is_forwarded_to_canonical_cg() {
+    let mut solver = PcgSolver::new(1e-12, 100);
+    assert!(solver.async_enabled());
+    assert_eq!(solver.async_min_n(), 10_000);
+
+    solver.set_async_enabled(false);
+    solver.set_async_min_n(123);
+    assert!(!solver.async_enabled());
+    assert_eq!(solver.async_min_n(), 123);
+}
+
+#[test]
 fn pipelined_reductions_scale_with_iteration_count() -> Result<(), KError> {
     let n = 64;
     let a = csr_poisson_1d(n);
@@ -159,7 +171,7 @@ fn pipelined_reductions_scale_with_iteration_count() -> Result<(), KError> {
     let comm = UniverseComm::NoComm(NoComm);
     let op: &dyn LinOp<S = f64> = &a;
 
-    let mut run = |tol: f64, maxits: usize| -> Result<_, KError> {
+    let run = |tol: f64, maxits: usize| -> Result<_, KError> {
         let mut solver =
             PcgSolver::new(tol, maxits).with_variant(PcgVariant::Pipelined { replace_every: 0 });
         let mut wk = Workspace::default();

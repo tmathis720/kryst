@@ -35,7 +35,9 @@ use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as Preconditi
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
 use crate::solver::common::{ReductCtx, dot_result_to_real};
-use crate::utils::convergence::{ConvergedReason, Convergence, SolveStats, SolverCounters};
+use crate::utils::convergence::{
+    ConvergedReason, Convergence, ReductionModel, SolveStats, SolverCounters,
+};
 use smallvec::SmallVec;
 use std::any::Any;
 
@@ -345,6 +347,24 @@ impl CgSolver {
     pub fn variant(&self) -> CgVariant {
         self.variant
     }
+
+    /// Expected global-reduction shape for the selected CG algorithm.
+    pub fn reduction_model(&self) -> ReductionModel {
+        match self.variant {
+            CgVariant::Classic => ReductionModel {
+                variant: "cg-classic",
+                startup: 2,
+                per_iteration: 2.0,
+                tail: 0,
+            },
+            CgVariant::Pipelined => ReductionModel {
+                variant: "cg-pipelined",
+                startup: 1,
+                per_iteration: 1.0,
+                tail: 0,
+            },
+        }
+    }
     #[inline]
     fn attach_drift_stats(mut stats: SolveStats<R>) -> SolveStats<R> {
         let (total, per_kind, max_ratio) = debug::snapshot();
@@ -408,6 +428,25 @@ impl CgSolver {
 
     #[allow(clippy::too_many_arguments)]
     pub fn solve_with_comm<A>(
+        &mut self,
+        a: &A,
+        pc: Option<&dyn KPreconditioner<Scalar = S>>,
+        b: &[S],
+        x: &mut [S],
+        pc_side: PcSide,
+        comm: &UniverseComm,
+        monitors: Option<&[Box<MonitorCallback<R>>]>,
+        work: Option<&mut Workspace>,
+    ) -> Result<SolveStats<R>, KError>
+    where
+        A: KLinOp<Scalar = S> + ?Sized,
+    {
+        self.solve_with_comm_impl(a, pc, b, x, pc_side, comm, monitors, work)
+            .map(|stats| stats.with_reduction_model(self.reduction_model()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_with_comm_impl<A>(
         &mut self,
         a: &A,
         pc: Option<&dyn KPreconditioner<Scalar = S>>,

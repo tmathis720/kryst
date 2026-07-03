@@ -66,9 +66,108 @@ fn cg_variant_options_precedence_and_staging() {
     );
     assert_eq!(
         view.solver_config
+            .get("cg_async_effective")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        view.solver_config
             .get("cg_async_min_n")
             .and_then(|v| v.as_u64()),
         Some(123)
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_async_overlap_safe")
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    let model = view
+        .solver_config
+        .get("cg_reduction_model")
+        .and_then(|v| v.as_object())
+        .expect("cg reduction model");
+    assert_eq!(
+        model.get("variant").and_then(|v| v.as_str()),
+        Some("cg-pipelined")
+    );
+    assert_eq!(model.get("startup").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(
+        model.get("per_iteration").and_then(|v| v.as_f64()),
+        Some(1.0)
+    );
+}
+
+#[test]
+fn pcg_view_reports_cg_wrapper_diagnostics() {
+    let opts = KspOptions::from_args(&[
+        "-ksp_cg_variant",
+        "pipelined",
+        "-ksp_cg_replace_every",
+        "11",
+        "-ksp_cg_use_async",
+        "true",
+        "-ksp_cg_async_min_n",
+        "99",
+        "-ksp_reproducible",
+        "true",
+    ])
+    .unwrap();
+
+    let mut ksp = KspContext::new();
+    ksp.set_from_options(&opts).unwrap();
+    ksp.set_type(SolverType::Pcg).unwrap();
+    let view = ksp.view();
+
+    assert_eq!(
+        view.solver_config
+            .get("cg_variant")
+            .and_then(|v| v.as_str()),
+        Some("Pipelined")
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_replace_every")
+            .and_then(|v| v.as_u64()),
+        Some(11)
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_async_enabled")
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_async_effective")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_async_min_n")
+            .and_then(|v| v.as_u64()),
+        Some(99)
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_async_overlap_safe")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    let model = view
+        .solver_config
+        .get("cg_reduction_model")
+        .and_then(|v| v.as_object())
+        .expect("pcg reduction model");
+    assert_eq!(
+        model.get("variant").and_then(|v| v.as_str()),
+        Some("pcg-pipelined")
+    );
+    assert_eq!(model.get("startup").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(
+        model.get("per_iteration").and_then(|v| v.as_f64()),
+        Some(1.0)
     );
 }
 
