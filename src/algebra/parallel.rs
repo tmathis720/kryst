@@ -98,6 +98,26 @@ fn s_axpy2(x0: &[S], alpha0: S, y0: &mut [S], x1: &[S], alpha1: S, y1: &mut [S])
 }
 
 #[inline]
+fn s_residual_from_matvec(b: &[S], ax: &[S], r: &mut [S]) {
+    debug_assert_eq!(b.len(), ax.len());
+    debug_assert_eq!(b.len(), r.len());
+    for ((ri, &bi), &axi) in r.iter_mut().zip(b).zip(ax) {
+        *ri = bi - axi;
+    }
+}
+
+#[inline]
+fn s_cg_recurrence2(u: &[S], w: &[S], beta: S, p: &mut [S], s: &mut [S]) {
+    debug_assert_eq!(u.len(), p.len());
+    debug_assert_eq!(w.len(), s.len());
+    debug_assert_eq!(u.len(), w.len());
+    for (((pi, &ui), si), &wi) in p.iter_mut().zip(u).zip(s.iter_mut()).zip(w) {
+        *pi = ui + beta * *pi;
+        *si = wi + beta * *si;
+    }
+}
+
+#[inline]
 fn s_axpby(x: &[S], alpha: S, y: &mut [S], beta: S) {
     debug_assert_eq!(x.len(), y.len());
     if beta == S::zero() {
@@ -331,6 +351,77 @@ pub fn par_axpy2(x0: &[S], alpha0: S, y0: &mut [S], x1: &[S], alpha1: S, y1: &mu
     s_axpy2(x0, alpha0, y0, x1, alpha1, y1);
     crate::algebra::parallel_cfg::observe_vector_kernel_timing(
         x0.len().saturating_mul(2),
+        used_parallel,
+        t0.elapsed().as_nanos() as u64,
+    );
+}
+
+#[inline]
+pub fn par_residual_from_matvec(b: &[S], ax: &[S], r: &mut [S]) {
+    debug_assert_eq!(b.len(), ax.len());
+    debug_assert_eq!(b.len(), r.len());
+    let t0 = Instant::now();
+    let mut used_parallel = false;
+    #[cfg(feature = "rayon")]
+    {
+        let n = b.len();
+        let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            used_parallel = true;
+            r.par_iter_mut()
+                .zip(b.par_iter().copied())
+                .zip(ax.par_iter().copied())
+                .for_each(|((ri, bi), axi)| {
+                    *ri = bi - axi;
+                });
+            crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+                n,
+                used_parallel,
+                t0.elapsed().as_nanos() as u64,
+            );
+            return;
+        }
+    }
+    s_residual_from_matvec(b, ax, r);
+    crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+        b.len(),
+        used_parallel,
+        t0.elapsed().as_nanos() as u64,
+    );
+}
+
+#[inline]
+pub fn par_cg_recurrence2(u: &[S], w: &[S], beta: S, p: &mut [S], s: &mut [S]) {
+    debug_assert_eq!(u.len(), p.len());
+    debug_assert_eq!(w.len(), s.len());
+    debug_assert_eq!(u.len(), w.len());
+    let t0 = Instant::now();
+    let mut used_parallel = false;
+    #[cfg(feature = "rayon")]
+    {
+        let n = u.len();
+        let min_len = crate::algebra::parallel_cfg::parallel_tune().min_len_vec;
+        if n >= min_len && !crate::algebra::parallel_cfg::force_serial() {
+            used_parallel = true;
+            p.par_iter_mut()
+                .zip(u.par_iter().copied())
+                .zip(s.par_iter_mut())
+                .zip(w.par_iter().copied())
+                .for_each(|(((pi, ui), si), wi)| {
+                    *pi = ui + beta * *pi;
+                    *si = wi + beta * *si;
+                });
+            crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+                n.saturating_mul(2),
+                used_parallel,
+                t0.elapsed().as_nanos() as u64,
+            );
+            return;
+        }
+    }
+    s_cg_recurrence2(u, w, beta, p, s);
+    crate::algebra::parallel_cfg::observe_vector_kernel_timing(
+        u.len().saturating_mul(2),
         used_parallel,
         t0.elapsed().as_nanos() as u64,
     );

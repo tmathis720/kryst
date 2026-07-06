@@ -455,6 +455,10 @@ impl Workspace {
         self.reduction_engine = Some(engine);
     }
 
+    pub fn clear_reduction_engine(&mut self) {
+        self.reduction_engine = None;
+    }
+
     pub fn reduction_engine(&self) -> Option<&Arc<dyn ReductionEngine>> {
         self.reduction_engine.as_ref()
     }

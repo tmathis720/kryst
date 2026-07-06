@@ -9,7 +9,7 @@ use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::matrix::op_bridge::matvec_s;
 use crate::ops::wrap::{as_s_op, as_s_pc_mut};
-use crate::parallel::{Comm, UniverseComm};
+use crate::parallel::{Comm, NoComm, UniverseComm};
 use crate::preconditioner::bridge::apply_pc_s;
 use crate::preconditioner::{PcSide, Preconditioner};
 #[cfg(not(feature = "complex"))]
@@ -296,6 +296,8 @@ impl PcgSolver {
         work.set_reduction_options(saved_reduction);
         if let Some(engine) = saved_engine {
             work.set_reduction_engine(engine);
+        } else {
+            work.clear_reduction_engine();
         }
 
         result
@@ -1143,6 +1145,18 @@ impl PcgSolver {
         monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, KError> {
+        let universe = (comm as &dyn Any)
+            .downcast_ref::<UniverseComm>()
+            .cloned()
+            .or_else(|| {
+                (comm as &dyn Any)
+                    .downcast_ref::<NoComm>()
+                    .map(|_| UniverseComm::NoComm(NoComm))
+            });
+        if let Some(universe) = universe {
+            return self.solve_impl(a, pc, b, x, pc_side, &universe, monitors, work);
+        }
+
         match self.variant {
             PcgVariant::Classic => self.solve_classic(a, pc, b, x, pc_side, comm, monitors, work),
             PcgVariant::Pipelined { .. } => {

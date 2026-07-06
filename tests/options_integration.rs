@@ -172,6 +172,128 @@ fn pcg_view_reports_cg_wrapper_diagnostics() {
 }
 
 #[test]
+fn deterministic_reduction_mode_disables_cg_async_overlap_diagnostics() {
+    let opts = KspOptions::from_args(&[
+        "-ksp_cg_variant",
+        "pipelined",
+        "-ksp_cg_use_async",
+        "true",
+        "-ksp_reduction",
+        "deterministic",
+    ])
+    .unwrap();
+
+    let mut ksp = KspContext::new();
+    ksp.set_from_options(&opts).unwrap();
+    ksp.set_type(SolverType::Cg).unwrap();
+    let view = ksp.view();
+
+    assert_eq!(
+        view.solver_config
+            .get("cg_async_enabled")
+            .and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_async_overlap_safe")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_async_effective")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+}
+
+#[cfg(feature = "backend-faer")]
+#[test]
+fn cg_view_reports_csr_operator_route() {
+    use std::sync::Arc;
+
+    use kryst::matrix::{CsrMatrix, CsrOp, LinOp};
+
+    let csr = CsrMatrix::from_csr(
+        3,
+        3,
+        vec![0, 2, 4, 5],
+        vec![0, 1, 0, 2, 2],
+        vec![4.0, 1.0, 1.0, 3.0, 2.0],
+    );
+    let op: Arc<dyn LinOp<S = f64>> = Arc::new(CsrOp::new(Arc::new(csr)));
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Cg).unwrap();
+    ksp.set_operators(op, None);
+
+    let view = ksp.view();
+    assert_eq!(
+        view.solver_config
+            .get("operator_format")
+            .and_then(|v| v.as_str()),
+        Some("Csr")
+    );
+    assert_eq!(
+        view.solver_config
+            .get("operator_route")
+            .and_then(|v| v.as_str()),
+        Some("csr")
+    );
+    assert_eq!(
+        view.solver_config
+            .get("operator_comm_size")
+            .and_then(|v| v.as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        view.solver_config
+            .get("operator_distributed_layout")
+            .and_then(|v| v.as_bool()),
+        Some(false)
+    );
+}
+
+#[cfg(feature = "backend-faer")]
+#[test]
+fn pcg_view_reports_generic_csr_operator_route() {
+    use std::sync::Arc;
+
+    use kryst::matrix::csr::CsrMatrix as ScalarCsrMatrix;
+    use kryst::matrix::spmv::plan::SpmvTuning;
+    use kryst::matrix::{GenericCsrOp, LinOp};
+
+    let csr = ScalarCsrMatrix::new(
+        3,
+        3,
+        vec![0, 2, 4, 5],
+        vec![0, 1, 0, 2, 2],
+        vec![4.0, 1.0, 1.0, 3.0, 2.0],
+    );
+    let op: Arc<dyn LinOp<S = f64>> =
+        Arc::new(GenericCsrOp::new(Arc::new(csr), &SpmvTuning::default()));
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Pcg).unwrap();
+    ksp.set_operators(op, None);
+
+    let view = ksp.view();
+    assert_eq!(
+        view.solver_config
+            .get("operator_format")
+            .and_then(|v| v.as_str()),
+        Some("Csr")
+    );
+    assert_eq!(
+        view.solver_config
+            .get("operator_route")
+            .and_then(|v| v.as_str()),
+        Some("generic-csr")
+    );
+}
+
+#[test]
 fn test_pc_options_from_args() {
     let args = vec!["-pc_type", "jacobi", "-pc_ilu_levels", "2"];
     let opts = PcOptions::from_args(&args).unwrap();

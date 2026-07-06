@@ -63,6 +63,7 @@ use crate::error::KError;
 #[cfg(all(not(feature = "complex"), feature = "mpi"))]
 use crate::matrix::DistCsrOp;
 use crate::matrix::backend::materialize;
+use crate::matrix::format::OpFormat;
 use crate::matrix::op::{LinOp, StructureId, ValuesId, wrap_with_comm};
 #[cfg(feature = "complex")]
 use crate::ops::klinop::KLinOp;
@@ -499,6 +500,66 @@ impl Default for KspContext {
 }
 
 impl KspContext {
+    fn linop_route_label(op: &dyn LinOp<S = S>) -> &'static str {
+        if op.as_any().is::<crate::matrix::DistCsrOp>() {
+            return "dist-csr";
+        }
+        if op.as_any().is::<crate::matrix::parcsr::ParCsrOp>() {
+            return "parcsr";
+        }
+        #[cfg(feature = "backend-faer")]
+        {
+            if op.as_any().is::<crate::matrix::op::GenericCsrOp<S>>() {
+                return "generic-csr";
+            }
+            if op.as_any().is::<crate::matrix::sparse::CsrMatrix<S>>() {
+                return "csr";
+            }
+        }
+        match op.format() {
+            OpFormat::Csr => "csr-compatible",
+            OpFormat::Dense => "dense",
+            OpFormat::Csc => "csc",
+            OpFormat::BlockCsr => "block-csr",
+            OpFormat::Any => "linop",
+        }
+    }
+
+    fn insert_operator_diagnostics(
+        solver_config: &mut BTreeMap<String, Value>,
+        prefix: &str,
+        op: &dyn LinOp<S = S>,
+    ) {
+        let (rows, cols) = op.dims();
+        insert_value(
+            solver_config,
+            &format!("{prefix}_format"),
+            format!("{:?}", op.format()),
+        );
+        insert_value(
+            solver_config,
+            &format!("{prefix}_route"),
+            Self::linop_route_label(op),
+        );
+        insert_value(solver_config, &format!("{prefix}_rows"), rows);
+        insert_value(solver_config, &format!("{prefix}_cols"), cols);
+        insert_value(
+            solver_config,
+            &format!("{prefix}_comm_size"),
+            op.comm().size(),
+        );
+        insert_value(
+            solver_config,
+            &format!("{prefix}_distributed_layout"),
+            op.dist_layout().is_some(),
+        );
+        insert_value(
+            solver_config,
+            &format!("{prefix}_halo_exchange"),
+            op.halo_exchange().is_some(),
+        );
+    }
+
     #[cfg(feature = "backend-faer")]
     fn distributed_setting_warnings(
         route_policy: DistRoutePolicy,
@@ -1771,11 +1832,23 @@ impl KspContext {
             "reduction_reproducible",
             self.reduction_opts.reproducible,
         );
+        if let Some(amat) = self.amat.as_ref() {
+            Self::insert_operator_diagnostics(&mut solver_config, "operator", amat.as_ref());
+        }
+        if let Some(pmat) = self.pmat.as_ref() {
+            Self::insert_operator_diagnostics(
+                &mut solver_config,
+                "preconditioner_operator",
+                pmat.as_ref(),
+            );
+        }
         match self.solver_type {
             Some(SolverType::Cg) => {
                 let variant = self.pending_cg.variant.unwrap_or(CgVariant::Classic);
                 let async_enabled = self.pending_cg.use_async.unwrap_or(true);
                 let async_min_n = self.pending_cg.async_min_n.unwrap_or(10_000);
+                let async_overlap_safe =
+                    matches!(self.reduction_opts.effective_mode(), ReproMode::Fast);
                 let bound_size = self
                     .bound_comm
                     .as_ref()
@@ -1783,6 +1856,7 @@ impl KspContext {
                     .unwrap_or(1);
                 let async_effective = matches!(variant, CgVariant::Pipelined)
                     && async_enabled
+                    && async_overlap_safe
                     && bound_size > 1
                     && self
                         .amat
@@ -1814,7 +1888,7 @@ impl KspContext {
                 insert_value(
                     &mut solver_config,
                     "cg_async_overlap_safe",
-                    !self.reproducible,
+                    async_overlap_safe,
                 );
                 if let Some(every) = self.pending_cg.replace_every {
                     insert_value(&mut solver_config, "cg_replace_every", every);
@@ -1824,6 +1898,8 @@ impl KspContext {
                 let pipelined = self.pending_pcg.pipelined.unwrap_or(false);
                 let async_enabled = self.pending_pcg.use_async.unwrap_or(true);
                 let async_min_n = self.pending_pcg.async_min_n.unwrap_or(10_000);
+                let async_overlap_safe =
+                    matches!(self.reduction_opts.effective_mode(), ReproMode::Fast);
                 let bound_size = self
                     .bound_comm
                     .as_ref()
@@ -1831,6 +1907,7 @@ impl KspContext {
                     .unwrap_or(1);
                 let async_effective = pipelined
                     && async_enabled
+                    && async_overlap_safe
                     && bound_size > 1
                     && self
                         .amat
@@ -1867,7 +1944,7 @@ impl KspContext {
                 insert_value(
                     &mut solver_config,
                     "cg_async_overlap_safe",
-                    !self.reproducible,
+                    async_overlap_safe,
                 );
                 if pipelined {
                     insert_value(

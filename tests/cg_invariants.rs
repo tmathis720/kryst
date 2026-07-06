@@ -5,6 +5,7 @@ mod support;
 
 use kryst::algebra::bridge::BridgeScratch;
 use kryst::algebra::prelude::*;
+use kryst::config::options::CgVariant;
 use kryst::context::ksp_context::Workspace;
 use kryst::error::KError;
 use kryst::ops::klinop::KLinOp;
@@ -296,6 +297,42 @@ fn cg_rejects_right_preconditioning_side() {
     }
 }
 
+#[test]
+fn cg_variants_reject_explicit_preconditioner_dimension_mismatch() {
+    for variant in [CgVariant::Classic, CgVariant::Pipelined] {
+        let diag = vec![S::from_real(2.0), S::from_real(3.0)];
+        let op = DiagonalOp { diag };
+        let b = vec![S::from_real(1.0), S::from_real(1.0)];
+        let mut x = vec![S::zero(); 2];
+        let comm = UniverseComm::NoComm(NoComm);
+        let mut solver = CgSolver::new(1e-8, 4).with_variant(variant);
+        let mut work = Workspace::new(2);
+        let pc = WrongDimPc;
+
+        let err = solver
+            .solve(
+                &op,
+                Some(&pc),
+                &b,
+                &mut x,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut work),
+            )
+            .unwrap_err();
+
+        match err {
+            KError::InvalidInput(msg) => {
+                let msg = msg.to_lowercase();
+                assert!(msg.contains("dimension mismatch"), "{msg}");
+                assert!(msg.contains("preconditioner"), "{msg}");
+            }
+            other => panic!("unexpected error for {variant:?}: {other:?}"),
+        }
+    }
+}
+
 struct NegatingPc {
     n: usize,
 }
@@ -303,6 +340,26 @@ struct NegatingPc {
 impl NegatingPc {
     fn new(n: usize) -> Self {
         Self { n }
+    }
+}
+
+struct WrongDimPc;
+
+impl KPreconditioner for WrongDimPc {
+    type Scalar = S;
+
+    fn dims(&self) -> (usize, usize) {
+        (1, 1)
+    }
+
+    fn apply_s(
+        &self,
+        _side: PcSide,
+        _x: &[S],
+        _y: &mut [S],
+        _scratch: &mut BridgeScratch,
+    ) -> Result<(), KError> {
+        panic!("dimension validation should reject before PC application");
     }
 }
 

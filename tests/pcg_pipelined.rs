@@ -11,7 +11,7 @@ use kryst::preconditioner::Preconditioner;
 use kryst::preconditioner::jacobi::Jacobi;
 use kryst::solver::LinearSolver;
 use kryst::solver::pcg::{PcgSolver, PcgVariant};
-use kryst::utils::reduction::{install_test_counter, test_hooks};
+use kryst::utils::reduction::{install_test_counter, take_test_counter};
 
 fn build_dense_poisson(n: usize) -> Mat<R> {
     let mut a = Mat::<R>::zeros(n, n);
@@ -25,6 +25,58 @@ fn build_dense_poisson(n: usize) -> Mat<R> {
         }
     }
     a
+}
+
+struct NegatingPc {
+    n: usize,
+}
+
+impl NegatingPc {
+    fn new(n: usize) -> Self {
+        Self { n }
+    }
+}
+
+impl Preconditioner for NegatingPc {
+    fn dims(&self) -> (usize, usize) {
+        (self.n, self.n)
+    }
+
+    fn setup(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        Ok(())
+    }
+
+    fn apply(&self, _side: PcSide, x: &[S], y: &mut [S]) -> Result<(), KError> {
+        assert_eq!(x.len(), self.n);
+        assert_eq!(y.len(), self.n);
+        for (yi, &xi) in y.iter_mut().zip(x.iter()) {
+            *yi = -xi;
+        }
+        Ok(())
+    }
+}
+
+struct WrongDimPc;
+
+impl Preconditioner for WrongDimPc {
+    fn dims(&self) -> (usize, usize) {
+        (1, 1)
+    }
+
+    fn setup(&mut self, _a: &dyn LinOp<S = S>) -> Result<(), KError> {
+        Ok(())
+    }
+
+    fn apply(&self, _side: PcSide, _x: &[S], _y: &mut [S]) -> Result<(), KError> {
+        panic!("dimension validation should reject before PC application");
+    }
+}
+
+fn pcg_variants() -> [PcgVariant; 2] {
+    [
+        PcgVariant::Classic,
+        PcgVariant::Pipelined { replace_every: 0 },
+    ]
 }
 
 #[test]
@@ -88,6 +140,139 @@ fn pipelined_matches_classic_solution() {
 }
 
 #[test]
+fn pcg_variants_reject_non_left_preconditioning_side() {
+    let a = build_dense_poisson(2);
+    let b: Vec<R> = vec![R::from(1.0); 2];
+    let comm = UniverseComm::NoComm(NoComm);
+
+    for variant in pcg_variants() {
+        for side in [PcSide::Right, PcSide::Symmetric] {
+            let mut solver = PcgSolver::new(1e-8, 4).with_variant(variant);
+            let mut wk = Workspace::default();
+            solver.setup_workspace(&mut wk);
+            let mut x: Vec<R> = vec![R::default(); 2];
+
+            let err = solver
+                .solve_with_comm(&a, None, &b, &mut x, side, &comm, None, Some(&mut wk))
+                .expect_err("PCG must reject non-left preconditioning");
+
+            match err {
+                KError::InvalidInput(msg) => {
+                    let msg = msg.to_lowercase();
+                    assert!(msg.contains("left"), "{msg}");
+                    assert!(msg.contains("pcg"), "{msg}");
+                }
+                other => panic!("unexpected error for {variant:?}/{side:?}: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn pcg_variants_reject_explicit_preconditioner_dimension_mismatch() {
+    let a = build_dense_poisson(2);
+    let b: Vec<R> = vec![R::from(1.0); 2];
+    let comm = UniverseComm::NoComm(NoComm);
+
+    for variant in pcg_variants() {
+        let mut solver = PcgSolver::new(1e-8, 4).with_variant(variant);
+        let mut pc = WrongDimPc;
+        let mut wk = Workspace::default();
+        solver.setup_workspace(&mut wk);
+        let mut x: Vec<R> = vec![R::default(); 2];
+
+        let err = solver
+            .solve_with_comm(
+                &a,
+                Some(&mut pc),
+                &b,
+                &mut x,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut wk),
+            )
+            .expect_err("PCG must reject mismatched preconditioner dimensions");
+
+        match err {
+            KError::InvalidInput(msg) => {
+                let msg = msg.to_lowercase();
+                assert!(msg.contains("dimension mismatch"), "{msg}");
+                assert!(msg.contains("preconditioner"), "{msg}");
+            }
+            other => panic!("unexpected error for {variant:?}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn pcg_variants_detect_indefinite_preconditioner() {
+    let a = build_dense_poisson(2);
+    let b: Vec<R> = vec![R::from(1.0); 2];
+    let comm = UniverseComm::NoComm(NoComm);
+
+    for variant in pcg_variants() {
+        let mut solver = PcgSolver::new(1e-8, 4).with_variant(variant);
+        let mut pc = NegatingPc::new(2);
+        let mut wk = Workspace::default();
+        solver.setup_workspace(&mut wk);
+        let mut x: Vec<R> = vec![R::default(); 2];
+
+        let err = solver
+            .solve_with_comm(
+                &a,
+                Some(&mut pc),
+                &b,
+                &mut x,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut wk),
+            )
+            .expect_err("PCG must reject indefinite preconditioner");
+
+        assert!(
+            matches!(err, KError::IndefinitePreconditioner),
+            "unexpected error for {variant:?}: {err:?}"
+        );
+    }
+}
+
+#[test]
+fn pcg_variants_detect_indefinite_matrix() {
+    let mut a = Mat::<R>::zeros(2, 2);
+    a[(0, 0)] = R::default();
+    a[(1, 1)] = R::from(1.0);
+    let b: Vec<R> = vec![R::from(1.0), R::default()];
+    let comm = UniverseComm::NoComm(NoComm);
+
+    for variant in pcg_variants() {
+        let mut solver = PcgSolver::new(1e-8, 4).with_variant(variant);
+        let mut wk = Workspace::default();
+        solver.setup_workspace(&mut wk);
+        let mut x: Vec<R> = vec![R::default(); 2];
+
+        let err = solver
+            .solve_with_comm(
+                &a,
+                None,
+                &b,
+                &mut x,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut wk),
+            )
+            .expect_err("PCG must reject indefinite matrix");
+
+        assert!(
+            matches!(err, KError::IndefiniteMatrix),
+            "unexpected error for {variant:?}: {err:?}"
+        );
+    }
+}
+
+#[test]
 fn pipelined_reports_reduction_counts() -> Result<(), KError> {
     let n = 32;
     let a = csr_poisson_1d(n);
@@ -123,26 +308,28 @@ fn pipelined_reports_reduction_counts() -> Result<(), KError> {
         )
         .expect("pipelined PCG converged");
 
-    let (pair_count, vec_count) = test_hooks::wait_counters();
+    let counters = take_test_counter();
     install_test_counter(false);
 
-    assert_eq!(vec_count, 0);
-
-    // At least two asynchronous reductions per iteration plus the initial setup
-    // reductions should be observed.
-    let expected_async = stats.iterations * 2;
+    let expected = stats.iterations + 1; // fused startup tuple plus one fused tuple per iteration
 
     assert!(
-        pair_count >= expected_async,
-        "pair_count {} smaller than expected {}",
-        pair_count,
-        expected_async
+        counters.allreduces >= expected,
+        "allreduces {} smaller than expected {}",
+        counters.allreduces,
+        expected
     );
     assert!(
-        stats.counters.num_global_reductions >= pair_count,
-        "reported {} reductions, less than observed {} async waits",
+        counters.allreduces <= expected + 6,
+        "allreduces {} larger than expected upper bound {}",
+        counters.allreduces,
+        expected + 6
+    );
+    assert!(
+        stats.counters.num_global_reductions >= counters.allreduces,
+        "reported {} reductions, less than observed {} allreduces",
         stats.counters.num_global_reductions,
-        pair_count
+        counters.allreduces
     );
     assert!(
         stats.counters.num_global_reductions > 0,
@@ -161,6 +348,41 @@ fn pcg_async_configuration_is_forwarded_to_canonical_cg() {
     solver.set_async_min_n(123);
     assert!(!solver.async_enabled());
     assert_eq!(solver.async_min_n(), 123);
+}
+
+#[test]
+fn pcg_wrapper_restores_workspace_reduction_engine() {
+    let n = 16;
+    let a = csr_poisson_1d(n);
+    let b: Vec<R> = vec![R::from(1.0); n];
+    let mut x: Vec<R> = vec![R::default(); n];
+    let comm = UniverseComm::NoComm(NoComm);
+    let op: &dyn LinOp<S = f64> = &a;
+
+    let mut solver =
+        PcgSolver::new(1e-12, 100).with_variant(PcgVariant::Pipelined { replace_every: 0 });
+    let mut wk = Workspace::default();
+    solver.setup_workspace(&mut wk);
+    assert!(wk.reduction_engine().is_none());
+
+    let stats = solver
+        .solve_with_comm(
+            op,
+            None,
+            &b,
+            &mut x,
+            PcSide::Left,
+            &comm,
+            None,
+            Some(&mut wk),
+        )
+        .expect("PCG solve");
+    assert!(stats.reason.is_converged());
+
+    assert!(
+        wk.reduction_engine().is_none(),
+        "PCG wrapper should restore an initially absent reduction engine"
+    );
 }
 
 #[test]
@@ -196,7 +418,7 @@ fn pipelined_reductions_scale_with_iteration_count() -> Result<(), KError> {
     assert!(long.iterations > short.iterations);
     assert!(long.counters.num_global_reductions > short.counters.num_global_reductions);
 
-    // Pipelined PCG executes ~2 iterative reductions/iteration plus startup overhead.
+    // Pipelined PCG executes one fused iterative reduction per iteration plus startup overhead.
     let delta_iter = long.iterations - short.iterations;
     let delta_red = long
         .counters

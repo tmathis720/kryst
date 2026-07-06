@@ -18,7 +18,8 @@
 use crate::algebra::blas::{dot_conj, nrm2};
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::parallel::{
-    dot_conj_local_with_mode, par_axpby, par_axpy, par_axpy2, par_copy, sum_abs2_local_with_mode,
+    dot_conj_local_with_mode, par_axpby, par_axpy2, par_cg_recurrence2, par_copy,
+    par_residual_from_matvec, sum_abs2_local_with_mode,
 };
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
@@ -32,6 +33,7 @@ use crate::ops::wrap::{as_s_op, as_s_pc};
 use crate::parallel::Comm;
 use crate::parallel::{ReduceHandle, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner, Preconditioner as PreconditionerF64};
+use crate::reduction::ReproMode;
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
 use crate::solver::common::{ReductCtx, dot_result_to_real};
@@ -422,8 +424,16 @@ impl CgSolver {
     }
 
     #[inline]
-    fn should_use_async(&self, comm: &UniverseComm, n: usize) -> bool {
-        self.async_enabled && comm.size() > 1 && n >= self.async_min_n
+    fn async_reduction_mode_allows_overlap(mode: ReproMode) -> bool {
+        matches!(mode, ReproMode::Fast)
+    }
+
+    #[inline]
+    fn should_use_async(&self, comm: &UniverseComm, n: usize, mode: ReproMode) -> bool {
+        self.async_enabled
+            && Self::async_reduction_mode_allows_overlap(mode)
+            && comm.size() > 1
+            && n >= self.async_min_n
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -492,6 +502,15 @@ impl CgSolver {
         if nrows != ncols || b.len() != nrows || x.len() != ncols {
             return Err(KError::InvalidInput("dimension mismatch x,b".into()));
         }
+        if let Some(pc) = pc {
+            let pc_dims = pc.dims();
+            if pc_dims != (0, 0) && pc_dims != (nrows, nrows) {
+                return Err(KError::InvalidInput(format!(
+                    "CG/PCG preconditioner dimension mismatch: A={}x{}, PC={:?}",
+                    nrows, ncols, pc_dims
+                )));
+            }
+        }
 
         let work = work.ok_or_else(|| {
             KError::InvalidInput("CG requires a Workspace; use KSP or Workspace::new(n)".into())
@@ -524,9 +543,7 @@ impl CgSolver {
         let guess_nonzero = self.initial_guess_nonzero || has_nontrivial_guess(x);
         if guess_nonzero {
             a.matvec_s(x, &mut tmp[..], scratch);
-            for i in 0..nrows {
-                r[i] = b[i] - tmp[i];
-            }
+            par_residual_from_matvec(b, tmp, r);
         } else {
             par_copy(b, r);
         }
@@ -633,7 +650,7 @@ impl CgSolver {
 
             a.matvec_s(p, &mut ap[..], scratch);
 
-            let async_ok = self.should_use_async(comm, nrows);
+            let async_ok = self.should_use_async(comm, nrows, red_mode);
             let need_pnorm = self.trust_region.is_some();
             let local_pap = dot_conj_local_with_mode(p, ap, red_mode);
             let local_pnorm_sq = if need_pnorm {
@@ -911,9 +928,7 @@ impl CgSolver {
         let guess_nonzero = self.initial_guess_nonzero || has_nontrivial_guess(x);
         if guess_nonzero {
             a.matvec_s(x, &mut tmp[..], scratch);
-            for i in 0..nrows {
-                r[i] = b[i] - tmp[i];
-            }
+            par_residual_from_matvec(b, tmp, r);
         } else {
             par_copy(b, r);
         }
@@ -1085,7 +1100,7 @@ impl CgSolver {
                 None
             };
 
-            let async_ok = self.should_use_async(comm, nrows);
+            let async_ok = self.should_use_async(comm, nrows, red_mode);
             #[cfg(feature = "complex")]
             let mut payload = Vec::with_capacity(tuple.len() * 2);
             #[cfg(not(feature = "complex"))]
@@ -1157,9 +1172,7 @@ impl CgSolver {
             let refresh_due = refresh_every.is_some_and(|every| k % every == 0);
             let (mut rho_new, mut delta_new, _rsq_new, _znorm_new, _refreshed) = if refresh_due {
                 a.matvec_s(x, tmp, scratch);
-                for i in 0..nrows {
-                    r[i] = b[i] - tmp[i];
-                }
+                par_residual_from_matvec(b, tmp, r);
                 if let Some(pc) = pc {
                     pc.apply_s(PcSide::Left, r, &mut u[..], scratch)?;
                 } else {
@@ -1205,10 +1218,7 @@ impl CgSolver {
             // preserve conjugacy information across refresh points.
             let beta = rho_new / rho;
             let beta_s: S = S::from_real(beta);
-            par_axpy(p, beta_s, u);
-            par_copy(u, p);
-            par_axpy(s, beta_s, w);
-            par_copy(w, s);
+            par_cg_recurrence2(u, w, beta_s, p, s);
 
             debug::emit_iter(debug::IterEvent {
                 iteration: k,
@@ -1243,9 +1253,7 @@ impl CgSolver {
                 let tol = self.conv.atol.max(self.conv.rtol * res0_reported);
                 if s_out.final_residual > tol && k < self.conv.max_iters {
                     a.matvec_s(x, tmp, scratch);
-                    for i in 0..nrows {
-                        r[i] = b[i] - tmp[i];
-                    }
+                    par_residual_from_matvec(b, tmp, r);
                     if let Some(pc) = pc {
                         pc.apply_s(PcSide::Left, r, &mut u[..], scratch)?;
                     } else {
@@ -1397,5 +1405,23 @@ impl LinearSolver for CgSolver {
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
         self.solve_f64(a, pc.as_deref(), b, x, pc_side, comm, monitors, work)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn async_overlap_requires_fast_reduction_mode() {
+        assert!(CgSolver::async_reduction_mode_allows_overlap(
+            ReproMode::Fast
+        ));
+        assert!(!CgSolver::async_reduction_mode_allows_overlap(
+            ReproMode::Deterministic
+        ));
+        assert!(!CgSolver::async_reduction_mode_allows_overlap(
+            ReproMode::DeterministicAccurate
+        ));
     }
 }
