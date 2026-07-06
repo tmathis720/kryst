@@ -2,7 +2,7 @@
 
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
-use crate::error::KError;
+use crate::error::{KError, NonFiniteKind};
 
 /// Stable reason categories for automation/diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,6 +344,10 @@ pub fn map_kerror_to_reason(err: &KError, stage: FailureStage) -> Option<Converg
     match stage {
         FailureStage::Setup => match err {
             KError::NestedPcFailed(failure) => Some(failure.reason),
+            KError::NonFiniteReduction { kind, .. } => Some(match kind {
+                NonFiniteKind::Nan => ConvergedReason::from_failure_kind(FailureReasonKind::Nan),
+                NonFiniteKind::Inf => ConvergedReason::from_failure_kind(FailureReasonKind::Inf),
+            }),
             KError::PcFailed(_) | KError::FactorError(_) | KError::ZeroPivot(_) => Some(
                 ConvergedReason::from_failure_kind(FailureReasonKind::PcSetup),
             ),
@@ -360,6 +364,10 @@ pub fn map_kerror_to_reason(err: &KError, stage: FailureStage) -> Option<Converg
         },
         FailureStage::Solve => match err {
             KError::NestedPcFailed(failure) => Some(failure.reason),
+            KError::NonFiniteReduction { kind, .. } => Some(match kind {
+                NonFiniteKind::Nan => ConvergedReason::from_failure_kind(FailureReasonKind::Nan),
+                NonFiniteKind::Inf => ConvergedReason::from_failure_kind(FailureReasonKind::Inf),
+            }),
             KError::PcFailed(_) | KError::FactorError(_) | KError::ZeroPivot(_) => Some(
                 ConvergedReason::from_failure_kind(FailureReasonKind::PcApply),
             ),

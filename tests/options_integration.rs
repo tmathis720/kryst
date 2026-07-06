@@ -172,6 +172,40 @@ fn pcg_view_reports_cg_wrapper_diagnostics() {
 }
 
 #[test]
+fn cg_replace_every_zero_disables_refresh_diagnostic() {
+    let opts =
+        KspOptions::from_args(&["-ksp_cg_variant", "pipelined", "-ksp_cg_replace_every", "0"])
+            .unwrap();
+    assert_eq!(opts.cg_replace_every, Some(0));
+
+    let mut cg = KspContext::new();
+    cg.set_from_options(&opts).unwrap();
+    cg.set_type(SolverType::Cg).unwrap();
+    let cg_view = cg.view();
+    assert_eq!(
+        cg_view
+            .solver_config
+            .get("cg_variant")
+            .and_then(|v| v.as_str()),
+        Some("Pipelined")
+    );
+    assert!(cg_view.solver_config.get("cg_replace_every").is_none());
+
+    let mut pcg = KspContext::new();
+    pcg.set_from_options(&opts).unwrap();
+    pcg.set_type(SolverType::Pcg).unwrap();
+    let pcg_view = pcg.view();
+    assert_eq!(
+        pcg_view
+            .solver_config
+            .get("cg_variant")
+            .and_then(|v| v.as_str()),
+        Some("Pipelined")
+    );
+    assert!(pcg_view.solver_config.get("cg_replace_every").is_none());
+}
+
+#[test]
 fn deterministic_reduction_mode_disables_cg_async_overlap_diagnostics() {
     let opts = KspOptions::from_args(&[
         "-ksp_cg_variant",

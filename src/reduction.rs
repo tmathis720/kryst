@@ -344,6 +344,8 @@ where
     }
 }
 
+#[cfg(feature = "rayon")]
+use crate::parallel::RayonComm;
 use crate::parallel::{NoComm, UniverseComm};
 
 impl CommDeterministic for UniverseComm {
@@ -353,6 +355,13 @@ impl CommDeterministic for UniverseComm {
 }
 
 impl CommDeterministic for NoComm {
+    fn allreduce_det<const N: usize>(&self, local: &Packet<N>, _mode: ReproMode) -> Packet<N> {
+        local.clone()
+    }
+}
+
+#[cfg(feature = "rayon")]
+impl CommDeterministic for RayonComm {
     fn allreduce_det<const N: usize>(&self, local: &Packet<N>, _mode: ReproMode) -> Packet<N> {
         local.clone()
     }

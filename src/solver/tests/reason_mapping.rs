@@ -1,6 +1,6 @@
 #![cfg(not(feature = "complex"))]
 
-use crate::error::KError;
+use crate::error::{KError, NonFiniteKind};
 use crate::utils::convergence::{
     ConvergedReason, FailureReasonKind, FailureStage, NestedPcFailure, ReasonEmitter,
     map_kerror_to_reason,
@@ -76,6 +76,26 @@ fn kerror_stage_mapping_is_consistent_across_pc_setup_apply_and_indefiniteness()
     assert_eq!(
         map_kerror_to_reason(&KError::BreakdownOrIndefinite, FailureStage::Solve),
         Some(ConvergedReason::DivergedBreakdown)
+    );
+    assert_eq!(
+        map_kerror_to_reason(
+            &KError::NonFiniteReduction {
+                kind: NonFiniteKind::Nan,
+                context: "cg rho"
+            },
+            FailureStage::Solve
+        ),
+        Some(ConvergedReason::DivergedNan)
+    );
+    assert_eq!(
+        map_kerror_to_reason(
+            &KError::NonFiniteReduction {
+                kind: NonFiniteKind::Inf,
+                context: "cg p_ap"
+            },
+            FailureStage::Solve
+        ),
+        Some(ConvergedReason::DivergedInf)
     );
 }
 

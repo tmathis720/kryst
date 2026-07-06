@@ -7,7 +7,7 @@ use kryst::algebra::bridge::BridgeScratch;
 use kryst::algebra::prelude::*;
 use kryst::config::options::CgVariant;
 use kryst::context::ksp_context::Workspace;
-use kryst::error::KError;
+use kryst::error::{KError, NonFiniteKind};
 use kryst::ops::klinop::KLinOp;
 use kryst::ops::kpc::KPreconditioner;
 use kryst::parallel::{NoComm, UniverseComm};
@@ -327,6 +327,40 @@ fn cg_variants_reject_explicit_preconditioner_dimension_mismatch() {
                 let msg = msg.to_lowercase();
                 assert!(msg.contains("dimension mismatch"), "{msg}");
                 assert!(msg.contains("preconditioner"), "{msg}");
+            }
+            other => panic!("unexpected error for {variant:?}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn cg_variants_report_non_finite_reductions_separately() {
+    for variant in [CgVariant::Classic, CgVariant::Pipelined] {
+        let diag = vec![S::from_real(f64::NAN), S::from_real(1.0)];
+        let op = DiagonalOp { diag };
+        let b = vec![S::from_real(1.0), S::zero()];
+        let mut x = vec![S::zero(); 2];
+        let comm = UniverseComm::NoComm(NoComm);
+        let mut solver = CgSolver::new(1e-8, 4).with_variant(variant);
+        let mut work = Workspace::new(2);
+
+        let err = solver
+            .solve(
+                &op,
+                None,
+                &b,
+                &mut x,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut work),
+            )
+            .unwrap_err();
+
+        match err {
+            KError::NonFiniteReduction { kind, context } => {
+                assert_eq!(kind, NonFiniteKind::Nan);
+                assert!(context.contains("cg"), "{context}");
             }
             other => panic!("unexpected error for {variant:?}: {other:?}"),
         }

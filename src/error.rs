@@ -4,6 +4,12 @@ use crate::utils::convergence::NestedPcFailure;
 
 // Unified error type for kryst
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonFiniteKind {
+    Nan,
+    Inf,
+}
+
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum KError {
     #[error("help requested")]
@@ -20,6 +26,11 @@ pub enum KError {
     IndefiniteMatrix,
     #[error("indefinite preconditioner detected (beta < 0)")]
     IndefinitePreconditioner,
+    #[error("non-finite reduction in {context}: {kind:?}")]
+    NonFiniteReduction {
+        kind: NonFiniteKind,
+        context: &'static str,
+    },
     #[error("zero pivot at row {0}")]
     ZeroPivot(usize),
     #[error("invalid input: {0}")]
@@ -77,6 +88,17 @@ mod tests {
         assert_eq!(
             format!("{}", KError::IndefinitePreconditioner),
             "indefinite preconditioner detected (beta < 0)"
+        );
+
+        assert_eq!(
+            format!(
+                "{}",
+                KError::NonFiniteReduction {
+                    kind: NonFiniteKind::Nan,
+                    context: "cg p_ap"
+                }
+            ),
+            "non-finite reduction in cg p_ap: Nan"
         );
 
         assert_eq!(
@@ -155,6 +177,10 @@ mod tests {
         let _e4 = KError::SolveError("test".to_string());
         let _e5 = KError::IndefiniteMatrix;
         let _e6 = KError::IndefinitePreconditioner;
+        let _e6b = KError::NonFiniteReduction {
+            kind: NonFiniteKind::Inf,
+            context: "test",
+        };
         let _e7 = KError::ZeroPivot(0);
         let _e8 = KError::PcFailed("test".to_string());
         let _e9 = KError::Unsupported("test");

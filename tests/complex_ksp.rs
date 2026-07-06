@@ -3,10 +3,13 @@
 use approx::assert_abs_diff_eq;
 use kryst::KspContext;
 use kryst::algebra::prelude::*;
+use kryst::config::options::{CgVariant, KspOptions};
 use kryst::context::ksp_context::SolverType;
 use kryst::context::pc_context::PcType;
-use kryst::matrix::op::CsrOp;
+use kryst::matrix::csr::CsrMatrix as ScalarCsrMatrix;
+use kryst::matrix::op::{CsrOp, GenericCsrOp, LinOp};
 use kryst::matrix::sparse::CsrMatrix;
+use kryst::matrix::spmv::plan::SpmvTuning;
 use kryst::utils::convergence::ConvergedReason;
 use std::sync::Arc;
 
@@ -147,7 +150,129 @@ fn ksp_pcg_hermitian_pd_complex_converges_to_known_solution() {
     }
 }
 
-use kryst::config::options::KspOptions;
+#[test]
+fn ksp_pipelined_pcg_complex_options_converge_to_known_solution() {
+    let row_ptr = vec![0, 2, 4];
+    let col_idx = vec![0, 1, 0, 1];
+    let values = vec![
+        S::from_real(4.0),
+        S::from_parts(1.0, 0.5),
+        S::from_parts(1.0, -0.5),
+        S::from_real(3.0),
+    ];
+    let csr = CsrMatrix::from_csr(2, 2, row_ptr, col_idx, values);
+    let op = Arc::new(CsrOp::new(Arc::new(csr.clone())));
+
+    let x_true = vec![S::from_parts(0.5, -0.25), S::from_parts(-1.0, 0.75)];
+    let b = apply_csr(&csr, &x_true);
+
+    let mut ksp = KspContext::new();
+    ksp.set_from_options(&KspOptions {
+        ksp_type: Some("pcg".into()),
+        cg_variant: Some(CgVariant::Pipelined),
+        cg_replace_every: Some(2),
+        ..Default::default()
+    })
+    .unwrap();
+    ksp.set_pc_type(PcType::None, None).unwrap();
+    ksp.set_tolerances(1e-12, 1e-14, 1e8, 20);
+    ksp.set_operators(op, None);
+
+    let view = ksp.view();
+    assert_eq!(
+        view.solver_config
+            .get("cg_variant")
+            .and_then(|v| v.as_str()),
+        Some("Pipelined")
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_replace_every")
+            .and_then(|v| v.as_u64()),
+        Some(2)
+    );
+
+    let mut x = vec![S::zero(); 2];
+    let stats = ksp.solve(&b, &mut x).expect("pipelined PCG solve");
+    assert!(
+        stats.reason.is_converged(),
+        "unexpected pipelined PCG reason: {:?}, residual={:e}",
+        stats.reason,
+        stats.final_residual
+    );
+
+    for (xi, xt) in x.iter().zip(x_true.iter()) {
+        assert_abs_diff_eq!(xi.real(), xt.real(), epsilon = 1e-9);
+        assert_abs_diff_eq!(xi.imag(), xt.imag(), epsilon = 1e-9);
+    }
+}
+
+#[test]
+fn ksp_pipelined_pcg_complex_generic_csr_route_converges() {
+    let rowptr = vec![0, 2, 4];
+    let colind = vec![0, 1, 0, 1];
+    let values = vec![
+        S::from_real(4.0),
+        S::from_parts(1.0, 0.5),
+        S::from_parts(1.0, -0.5),
+        S::from_real(3.0),
+    ];
+    let csr = ScalarCsrMatrix::new(2, 2, rowptr, colind, values);
+    let op: Arc<dyn LinOp<S = S>> =
+        Arc::new(GenericCsrOp::new(Arc::new(csr), &SpmvTuning::default()));
+
+    let x_true = vec![S::from_parts(0.5, -0.25), S::from_parts(-1.0, 0.75)];
+    let mut b = vec![S::zero(); 2];
+    op.matvec(&x_true, &mut b);
+
+    let mut ksp = KspContext::new();
+    ksp.set_from_options(&KspOptions {
+        ksp_type: Some("pcg".into()),
+        cg_variant: Some(CgVariant::Pipelined),
+        cg_replace_every: Some(2),
+        ..Default::default()
+    })
+    .unwrap();
+    ksp.set_pc_type(PcType::None, None).unwrap();
+    ksp.set_tolerances(1e-12, 1e-14, 1e8, 20);
+    ksp.set_operators(op, None);
+
+    let view = ksp.view();
+    assert_eq!(
+        view.solver_config
+            .get("operator_format")
+            .and_then(|v| v.as_str()),
+        Some("Csr")
+    );
+    assert_eq!(
+        view.solver_config
+            .get("operator_route")
+            .and_then(|v| v.as_str()),
+        Some("generic-csr")
+    );
+    assert_eq!(
+        view.solver_config
+            .get("cg_variant")
+            .and_then(|v| v.as_str()),
+        Some("Pipelined")
+    );
+
+    let mut x = vec![S::zero(); 2];
+    let stats = ksp
+        .solve(&b, &mut x)
+        .expect("pipelined PCG generic CSR solve");
+    assert!(
+        stats.reason.is_converged(),
+        "unexpected generic CSR pipelined PCG reason: {:?}, residual={:e}",
+        stats.reason,
+        stats.final_residual
+    );
+
+    for (xi, xt) in x.iter().zip(x_true.iter()) {
+        assert_abs_diff_eq!(xi.real(), xt.real(), epsilon = 1e-9);
+        assert_abs_diff_eq!(xi.imag(), xt.imag(), epsilon = 1e-9);
+    }
+}
 
 fn hermitian_2x2() -> CsrMatrix<S> {
     CsrMatrix::from_csr(

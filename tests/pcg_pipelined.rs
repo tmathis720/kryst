@@ -5,13 +5,17 @@ use kryst::algebra::prelude::*;
 use kryst::context::ksp_context::Workspace;
 use kryst::error::KError;
 use kryst::matrix::op::LinOp;
-use kryst::parallel::{NoComm, UniverseComm};
+#[cfg(feature = "rayon")]
+use kryst::parallel::RayonComm;
+use kryst::parallel::{Comm, NoComm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::preconditioner::Preconditioner;
 use kryst::preconditioner::jacobi::Jacobi;
-use kryst::solver::LinearSolver;
 use kryst::solver::pcg::{PcgSolver, PcgVariant};
+use kryst::solver::{LinearSolver, MonitorAction};
 use kryst::utils::reduction::{install_test_counter, take_test_counter};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn build_dense_poisson(n: usize) -> Mat<R> {
     let mut a = Mat::<R>::zeros(n, n);
@@ -272,6 +276,155 @@ fn pcg_variants_detect_indefinite_matrix() {
     }
 }
 
+#[cfg(feature = "rayon")]
+#[test]
+fn pcg_direct_rayon_comm_routes_through_canonical_cg() {
+    let mut a = Mat::<R>::zeros(2, 2);
+    a[(0, 0)] = R::NAN;
+    a[(1, 1)] = R::from(1.0);
+    let b: Vec<R> = vec![R::from(1.0), R::default()];
+    let comm = RayonComm::new();
+
+    for variant in pcg_variants() {
+        let mut solver = PcgSolver::new(1e-8, 4).with_variant(variant);
+        let mut wk = Workspace::default();
+        solver.setup_workspace(&mut wk);
+        let mut x: Vec<R> = vec![R::default(); 2];
+
+        let err = solver
+            .solve_with_comm(
+                &a,
+                None,
+                &b,
+                &mut x,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut wk),
+            )
+            .expect_err("direct RayonComm PCG should use canonical CG error handling");
+
+        match err {
+            KError::NonFiniteReduction { context, .. } => {
+                assert!(context.contains("cg"), "{context}");
+            }
+            other => panic!("unexpected error for {variant:?}: {other:?}"),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SplitOnlyComm {
+    split_calls: Arc<AtomicUsize>,
+}
+
+impl Comm for SplitOnlyComm {
+    type Vec = Vec<R>;
+    type Request<'a> = ();
+
+    fn rank(&self) -> usize {
+        0
+    }
+
+    fn size(&self) -> usize {
+        1
+    }
+
+    fn barrier(&self) {}
+
+    #[cfg(feature = "mpi")]
+    fn scatter<T: Clone + mpi::datatype::Equivalence>(
+        &self,
+        global: &[T],
+        out: &mut [T],
+        _root: usize,
+    ) {
+        out.clone_from_slice(&global[..out.len()]);
+    }
+
+    #[cfg(not(feature = "mpi"))]
+    fn scatter<T: Clone>(&self, global: &[T], out: &mut [T], _root: usize) {
+        out.clone_from_slice(&global[..out.len()]);
+    }
+
+    #[cfg(feature = "mpi")]
+    fn gather<T: Clone + mpi::datatype::Equivalence>(
+        &self,
+        local: &[T],
+        out: &mut Vec<T>,
+        _root: usize,
+    ) {
+        out.clear();
+        out.extend_from_slice(local);
+    }
+
+    #[cfg(not(feature = "mpi"))]
+    fn gather<T: Clone>(&self, local: &[T], out: &mut Vec<T>, _root: usize) {
+        out.clear();
+        out.extend_from_slice(local);
+    }
+
+    fn all_reduce_f64(&self, local: f64) -> f64 {
+        local
+    }
+
+    fn split(&self, _color: i32, _key: i32) -> UniverseComm {
+        self.split_calls.fetch_add(1, Ordering::Relaxed);
+        UniverseComm::NoComm(NoComm)
+    }
+
+    fn irecv_from<'a>(&'a self, _buf: &'a mut [f64], _src: i32) -> Self::Request<'a> {}
+
+    fn isend_to<'a>(&'a self, _buf: &'a [f64], _dest: i32) -> Self::Request<'a> {}
+
+    fn irecv_from_u64<'a>(&'a self, _buf: &'a mut [u64], _src: i32) -> Self::Request<'a> {}
+
+    fn isend_to_u64<'a>(&'a self, _buf: &'a [u64], _dest: i32) -> Self::Request<'a> {}
+
+    fn wait_all<'a>(&self, _reqs: &mut [Self::Request<'a>]) {}
+}
+
+#[test]
+fn pcg_generic_comm_split_routes_through_canonical_cg() {
+    let mut a = Mat::<R>::zeros(2, 2);
+    a[(0, 0)] = R::NAN;
+    a[(1, 1)] = R::from(1.0);
+    let b: Vec<R> = vec![R::from(1.0), R::default()];
+    let split_calls = Arc::new(AtomicUsize::new(0));
+    let comm = SplitOnlyComm {
+        split_calls: split_calls.clone(),
+    };
+
+    for variant in pcg_variants() {
+        let mut solver = PcgSolver::new(1e-8, 4).with_variant(variant);
+        let mut wk = Workspace::default();
+        solver.setup_workspace(&mut wk);
+        let mut x: Vec<R> = vec![R::default(); 2];
+
+        let err = solver
+            .solve_with_comm(
+                &a,
+                None,
+                &b,
+                &mut x,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut wk),
+            )
+            .expect_err("generic Comm PCG should use canonical CG after split");
+
+        match err {
+            KError::NonFiniteReduction { context, .. } => {
+                assert!(context.contains("cg"), "{context}");
+            }
+            other => panic!("unexpected error for {variant:?}: {other:?}"),
+        }
+    }
+
+    assert_eq!(split_calls.load(Ordering::Relaxed), pcg_variants().len());
+}
+
 #[test]
 fn pipelined_reports_reduction_counts() -> Result<(), KError> {
     let n = 32;
@@ -382,6 +535,49 @@ fn pcg_wrapper_restores_workspace_reduction_engine() {
     assert!(
         wk.reduction_engine().is_none(),
         "PCG wrapper should restore an initially absent reduction engine"
+    );
+}
+
+#[test]
+fn pcg_true_residual_monitor_is_forwarded_to_canonical_cg_and_restored() {
+    let n = 16;
+    let a = csr_poisson_1d(n);
+    let b: Vec<R> = vec![R::from(1.0); n];
+    let comm = UniverseComm::NoComm(NoComm);
+    let op: &dyn LinOp<S = f64> = &a;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_cb = calls.clone();
+    let mut solver = PcgSolver::new(1e-12, 100)
+        .with_variant(PcgVariant::Pipelined { replace_every: 0 })
+        .with_true_residual_monitor(Box::new(move |_iter, residual, _reductions| {
+            assert!(residual.is_finite());
+            calls_cb.fetch_add(1, Ordering::SeqCst);
+            MonitorAction::Continue
+        }));
+
+    for _ in 0..2 {
+        let mut wk = Workspace::default();
+        solver.setup_workspace(&mut wk);
+        let mut x: Vec<R> = vec![R::default(); n];
+        let stats = solver
+            .solve_with_comm(
+                op,
+                None,
+                &b,
+                &mut x,
+                PcSide::Left,
+                &comm,
+                None,
+                Some(&mut wk),
+            )
+            .expect("PCG solve");
+        assert!(stats.reason.is_converged());
+    }
+
+    assert!(
+        calls.load(Ordering::SeqCst) >= 4,
+        "true residual monitor should be invoked across repeated wrapper solves"
     );
 }
 

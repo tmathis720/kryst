@@ -25,7 +25,7 @@ use crate::algebra::parallel::{
 use crate::algebra::prelude::*;
 use crate::config::options::CgVariant;
 use crate::context::ksp_context::Workspace;
-use crate::error::KError;
+use crate::error::{KError, NonFiniteKind};
 use crate::matrix::op::{LinOp, LinOpF64};
 use crate::ops::klinop::KLinOp;
 use crate::ops::kpc::KPreconditioner;
@@ -179,6 +179,16 @@ fn has_nontrivial_guess(x: &[S]) -> bool {
         }
     }
     max_abs > 64.0 * f64::EPSILON
+}
+
+#[inline]
+fn non_finite_reduction_error(context: &'static str, value: R) -> KError {
+    let kind = if value.is_nan() {
+        NonFiniteKind::Nan
+    } else {
+        NonFiniteKind::Inf
+    };
+    KError::NonFiniteReduction { kind, context }
 }
 
 struct CgWorkspace<'a> {
@@ -595,7 +605,10 @@ impl CgSolver {
             (rho, rsq, znorm)
         };
         let mut rho_prev: R = rho;
-        if rho < R::zero() || !rho.is_finite() {
+        if !rho.is_finite() {
+            return Err(non_finite_reduction_error("cg rho", rho));
+        }
+        if rho < R::zero() {
             return Err(KError::IndefinitePreconditioner);
         }
         let mut xnorm = if self.trust_region.is_some() {
@@ -712,7 +725,10 @@ impl CgSolver {
 
             debug::record_dot(debug::DotKind::PAp, p_ap_scalar);
             let p_ap: R = dot_result_to_real(p_ap_scalar);
-            if p_ap <= R::zero() || !p_ap.is_finite() {
+            if !p_ap.is_finite() {
+                return Err(non_finite_reduction_error("cg p_ap", p_ap));
+            }
+            if p_ap <= R::zero() {
                 return Err(KError::IndefiniteMatrix);
             }
 
@@ -829,7 +845,10 @@ impl CgSolver {
             let rho_scalar = dot_results[rho_idx];
             debug::record_dot(debug::DotKind::Rho, rho_scalar);
             let rho_new: R = dot_result_to_real(rho_scalar);
-            if rho_new < R::zero() || !rho_new.is_finite() {
+            if !rho_new.is_finite() {
+                return Err(non_finite_reduction_error("cg rho_new", rho_new));
+            }
+            if rho_new < R::zero() {
                 return Err(KError::IndefinitePreconditioner);
             }
 
@@ -990,12 +1009,18 @@ impl CgSolver {
         };
 
         let mut rho: R = dot_result_to_real(gamma_scalar);
-        if rho <= R::zero() || !rho.is_finite() {
+        if !rho.is_finite() {
+            return Err(non_finite_reduction_error("pipelined cg rho", rho));
+        }
+        if rho <= R::zero() {
             return Err(KError::IndefinitePreconditioner);
         }
 
         let mut delta: R = dot_result_to_real(delta_scalar);
-        if delta <= R::zero() || !delta.is_finite() {
+        if !delta.is_finite() {
+            return Err(non_finite_reduction_error("pipelined cg delta", delta));
+        }
+        if delta <= R::zero() {
             return Err(KError::IndefiniteMatrix);
         }
         let mut alpha: R = rho / delta;
@@ -1146,7 +1171,10 @@ impl CgSolver {
             let rho_scalar = tuple[rho_idx];
             debug::record_dot(debug::DotKind::Rho, rho_scalar);
             let rho_new: R = dot_result_to_real(rho_scalar);
-            if rho_new < R::zero() || !rho_new.is_finite() {
+            if !rho_new.is_finite() {
+                return Err(non_finite_reduction_error("pipelined cg rho_new", rho_new));
+            }
+            if rho_new < R::zero() {
                 return Err(KError::IndefinitePreconditioner);
             }
 
@@ -1263,10 +1291,22 @@ impl CgSolver {
 
                     rho_new = dot_result_to_real(red.dot(r, u));
                     delta_new = dot_result_to_real(red.dot(u, w));
-                    if rho_new < R::zero() || !rho_new.is_finite() {
+                    if !rho_new.is_finite() {
+                        return Err(non_finite_reduction_error(
+                            "pipelined cg refreshed rho_new",
+                            rho_new,
+                        ));
+                    }
+                    if rho_new < R::zero() {
                         return Err(KError::IndefinitePreconditioner);
                     }
-                    if delta_new <= R::zero() || !delta_new.is_finite() {
+                    if !delta_new.is_finite() {
+                        return Err(non_finite_reduction_error(
+                            "pipelined cg refreshed delta_new",
+                            delta_new,
+                        ));
+                    }
+                    if delta_new <= R::zero() {
                         return Err(KError::IndefiniteMatrix);
                     }
 
@@ -1286,12 +1326,21 @@ impl CgSolver {
                 return Ok(Self::attach_drift_stats(s_out.with_counters(counters)));
             }
 
-            if delta_new <= R::zero() || !delta_new.is_finite() {
+            if !delta_new.is_finite() {
+                return Err(non_finite_reduction_error(
+                    "pipelined cg delta_new",
+                    delta_new,
+                ));
+            }
+            if delta_new <= R::zero() {
                 return Err(KError::IndefiniteMatrix);
             }
 
             let denom: R = delta_new - (beta / alpha) * rho_new;
-            if denom <= R::zero() || !denom.is_finite() {
+            if !denom.is_finite() {
+                return Err(non_finite_reduction_error("pipelined cg denom", denom));
+            }
+            if denom <= R::zero() {
                 return Err(KError::IndefiniteMatrix);
             }
 

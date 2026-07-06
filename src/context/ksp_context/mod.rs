@@ -1729,6 +1729,64 @@ impl KspContext {
         Self::apply_pcg_pending(&self.pending_pcg, s);
     }
 
+    fn record_selected_cg_variant(&mut self, variant: CgVariant) {
+        self.pending_cg.variant = Some(variant);
+    }
+
+    fn record_selected_pcg_variant(&mut self, variant: PcgVariant) {
+        match variant {
+            PcgVariant::Classic => {
+                self.pending_pcg.pipelined = Some(false);
+            }
+            PcgVariant::Pipelined { replace_every } => {
+                self.pending_pcg.pipelined = Some(true);
+                self.pending_pcg.replace_every = Some(replace_every);
+            }
+        }
+    }
+
+    fn apply_adaptive_cg_family_variant(&mut self, adaptive_variant: KrylovVariant) {
+        let cg_variant = match adaptive_variant {
+            KrylovVariant::Classical => CgVariant::Classic,
+            KrylovVariant::Pipelined | KrylovVariant::SStep => CgVariant::Pipelined,
+        };
+        let mut selected_cg_variant = None;
+        let mut selected_pcg_variant = None;
+
+        if let Some(solver) = self.solver.as_mut() {
+            if let Some(cg) = solver.as_any_mut().downcast_mut::<CgSolver>() {
+                cg.set_variant(cg_variant);
+                if matches!(cg_variant, CgVariant::Pipelined)
+                    && let Some(every) = self.pending_cg.replace_every
+                {
+                    cg.set_pipelined_residual_refresh_every(Some(every));
+                }
+                selected_cg_variant = Some(cg_variant);
+            }
+
+            if let Some(pcg) = solver.as_any_mut().downcast_mut::<PcgSolver>() {
+                let pcg_variant = match cg_variant {
+                    CgVariant::Classic => PcgVariant::Classic,
+                    CgVariant::Pipelined => PcgVariant::Pipelined {
+                        replace_every: self
+                            .pending_pcg
+                            .replace_every
+                            .unwrap_or(PCG_PIPELINED_DEFAULT_REPLACE_EVERY),
+                    },
+                };
+                pcg.set_variant(pcg_variant);
+                selected_pcg_variant = Some(pcg_variant);
+            }
+        }
+
+        if let Some(variant) = selected_cg_variant {
+            self.record_selected_cg_variant(variant);
+        }
+        if let Some(variant) = selected_pcg_variant {
+            self.record_selected_pcg_variant(variant);
+        }
+    }
+
     /// Configure both KSP and PC from their respective option sets.
     pub fn set_from_all_options(
         &mut self,
@@ -1890,7 +1948,9 @@ impl KspContext {
                     "cg_async_overlap_safe",
                     async_overlap_safe,
                 );
-                if let Some(every) = self.pending_cg.replace_every {
+                if matches!(variant, CgVariant::Pipelined)
+                    && let Some(every) = self.pending_cg.replace_every.filter(|every| *every > 0)
+                {
                     insert_value(&mut solver_config, "cg_replace_every", every);
                 }
             }
@@ -1947,13 +2007,15 @@ impl KspContext {
                     async_overlap_safe,
                 );
                 if pipelined {
-                    insert_value(
-                        &mut solver_config,
-                        "cg_replace_every",
-                        self.pending_pcg
-                            .replace_every
-                            .unwrap_or(PCG_PIPELINED_DEFAULT_REPLACE_EVERY),
-                    );
+                    match self.pending_pcg.replace_every {
+                        Some(0) => {}
+                        Some(every) => insert_value(&mut solver_config, "cg_replace_every", every),
+                        None => insert_value(
+                            &mut solver_config,
+                            "cg_replace_every",
+                            PCG_PIPELINED_DEFAULT_REPLACE_EVERY,
+                        ),
+                    }
                 }
             }
             _ => {}
@@ -3030,6 +3092,7 @@ impl KspContext {
         if matches!(adaptive.threading, "serial") {
             self.exec.threading = ThreadingPolicy::Serial;
         }
+        self.apply_adaptive_cg_family_variant(adaptive.variant);
         if let Some(solver) = self.solver.as_mut() {
             match adaptive.variant {
                 KrylovVariant::Classical => {
@@ -3039,9 +3102,6 @@ impl KspContext {
                     if let Some(fgmres) = solver.as_any_mut().downcast_mut::<FgmresSolver>() {
                         fgmres.set_variant(crate::solver::fgmres::FgmresVariant::Classical);
                     }
-                    if let Some(pcg) = solver.as_any_mut().downcast_mut::<PcgSolver>() {
-                        pcg.set_variant(crate::solver::pcg::PcgVariant::Classic);
-                    }
                 }
                 KrylovVariant::Pipelined => {
                     if let Some(gmres) = solver.as_any_mut().downcast_mut::<GmresSolver>() {
@@ -3049,11 +3109,6 @@ impl KspContext {
                     }
                     if let Some(fgmres) = solver.as_any_mut().downcast_mut::<FgmresSolver>() {
                         fgmres.set_variant(crate::solver::fgmres::FgmresVariant::Pipelined);
-                    }
-                    if let Some(pcg) = solver.as_any_mut().downcast_mut::<PcgSolver>() {
-                        pcg.set_variant(crate::solver::pcg::PcgVariant::Pipelined {
-                            replace_every: crate::solver::pcg::PCG_PIPELINED_DEFAULT_REPLACE_EVERY,
-                        });
                     }
                 }
                 KrylovVariant::SStep => {
@@ -5134,6 +5189,121 @@ mod tests {
             .expect("PCG solver");
         assert!(immediate_pcg.async_enabled());
         assert_eq!(immediate_pcg.async_min_n(), 456);
+    }
+
+    #[test]
+    fn cg_family_adaptive_selection_updates_solver_and_view() {
+        let mut cg_ksp = KspContext::new();
+        cg_ksp.set_type(SolverType::Cg).unwrap();
+        cg_ksp.pending_cg.replace_every = Some(13);
+        cg_ksp.apply_adaptive_cg_family_variant(KrylovVariant::SStep);
+        {
+            let cg = cg_ksp
+                .solver
+                .as_mut()
+                .and_then(|solver| solver.as_any_mut().downcast_mut::<CgSolver>())
+                .expect("CG solver");
+            assert!(matches!(cg.variant(), CgVariant::Pipelined));
+            assert_eq!(cg.pipelined_residual_refresh_every(), Some(13));
+        }
+
+        let view = cg_ksp.view();
+        assert_eq!(
+            view.solver_config
+                .get("cg_variant")
+                .and_then(|v| v.as_str()),
+            Some("Pipelined")
+        );
+        assert_eq!(
+            view.solver_config
+                .get("cg_replace_every")
+                .and_then(|v| v.as_u64()),
+            Some(13)
+        );
+        let model = view
+            .solver_config
+            .get("cg_reduction_model")
+            .and_then(|v| v.as_object())
+            .expect("cg reduction model");
+        assert_eq!(
+            model.get("variant").and_then(|v| v.as_str()),
+            Some("cg-pipelined")
+        );
+
+        cg_ksp.apply_adaptive_cg_family_variant(KrylovVariant::Classical);
+        {
+            let cg = cg_ksp
+                .solver
+                .as_mut()
+                .and_then(|solver| solver.as_any_mut().downcast_mut::<CgSolver>())
+                .expect("CG solver");
+            assert!(matches!(cg.variant(), CgVariant::Classic));
+        }
+        let view = cg_ksp.view();
+        assert_eq!(
+            view.solver_config
+                .get("cg_variant")
+                .and_then(|v| v.as_str()),
+            Some("Classic")
+        );
+        assert!(view.solver_config.get("cg_replace_every").is_none());
+
+        let mut pcg_ksp = KspContext::new();
+        pcg_ksp.set_type(SolverType::Pcg).unwrap();
+        pcg_ksp.pending_pcg.replace_every = Some(17);
+        pcg_ksp.apply_adaptive_cg_family_variant(KrylovVariant::SStep);
+        {
+            let pcg = pcg_ksp
+                .solver
+                .as_mut()
+                .and_then(|solver| solver.as_any_mut().downcast_mut::<PcgSolver>())
+                .expect("PCG solver");
+            assert!(matches!(
+                pcg.variant(),
+                PcgVariant::Pipelined { replace_every: 17 }
+            ));
+        }
+
+        let view = pcg_ksp.view();
+        assert_eq!(
+            view.solver_config
+                .get("cg_variant")
+                .and_then(|v| v.as_str()),
+            Some("Pipelined")
+        );
+        assert_eq!(
+            view.solver_config
+                .get("cg_replace_every")
+                .and_then(|v| v.as_u64()),
+            Some(17)
+        );
+        let model = view
+            .solver_config
+            .get("cg_reduction_model")
+            .and_then(|v| v.as_object())
+            .expect("pcg reduction model");
+        assert_eq!(
+            model.get("variant").and_then(|v| v.as_str()),
+            Some("pcg-pipelined")
+        );
+
+        pcg_ksp.apply_adaptive_cg_family_variant(KrylovVariant::Classical);
+        {
+            let pcg = pcg_ksp
+                .solver
+                .as_mut()
+                .and_then(|solver| solver.as_any_mut().downcast_mut::<PcgSolver>())
+                .expect("PCG solver");
+            assert!(matches!(pcg.variant(), PcgVariant::Classic));
+        }
+        let view = pcg_ksp.view();
+        assert_eq!(
+            view.solver_config
+                .get("cg_variant")
+                .and_then(|v| v.as_str()),
+            Some("Classic")
+        );
+        assert!(view.solver_config.get("cg_replace_every").is_none());
     }
 
     #[test]
