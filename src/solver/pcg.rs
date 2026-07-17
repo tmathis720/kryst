@@ -1,3 +1,4 @@
+use crate::algebra::parallel::{dot_conj_local_with_mode, sum_abs2_local_with_mode};
 #[allow(unused_imports)]
 use crate::algebra::prelude::*;
 use crate::config::options::CgVariant;
@@ -5,15 +6,88 @@ use crate::context::ksp_context::Workspace;
 use crate::error::KError;
 use crate::matrix::op::LinOp;
 use crate::ops::wrap::{as_s_op, as_s_pc_mut};
-use crate::parallel::{Comm, NoComm, UniverseComm};
+use crate::parallel::{Comm, NoComm, ReduceHandle, ReductionEngine, UniverseComm};
 use crate::preconditioner::{PcSide, Preconditioner};
 use crate::reduction::{ReductionOptions, ReproMode};
 use crate::solver::LinearSolver;
 use crate::solver::MonitorCallback;
 use crate::solver::cg::CgSolver;
 use crate::utils::convergence::{Convergence, ReductionModel, SolveStats};
-use crate::utils::reduction::ReductOptions;
+use crate::utils::reduction::{ReductOptions, record_reduction};
 use std::any::Any;
+use std::fmt;
+use std::sync::Arc;
+
+/// A synchronous reduction engine for caller-provided communicator wrappers.
+///
+/// `PcgSolver::solve_with_comm` accepts `Comm + Clone` implementations.
+/// The solver delegates its iteration to `CgSolver`, which needs a
+/// `UniverseComm` for its execution policy, so this engine preserves the
+/// caller's communicator for the actual reductions.
+struct CallerCommReductionEngine<C> {
+    comm: C,
+    mode: ReproMode,
+}
+
+impl<C> CallerCommReductionEngine<C> {
+    fn new(comm: C, mode: ReproMode) -> Self {
+        Self { comm, mode }
+    }
+}
+
+impl<C> fmt::Debug for CallerCommReductionEngine<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CallerCommReductionEngine")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<C: Comm> ReductionEngine for CallerCommReductionEngine<C> {
+    fn supports_async(&self) -> bool {
+        false
+    }
+
+    fn allreduce_sum_r(&self, x: R) -> R {
+        self.comm.allreduce_sum(x)
+    }
+
+    fn allreduce_sum_s(&self, x: S) -> S {
+        self.comm.allreduce_sum_scalar(x)
+    }
+
+    fn norm2_s(&self, x: &[S]) -> R {
+        self.allreduce_sum_r(sum_abs2_local_with_mode(x, self.mode))
+            .max(R::zero())
+            .sqrt()
+    }
+
+    fn dot_s(&self, x: &[S], y: &[S]) -> S {
+        self.allreduce_sum_s(dot_conj_local_with_mode(x, y, self.mode))
+    }
+
+    fn sum_vec_r(&self, mut values: Vec<R>) -> Vec<R> {
+        record_reduction(values.len());
+        self.comm.allreduce_sum_slice(&mut values);
+        values
+    }
+
+    fn iallreduce_sum_r(&self, x: R) -> ReduceHandle<R> {
+        record_reduction(1);
+        ReduceHandle::ready(self.allreduce_sum_r(x))
+    }
+
+    fn iallreduce_sum_s(&self, x: S) -> ReduceHandle<S> {
+        #[cfg(feature = "complex")]
+        record_reduction(2);
+        #[cfg(not(feature = "complex"))]
+        record_reduction(1);
+        ReduceHandle::ready(self.allreduce_sum_s(x))
+    }
+
+    fn iallreduce_sum_vec_r(&self, values: Vec<R>) -> ReduceHandle<Vec<R>> {
+        ReduceHandle::ready(self.sum_vec_r(values))
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum CgNormType {
@@ -213,6 +287,7 @@ impl PcgSolver {
         comm: &UniverseComm,
         monitors: Option<&[Box<MonitorCallback<R>>]>,
         work: Option<&mut Workspace>,
+        reduction_engine: Option<Arc<dyn ReductionEngine>>,
     ) -> Result<SolveStats<R>, KError>
     where
         A: crate::ops::klinop::KLinOp<Scalar = S> + ?Sized,
@@ -230,7 +305,9 @@ impl PcgSolver {
         let saved_engine = work.reduction_engine().cloned();
         let reduction = self.async_options();
         work.set_reduction_options(reduction.clone());
-        work.set_reduction_engine(comm.reduction_engine(&reduction));
+        work.set_reduction_engine(
+            reduction_engine.unwrap_or_else(|| comm.reduction_engine(&reduction)),
+        );
 
         let mut cg = self.configured_cg();
         cg.set_true_residual_monitor(self.true_residual_monitor.take());
@@ -295,11 +372,11 @@ impl PcgSolver {
     where
         A: crate::ops::klinop::KLinOp<Scalar = S> + ?Sized,
     {
-        self.solve_k_via_cg(a, pc, b, x, pc_side, comm, monitors, work)
+        self.solve_k_via_cg(a, pc, b, x, pc_side, comm, monitors, work, None)
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn solve_with_comm<C: Comm>(
+    pub fn solve_with_comm<C: Comm + Clone>(
         &mut self,
         a: &dyn LinOp<S = f64>,
         pc: Option<&mut dyn Preconditioner>,
@@ -342,8 +419,24 @@ impl PcgSolver {
                     None
                 }
             });
+        let caller_reduction_engine = universe.is_none().then(|| {
+            Arc::new(CallerCommReductionEngine::new(
+                comm.clone(),
+                self.async_options().effective_mode(),
+            )) as Arc<dyn ReductionEngine>
+        });
         let universe = universe.unwrap_or_else(|| comm.split(0, comm.rank() as i32));
-        self.solve_impl(a, pc, b, x, pc_side, &universe, monitors, work)
+        self.solve_impl(
+            a,
+            pc,
+            b,
+            x,
+            pc_side,
+            &universe,
+            monitors,
+            work,
+            caller_reduction_engine,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -357,6 +450,7 @@ impl PcgSolver {
         comm: &UniverseComm,
         monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
+        reduction_engine: Option<Arc<dyn ReductionEngine>>,
     ) -> Result<SolveStats<f64>, KError> {
         let op = as_s_op(a);
         let pc_wrapper = pc.map(as_s_pc_mut);
@@ -377,15 +471,34 @@ impl PcgSolver {
         {
             let b_s: &[S] = unsafe { &*(b as *const [f64] as *const [S]) };
             let x_s: &mut [S] = unsafe { &mut *(x as *mut [f64] as *mut [S]) };
-            self.solve_k_via_cg(&op, pc_ref, b_s, x_s, pc_side, comm, monitors, work)
+            self.solve_k_via_cg(
+                &op,
+                pc_ref,
+                b_s,
+                x_s,
+                pc_side,
+                comm,
+                monitors,
+                work,
+                reduction_engine,
+            )
         }
 
         #[cfg(feature = "complex")]
         {
             let b_s: Vec<S> = b.iter().copied().map(S::from_real).collect();
             let mut x_s: Vec<S> = x.iter().copied().map(S::from_real).collect();
-            let result =
-                self.solve_k_via_cg(&op, pc_ref, &b_s, &mut x_s, pc_side, comm, monitors, work);
+            let result = self.solve_k_via_cg(
+                &op,
+                pc_ref,
+                &b_s,
+                &mut x_s,
+                pc_side,
+                comm,
+                monitors,
+                work,
+                reduction_engine,
+            );
             if result.is_ok() {
                 for (dst, src) in x.iter_mut().zip(x_s.iter()) {
                     *dst = src.real();
@@ -420,6 +533,6 @@ impl LinearSolver for PcgSolver {
         monitors: Option<&[Box<MonitorCallback<f64>>]>,
         work: Option<&mut Workspace>,
     ) -> Result<SolveStats<f64>, Self::Error> {
-        self.solve_impl(a, pc, b, x, pc_side, comm, monitors, work)
+        self.solve_impl(a, pc, b, x, pc_side, comm, monitors, work, None)
     }
 }

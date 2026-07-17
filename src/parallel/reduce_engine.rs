@@ -69,7 +69,7 @@ struct MpiVecState<T> {
 }
 
 impl<T> ReduceHandle<T> {
-    fn ready(value: T) -> Self {
+    pub(crate) fn ready(value: T) -> Self {
         Self {
             inner: ReduceHandleInner::Ready(value),
         }

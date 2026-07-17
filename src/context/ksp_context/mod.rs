@@ -349,9 +349,12 @@ pub struct KspContext {
     dist_route_diag: DistRouteDiagnosticsState,
     // Pending/staged solver-specific options to apply when solver type is set
     pending_cg: PendingCg,
+    // Explicit CG-family variant selections take precedence over auto tuning.
+    cg_variant_explicit: bool,
     pending_gmres: PendingGmres,
     pending_fgmres: PendingFgmres,
     pending_pcg: PendingPcg,
+    pcg_variant_explicit: bool,
     pending_bicgstab: PendingBiCgStab,
     last_converged_reason: Option<ConvergedReason>,
     reason_counters: ReasonDiagnosticsCounters,
@@ -392,8 +395,10 @@ impl fmt::Debug for KspContext {
         dbg.field("pending_mpi_pc", &self.pending_mpi_pc);
         dbg.field("pending_gmres", &self.pending_gmres)
             .field("pending_cg", &self.pending_cg)
+            .field("cg_variant_explicit", &self.cg_variant_explicit)
             .field("pending_fgmres", &self.pending_fgmres)
             .field("pending_pcg", &self.pending_pcg)
+            .field("pcg_variant_explicit", &self.pcg_variant_explicit)
             .field("pending_bicgstab", &self.pending_bicgstab)
             .field("last_converged_reason", &self.last_converged_reason)
             .field("reason_counters", &self.reason_counters)
@@ -746,9 +751,11 @@ impl KspContext {
             #[cfg(feature = "backend-faer")]
             dist_route_diag: DistRouteDiagnosticsState::default(),
             pending_cg: PendingCg::default(),
+            cg_variant_explicit: false,
             pending_gmres: PendingGmres::default(),
             pending_fgmres: PendingFgmres::default(),
             pending_pcg: PendingPcg::default(),
+            pcg_variant_explicit: false,
             pending_bicgstab: PendingBiCgStab::default(),
             last_converged_reason: None,
             reason_counters: ReasonDiagnosticsCounters::default(),
@@ -1446,6 +1453,7 @@ impl KspContext {
         let mut cg_pending_updated = false;
         if let Some(variant) = requested_cg_variant {
             self.pending_cg.variant = Some(variant);
+            self.cg_variant_explicit = true;
             cg_pending_updated = true;
         }
         if let Some(ref norm) = opts.cg_norm {
@@ -1492,6 +1500,7 @@ impl KspContext {
                 ));
             }
             self.pending_pcg.pipelined = Some(matches!(variant, CgVariant::Pipelined));
+            self.pcg_variant_explicit = true;
             pcg_pending_updated = true;
         }
         if let Some(repl) = opts.cg_replace_every {
@@ -1754,7 +1763,9 @@ impl KspContext {
         let mut selected_pcg_variant = None;
 
         if let Some(solver) = self.solver.as_mut() {
-            if let Some(cg) = solver.as_any_mut().downcast_mut::<CgSolver>() {
+            if !self.cg_variant_explicit
+                && let Some(cg) = solver.as_any_mut().downcast_mut::<CgSolver>()
+            {
                 cg.set_variant(cg_variant);
                 if matches!(cg_variant, CgVariant::Pipelined)
                     && let Some(every) = self.pending_cg.replace_every
@@ -1764,7 +1775,9 @@ impl KspContext {
                 selected_cg_variant = Some(cg_variant);
             }
 
-            if let Some(pcg) = solver.as_any_mut().downcast_mut::<PcgSolver>() {
+            if !self.pcg_variant_explicit
+                && let Some(pcg) = solver.as_any_mut().downcast_mut::<PcgSolver>()
+            {
                 let pcg_variant = match cg_variant {
                     CgVariant::Classic => PcgVariant::Classic,
                     CgVariant::Pipelined => PcgVariant::Pipelined {
