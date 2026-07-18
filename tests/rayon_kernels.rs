@@ -1,13 +1,24 @@
 #[cfg(feature = "rayon")]
 mod rayon_tests {
-    use kryst::algebra::parallel::{dot_conj_local_with_mode, par_dot_conj_local};
-    use kryst::algebra::parallel_cfg::{ParallelTune, parallel_tune, set_parallel_tune};
+    use kryst::algebra::parallel::{
+        dot_conj_local_with_mode, par_axpy2, par_cg_recurrence2, par_dot_conj_local,
+        par_residual_from_matvec,
+    };
+    use kryst::algebra::parallel_cfg::{
+        ParallelTune, kernel_timing_snapshot, parallel_tune, set_parallel_tune,
+    };
     use kryst::algebra::prelude::*;
     use kryst::matrix::sparse::CsrMatrix;
     use kryst::matrix::spmv::{spmv_csr_parallel, spmv_csr_serial};
     use kryst::parallel::set_global_reduction_mode_scoped;
     use kryst::reduction::ReproMode;
     use rayon::ThreadPoolBuilder;
+    use std::sync::{Mutex, OnceLock};
+
+    fn tune_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     struct TuneGuard {
         prev: ParallelTune,
@@ -29,6 +40,9 @@ mod rayon_tests {
 
     #[test]
     fn parallel_spmv_and_repro_vector_kernel_deterministic() {
+        let _lock = tune_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
         pool.install(|| {
             let _repro = set_global_reduction_mode_scoped(ReproMode::Deterministic);
@@ -74,9 +88,51 @@ mod rayon_tests {
         });
     }
 
+    #[test]
+    fn fused_cg_kernels_honor_vector_parallel_threshold() {
+        let _lock = tune_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let before = kernel_timing_snapshot();
+
+        let mut serial_tune = ParallelTune::default();
+        serial_tune.min_len_vec = usize::MAX;
+        let _serial_tune = TuneGuard::new(serial_tune);
+        let x = vec![S::from_real(1.0); 128];
+        let mut y = vec![S::zero(); 128];
+        let mut r = vec![S::zero(); 128];
+        par_axpy2(&x, S::one(), &mut y, &x, -S::one(), &mut r);
+        let serial = kernel_timing_snapshot();
+        assert!(serial.serial_samples > before.serial_samples);
+
+        drop(_serial_tune);
+        let mut parallel_tune = ParallelTune::default();
+        parallel_tune.min_len_vec = 1;
+        let _parallel_tune = TuneGuard::new(parallel_tune);
+        let x = vec![S::from_real(1.0); 16_384];
+        let w = vec![S::from_real(2.0); x.len()];
+        let mut p = vec![S::zero(); x.len()];
+        let mut s = vec![S::zero(); x.len()];
+        let mut residual = vec![S::zero(); x.len()];
+        pool.install(|| {
+            par_cg_recurrence2(&x, &w, S::from_real(0.5), &mut p, &mut s);
+            par_residual_from_matvec(&x, &s, &mut residual);
+        });
+
+        let parallel = kernel_timing_snapshot();
+        assert!(parallel.parallel_samples >= serial.parallel_samples + 2);
+        assert!(p.iter().all(|&value| value == S::from_real(1.0)));
+        assert!(s.iter().all(|&value| value == S::from_real(2.0)));
+        assert!(residual.iter().all(|&value| value == -S::one()));
+    }
+
     #[cfg(all(feature = "backend-faer", not(feature = "complex")))]
     #[test]
     fn parallel_ilu_triangular_solve_matches_serial_factorization() {
+        let _lock = tune_lock()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         use kryst::preconditioner::PcSide;
         use kryst::preconditioner::ilu::{Ilu, IluConfig, TriSolveType};
         use kryst::preconditioner::legacy::Preconditioner as LegacyPreconditioner;

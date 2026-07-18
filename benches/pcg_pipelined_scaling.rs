@@ -1,7 +1,11 @@
 use kryst::config::options::CgVariant;
 use kryst::context::ksp_context::Workspace;
 use kryst::matrix::utils::poisson_3d;
-use kryst::parallel::{NoComm, UniverseComm};
+#[cfg(not(feature = "rayon"))]
+use kryst::parallel::NoComm;
+#[cfg(feature = "rayon")]
+use kryst::parallel::RayonComm;
+use kryst::parallel::{Comm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use kryst::solver::pcg::{PCG_PIPELINED_DEFAULT_REPLACE_EVERY, PcgSolver, PcgVariant};
 use kryst::solver::{CgSolver, LinearSolver};
@@ -11,6 +15,7 @@ fn run_pcg_variant(
     a: &dyn kryst::matrix::op::LinOp<S = f64>,
     b: &[f64],
     variant: PcgVariant,
+    comm: &UniverseComm,
 ) -> (
     std::time::Duration,
     kryst::utils::convergence::SolveStats<f64>,
@@ -20,7 +25,6 @@ fn run_pcg_variant(
     let mut wk = Workspace::default();
     solver.setup_workspace(&mut wk);
     let mut x = vec![0.0; b.len()];
-    let comm = UniverseComm::NoComm(NoComm);
     let start = Instant::now();
     let stats = solver
         .solve(a, None, b, &mut x, PcSide::Left, &comm, None, Some(&mut wk))
@@ -32,6 +36,7 @@ fn run_cg_variant(
     a: &dyn kryst::matrix::op::LinOp<S = f64>,
     b: &[f64],
     variant: CgVariant,
+    comm: &UniverseComm,
 ) -> (
     std::time::Duration,
     kryst::utils::convergence::SolveStats<f64>,
@@ -44,7 +49,6 @@ fn run_cg_variant(
     let mut wk = Workspace::default();
     solver.setup_workspace(&mut wk);
     let mut x = vec![0.0; b.len()];
-    let comm = UniverseComm::NoComm(NoComm);
     let start = Instant::now();
     let stats = LinearSolver::solve(
         &mut solver,
@@ -61,31 +65,46 @@ fn run_cg_variant(
     (start.elapsed(), stats)
 }
 
-fn weak_scaling_case(ranks: usize) -> (usize, usize, usize) {
+fn benchmark_comm() -> UniverseComm {
+    #[cfg(feature = "rayon")]
+    {
+        UniverseComm::Rayon(RayonComm::new())
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        UniverseComm::NoComm(NoComm)
+    }
+}
+
+fn weak_scaling_case(workers: usize) -> (usize, usize, usize) {
     const BASE: usize = 24;
-    (BASE, BASE, BASE * ranks)
+    (BASE, BASE, BASE * workers.max(1))
 }
 
 fn strong_scaling_dims() -> (usize, usize, usize) {
     (64, 64, 64)
 }
 
-fn solve_case(label: &str, ranks: usize, dims: (usize, usize, usize)) {
+fn solve_case(label: &str, comm: &UniverseComm, dims: (usize, usize, usize)) {
     let (nx, ny, nz) = dims;
     let a = poisson_3d(nx, ny, nz);
     let n = a.nrows();
     let b = vec![1.0; n];
+    let workers = comm.size();
 
-    println!("{label:>12} | ranks = {ranks:>3} | dims = {nx}×{ny}×{nz} | dofs = {n}");
+    println!("{label:>12} | workers = {workers:>3} | dims = {nx}×{ny}×{nz} | dofs = {n}");
 
-    let (cg_time, cg_stats) = run_cg_variant(&a, &b, CgVariant::Classic);
-    let (classic_time, classic_stats) = run_pcg_variant(&a, &b, PcgVariant::Classic);
+    let (cg_classic_time, cg_classic_stats) = run_cg_variant(&a, &b, CgVariant::Classic, comm);
+    let (cg_pipelined_time, cg_pipelined_stats) =
+        run_cg_variant(&a, &b, CgVariant::Pipelined, comm);
+    let (classic_time, classic_stats) = run_pcg_variant(&a, &b, PcgVariant::Classic, comm);
     let (pipelined_time, pipelined_stats) = run_pcg_variant(
         &a,
         &b,
         PcgVariant::Pipelined {
             replace_every: PCG_PIPELINED_DEFAULT_REPLACE_EVERY,
         },
+        comm,
     );
 
     let iter_gap = (classic_stats.iterations as isize - pipelined_stats.iterations as isize).abs();
@@ -96,15 +115,28 @@ fn solve_case(label: &str, ranks: usize, dims: (usize, usize, usize)) {
         pipelined_stats.iterations
     );
 
-    assert!(
-        pipelined_stats.counters.overlap_global_reductions > 0,
-        "pipelined benchmark expected overlap-aware reductions"
-    );
+    if workers > 1 {
+        assert!(
+            cg_pipelined_stats.counters.overlap_global_reductions > 0,
+            "pipelined CG benchmark expected overlap-aware reductions"
+        );
+        assert!(
+            pipelined_stats.counters.overlap_global_reductions > 0,
+            "pipelined PCG benchmark expected overlap-aware reductions"
+        );
+    }
     let speedup = classic_time.as_secs_f64() / pipelined_time.as_secs_f64();
     println!(
-        "    cg       : {:>6} iters | {:>8.3} ms",
-        cg_stats.iterations,
-        cg_time.as_secs_f64() * 1.0e3
+        "    cg-classic   : {:>6} iters | {:>8.3} ms | reductions={}",
+        cg_classic_stats.iterations,
+        cg_classic_time.as_secs_f64() * 1.0e3,
+        cg_classic_stats.counters.num_global_reductions
+    );
+    println!(
+        "    cg-pipelined : {:>6} iters | {:>8.3} ms | reductions={}",
+        cg_pipelined_stats.iterations,
+        cg_pipelined_time.as_secs_f64() * 1.0e3,
+        cg_pipelined_stats.counters.num_global_reductions
     );
     println!(
         "    classic  : {:>6} iters | {:>8.3} ms",
@@ -130,16 +162,15 @@ fn main() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let strong_dims = strong_scaling_dims();
+    let comm = benchmark_comm();
+    let workers = comm.size().max(1);
+    println!("== Canonical CG and PCG wrapper scaling (workers={workers}) ==");
     println!(
         "== Strong scaling (fixed {}×{}×{} grid) ==",
         strong_dims.0, strong_dims.1, strong_dims.2
     );
-    for &ranks in &[1usize, 4, 16, 64] {
-        solve_case("strong", ranks, strong_dims);
-    }
+    solve_case("strong", &comm, strong_dims);
 
-    println!("== Weak scaling (24³ unknowns per virtual rank) ==");
-    for &ranks in &[1usize, 4, 16, 64] {
-        solve_case("weak", ranks, weak_scaling_case(ranks));
-    }
+    println!("== Weak scaling (24³ unknowns per active worker) ==");
+    solve_case("weak", &comm, weak_scaling_case(workers));
 }

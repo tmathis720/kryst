@@ -160,6 +160,10 @@ name = "pcg_pipelined_scaling"
 harness = false
 
 [[bench]]
+name = "cg_csr_variants"
+harness = false
+
+[[bench]]
 name = "solver_reduction_scaling"
 harness = false
 
@@ -173,4 +177,3 @@ harness = false
 [[bench]]
 name = "fgmres_rayon"
 harness = false
-

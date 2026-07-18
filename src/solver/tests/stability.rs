@@ -36,6 +36,10 @@ fn pipelined_cg_reports_residual_replacements() -> Result<(), KError> {
         Some(&mut ws),
     )?;
     assert!(stats.counters.residual_replacements > 0);
+    assert!(
+        stats.reason.is_converged(),
+        "pipelined CG with residual replacement failed: {stats:?}"
+    );
     Ok(())
 }
 

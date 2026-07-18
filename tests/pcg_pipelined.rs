@@ -488,6 +488,46 @@ fn pipelined_reports_reduction_counts() -> Result<(), KError> {
         stats.counters.num_global_reductions > 0,
         "serialized solver reported zero reductions"
     );
+    let model = stats
+        .reduction_model
+        .as_ref()
+        .expect("pipelined PCG reduction model");
+    assert_eq!(model.variant, "pcg-pipelined");
+    assert_eq!(model.startup, 1);
+    assert_eq!(model.per_iteration, 1.0);
+    Ok(())
+}
+
+#[test]
+fn classic_pcg_reports_wrapper_reduction_model() -> Result<(), KError> {
+    let n = 16;
+    let a = csr_poisson_1d(n);
+    let b: Vec<R> = vec![R::from(1.0); n];
+    let comm = UniverseComm::NoComm(NoComm);
+    let op: &dyn LinOp<S = f64> = &a;
+    let mut solver = PcgSolver::new(1e-12, 100).with_variant(PcgVariant::Classic);
+    let mut wk = Workspace::default();
+    solver.setup_workspace(&mut wk);
+    let mut x: Vec<R> = vec![R::default(); n];
+    let stats = solver.solve_with_comm(
+        op,
+        None,
+        &b,
+        &mut x,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut wk),
+    )?;
+
+    assert!(stats.reason.is_converged());
+    let model = stats
+        .reduction_model
+        .as_ref()
+        .expect("classic PCG reduction model");
+    assert_eq!(model.variant, "pcg-classic");
+    assert_eq!(model.startup, 2);
+    assert_eq!(model.per_iteration, 2.0);
     Ok(())
 }
 

@@ -5,10 +5,14 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use kryst::algebra::parallel_cfg::{
     ParallelTune, ParallelTunerMode, set_parallel_tune, set_parallel_tuner_mode,
 };
-use kryst::config::options::KspOptions;
+#[cfg(feature = "mpi")]
+use kryst::config::options::CgVariant;
+use kryst::config::options::{KspOptions, PcOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::{CsrMatrix, DistCsrOp};
-use kryst::parallel::{Comm, NoComm, UniverseComm};
+#[cfg(not(feature = "mpi"))]
+use kryst::parallel::NoComm;
+use kryst::parallel::{Comm, UniverseComm};
 use kryst::preconditioner::PcSide;
 use serde_json::Value;
 use std::sync::Arc;
@@ -50,6 +54,28 @@ fn slice_rows(a: &CsrMatrix<f64>, row_start: usize, n_local: usize) -> CsrMatrix
     CsrMatrix::from_csr(n_local, a.ncols(), row_ptr, col_idx, values)
 }
 
+/// Set a Dirichlet five-point diagonal plus a unit mass shift without changing CSR or halo layout.
+#[cfg(feature = "mpi")]
+fn set_local_diagonal(a: &mut CsrMatrix<f64>, row_start: usize, value: f64) {
+    for local_row in 0..a.nrows() {
+        let global_row = row_start + local_row;
+        let diagonal = (a.row_ptr()[local_row]..a.row_ptr()[local_row + 1])
+            .find(|&entry| a.col_idx()[entry] == global_row)
+            .expect("Poisson benchmark row must contain its diagonal");
+        a.values_mut()[diagonal] = value;
+    }
+}
+
+#[cfg(feature = "mpi")]
+fn pipelined_cg_rhs(row_start: usize, n_local: usize) -> Vec<f64> {
+    (0..n_local)
+        .map(|local_row| {
+            let global_row = (row_start + local_row) as f64;
+            (0.17 * global_row).sin() + (0.11 * global_row).cos()
+        })
+        .collect()
+}
+
 fn bench_comm() -> UniverseComm {
     #[cfg(feature = "mpi")]
     {
@@ -77,18 +103,33 @@ fn build_case(
     let dist = DistCsrOp::from_local_rows(n_global, row_start, &local, &part_prefix, comm.clone())
         .expect("dist csr build");
 
+    let pc_opts = match pc_type {
+        "ilu" => PcOptions {
+            pc_type: Some("ilu".to_string()),
+            pc_global: Some("block_jacobi".to_string()),
+            pc_local: Some("ilu".to_string()),
+            ..PcOptions::default()
+        },
+        "asm" => PcOptions {
+            pc_type: Some("asm".to_string()),
+            pc_global: Some("asm".to_string()),
+            pc_local: Some("ilu".to_string()),
+            asm_block_solver: Some("csr".to_string()),
+            ..PcOptions::default()
+        },
+        other => panic!("unsupported distributed benchmark PC: {other}"),
+    };
+    let ksp_opts = KspOptions {
+        threads,
+        ..KspOptions::default()
+    };
     let mut ksp = KspContext::new();
     ksp.set_type(SolverType::Gmres).unwrap();
-    ksp.set_pc_type_from_str(pc_type).unwrap();
+    ksp.set_from_all_options(&ksp_opts, &pc_opts)
+        .expect("set distributed GMRES options");
     ksp.set_pc_side(PcSide::Left);
     ksp.set_restart(30);
     ksp.set_tolerances(1e-8, 0.0, 1e6, 200);
-
-    if let Some(n) = threads {
-        let mut opts = KspOptions::default();
-        opts.threads = Some(n);
-        ksp.set_from_options(&opts).unwrap();
-    }
 
     ksp.set_operators(Arc::new(dist), None);
 
@@ -120,6 +161,145 @@ fn run_once(
         stats.counters.num_global_reductions,
         dist_fallback_total(&ksp),
     )
+}
+
+#[cfg(feature = "mpi")]
+fn build_pipelined_cg_case(
+    grid: usize,
+    solver_type: SolverType,
+    use_async: bool,
+    comm: &UniverseComm,
+    threads: Option<usize>,
+) -> (KspContext, Vec<f64>, Vec<f64>) {
+    let a_global = datasets::poisson2d_csr(grid);
+    let n_global = a_global.nrows();
+    let part_prefix = build_part_prefix(n_global, comm.size());
+    let row_start = part_prefix[comm.rank()];
+    let n_local = part_prefix[comm.rank() + 1] - row_start;
+    let mut local = slice_rows(&a_global, row_start, n_local);
+    set_local_diagonal(&mut local, row_start, 5.0);
+    let dist = DistCsrOp::from_local_rows(n_global, row_start, &local, &part_prefix, comm.clone())
+        .expect("dist csr build");
+
+    let opts = KspOptions {
+        cg_variant: Some(CgVariant::Pipelined),
+        cg_use_async: Some(use_async),
+        // Keep this benchmark focused on reduction overlap even for small local partitions.
+        cg_async_min_n: Some(1),
+        threads,
+        ..KspOptions::default()
+    };
+    let mut ksp = KspContext::new();
+    ksp.set_type(solver_type).expect("set CG-family solver");
+    let pc_opts = PcOptions {
+        pc_type: Some("jacobi".to_string()),
+        pc_global: Some("block_jacobi".to_string()),
+        pc_local: Some("jacobi".to_string()),
+        ..PcOptions::default()
+    };
+    ksp.set_from_all_options(&opts, &pc_opts)
+        .expect("set CG-family options");
+    ksp.set_pc_side(PcSide::Left);
+    ksp.set_tolerances(1e-8, 0.0, 1e6, 400);
+    ksp.set_operators(Arc::new(dist), None);
+
+    let b = pipelined_cg_rhs(row_start, n_local);
+    let x = vec![0.0f64; n_local];
+    (ksp, b, x)
+}
+
+#[cfg(feature = "mpi")]
+fn run_pipelined_cg_once(
+    grid: usize,
+    solver_type: SolverType,
+    use_async: bool,
+    comm: &UniverseComm,
+    threads: Option<usize>,
+) -> (std::time::Duration, usize, usize, usize) {
+    let (mut ksp, b, mut x) = build_pipelined_cg_case(grid, solver_type, use_async, comm, threads);
+    ksp.setup()
+        .expect("pipelined distributed CG benchmark setup");
+    let view = ksp.view();
+    let async_effective = view
+        .solver_config
+        .get("cg_async_effective")
+        .and_then(Value::as_bool)
+        .expect("CG diagnostics should report async effectiveness");
+    assert_eq!(
+        async_effective,
+        use_async,
+        "distributed {solver_type:?} async configuration did not resolve as requested: {}",
+        view.to_json_pretty()
+    );
+    let start = std::time::Instant::now();
+    let stats = ksp
+        .solve(&b, &mut x)
+        .expect("pipelined distributed CG solve");
+    assert!(
+        stats.iterations > 0,
+        "pipelined distributed {solver_type:?} produced a zero-work solve: {stats:?}"
+    );
+    assert!(
+        stats.reason.is_converged(),
+        "pipelined distributed {solver_type:?} did not converge: {stats:?}"
+    );
+    (
+        start.elapsed(),
+        stats.iterations,
+        stats.counters.num_global_reductions,
+        stats.counters.overlap_global_reductions,
+    )
+}
+
+#[cfg(feature = "mpi")]
+fn bench_pipelined_cg_async_distcsr(c: &mut Criterion) {
+    let comm = bench_comm();
+    if comm.size() <= 1 {
+        return;
+    }
+    let threads = std::env::var("KRYST_BENCH_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let cases = [("medium", 64usize), ("large", 96usize)];
+
+    for (solver_label, solver_type) in [("cg", SolverType::Cg), ("pcg", SolverType::Pcg)] {
+        let mut group = c.benchmark_group(format!("mpi_distcsr_{solver_label}_pipelined"));
+        for (size_label, grid) in cases {
+            let (sync_time, sync_iters, sync_reductions, sync_overlap) =
+                run_pipelined_cg_once(grid, solver_type, false, &comm, threads);
+            let (async_time, async_iters, async_reductions, async_overlap) =
+                run_pipelined_cg_once(grid, solver_type, true, &comm, threads);
+
+            assert_eq!(
+                sync_overlap, 0,
+                "{solver_label}:{size_label}: disabled async reductions recorded overlap"
+            );
+            assert!(
+                async_overlap > 0,
+                "{solver_label}:{size_label}: async reductions did not overlap on {} MPI ranks (sync: iters={sync_iters}, reductions={sync_reductions}, overlap={sync_overlap}; async: iters={async_iters}, reductions={async_reductions}, overlap={async_overlap})",
+                comm.size(),
+            );
+            println!(
+                "{solver_label}:{size_label}:g{grid}: sync={{iters={sync_iters}, reductions={sync_reductions}, overlap={sync_overlap}, ms={:.3}}} async={{iters={async_iters}, reductions={async_reductions}, overlap={async_overlap}, ms={:.3}}}",
+                sync_time.as_secs_f64() * 1.0e3,
+                async_time.as_secs_f64() * 1.0e3,
+            );
+
+            for (mode, use_async) in [("sync", false), ("async", true)] {
+                let (mut ksp, b, mut x) =
+                    build_pipelined_cg_case(grid, solver_type, use_async, &comm, threads);
+                group.bench_function(format!("{size_label}_g{grid}_{mode}"), |ben| {
+                    ben.iter(|| {
+                        x.fill(0.0);
+                        let _ = ksp
+                            .solve(&b, &mut x)
+                            .expect("pipelined distributed CG solve");
+                    });
+                });
+            }
+        }
+        group.finish();
+    }
 }
 
 fn check_reduction_budget(tag: &str, reductions: usize, n_local: usize) {
@@ -298,7 +478,8 @@ criterion_group!(
     benches,
     bench_suite,
     bench_adaptive_tuner_configs,
-    bench_sparse_exchange
+    bench_sparse_exchange,
+    bench_pipelined_cg_async_distcsr
 );
 #[cfg(not(feature = "mpi"))]
 criterion_group!(benches, bench_suite, bench_adaptive_tuner_configs);

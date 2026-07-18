@@ -68,6 +68,38 @@ fn pipelined_cg_uses_single_reduction_per_iteration() -> Result<(), KError> {
 }
 
 #[test]
+fn pipelined_cg_refresh_reuses_the_iteration_tuple_reduction() -> Result<(), KError> {
+    let a = util::spd_poisson2d(10);
+    let b: Vec<R> = util::rhs_random(a.nrows(), 23);
+    let mut solver = PcgSolver::new(1e-8, 5_000);
+    solver.set_variant(PcgVariant::Pipelined { replace_every: 3 });
+    let mut ws = Workspace::default();
+    let mut pc = Jacobi::new();
+    let op: &dyn crate::matrix::op::LinOp<S = f64> = &a;
+    pc.setup(op)?;
+    let comm = UniverseComm::NoComm(NoComm);
+    let mut x: Vec<R> = vec![R::default(); a.nrows()];
+    let stats = solver.solve(
+        op,
+        Some(&mut pc),
+        &b,
+        &mut x,
+        PcSide::Left,
+        &comm,
+        None,
+        Some(&mut ws),
+    )?;
+
+    assert!(stats.counters.residual_replacements > 0);
+    assert_eq!(
+        stats.counters.num_global_reductions,
+        stats.iterations + 1,
+        "each pipelined iteration, including a refresh, should use one fused tuple reduction"
+    );
+    Ok(())
+}
+
+#[test]
 fn gmres_classic_reduction_count_within_expected_bounds() -> Result<(), KError> {
     crate::utils::reduction::install_test_counter(true);
     let a = util::nonsym_convdiff_2d(8, 4.0);

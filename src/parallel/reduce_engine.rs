@@ -162,7 +162,11 @@ impl CommReductionEngine {
     }
 
     fn effective_mode(&self) -> ReproMode {
-        self.opts.effective_mode()
+        if self.comm.is_reproducible() && matches!(self.opts.effective_mode(), ReproMode::Fast) {
+            ReproMode::Deterministic
+        } else {
+            self.opts.effective_mode()
+        }
     }
 
     fn async_enabled(&self) -> bool {
@@ -170,6 +174,9 @@ impl CommReductionEngine {
             return false;
         }
         if self.opts.reproducible {
+            return false;
+        }
+        if self.comm.is_reproducible() {
             return false;
         }
         if self.comm.size() <= 1 {

@@ -1,9 +1,24 @@
 #![cfg(not(feature = "complex"))]
 //! Tests for the PETSc-style options parsing and integration.
 
+use kryst::algebra::parallel_cfg::{ParallelTune, parallel_tune, set_parallel_tune};
 use kryst::config::options::{CgVariant, KspOptions, PcOptions, PcSide, parse_all_options};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::error::KError;
+
+struct ParallelTuneRestore(ParallelTune);
+
+impl ParallelTuneRestore {
+    fn capture() -> Self {
+        Self(parallel_tune())
+    }
+}
+
+impl Drop for ParallelTuneRestore {
+    fn drop(&mut self) {
+        set_parallel_tune(self.0);
+    }
+}
 
 #[test]
 fn test_ksp_options_from_args() {
@@ -240,6 +255,45 @@ fn deterministic_reduction_mode_disables_cg_async_overlap_diagnostics() {
             .and_then(|v| v.as_bool()),
         Some(false)
     );
+}
+
+#[test]
+fn ksp_parallel_tuning_options_propagate_to_context_and_global_tune() {
+    let _restore_tune = ParallelTuneRestore::capture();
+    let opts = KspOptions::from_args(&[
+        "-ksp_threads",
+        "3",
+        "-ksp_min_len_vec",
+        "37",
+        "-ksp_min_rows_spmv",
+        "41",
+    ])
+    .unwrap();
+
+    let mut ksp = KspContext::new();
+    ksp.set_from_options(&opts).unwrap();
+
+    let tune = parallel_tune();
+    assert_eq!(tune.min_len_vec, 37);
+    assert_eq!(tune.min_rows_spmv, 41);
+
+    #[cfg(feature = "rayon")]
+    {
+        let view = ksp.view();
+        let stage_threads = view
+            .solver_config
+            .get("execution_stage_threads")
+            .and_then(|v| v.as_object())
+            .expect("thread stage diagnostics");
+        assert_eq!(
+            stage_threads.get("outer_setup").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            stage_threads.get("outer_apply").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+    }
 }
 
 #[cfg(feature = "backend-faer")]

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use kryst::config::options::{KspOptions, PcOptions};
+use kryst::config::options::{CgVariant, KspOptions, PcOptions};
 use kryst::context::ksp_context::{KspContext, SolverType};
 use kryst::matrix::LinOp;
 use kryst::matrix::dist_csr::DistCsrOp;
@@ -141,6 +141,119 @@ fn mpi_convergence_reason_consistent_across_ranks() {
     assert!(
         (iter_sum - (stats.iterations as f64) * size).abs() < 1e-12,
         "iteration count differs across ranks"
+    );
+}
+
+#[test]
+fn mpi_pipelined_pcg_uses_block_jacobi_jacobi_and_converges() {
+    let _guard = mpi_test_guard();
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    if comm.size() < 2 {
+        return;
+    }
+
+    let n_per = 16;
+    let rank = comm.rank();
+    let dist = make_dist_poisson(&comm, n_per);
+    let rhs: Vec<f64> = (0..n_per)
+        .map(|i| {
+            let global_row = (rank * n_per + i) as f64;
+            (0.19 * global_row).sin() + (0.07 * global_row).cos()
+        })
+        .collect();
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Pcg).expect("set PCG");
+    ksp.set_from_all_options(
+        &KspOptions {
+            cg_variant: Some(CgVariant::Pipelined),
+            cg_replace_every: Some(0),
+            cg_use_async: Some(false),
+            ..KspOptions::default()
+        },
+        &PcOptions {
+            pc_type: Some("jacobi".to_string()),
+            pc_global: Some("block_jacobi".to_string()),
+            pc_local: Some("jacobi".to_string()),
+            ..PcOptions::default()
+        },
+    )
+    .expect("set distributed PCG options");
+    ksp.set_pc_side(PcSide::Left);
+    ksp.set_tolerances(1e-10, 1e-12, 1e6, 200);
+    ksp.set_operators(Arc::new(dist), None);
+    ksp.setup().expect("distributed PCG setup");
+
+    let view = ksp.view();
+    let selected_route = view
+        .solver_config
+        .get("pc_dist_selected_route")
+        .and_then(|value| value.as_str())
+        .expect("distributed PC route diagnostics");
+    assert!(
+        selected_route.starts_with("distcsr_native_block_jacobi"),
+        "expected native block-Jacobi route, got {selected_route}"
+    );
+
+    let mut x = vec![0.0; n_per];
+    let stats = ksp.solve(&rhs, &mut x).expect("pipelined distributed PCG");
+    assert!(
+        stats.reason.is_converged(),
+        "pipelined distributed PCG failed: {stats:?}"
+    );
+    assert!(
+        stats.iterations < 200,
+        "unexpected iteration cap: {stats:?}"
+    );
+}
+
+#[test]
+fn mpi_pipelined_pcg_refresh_uses_one_tuple_reduction_per_iteration() {
+    let _guard = mpi_test_guard();
+    let comm = UniverseComm::Mpi(Arc::new(MpiComm::new()));
+    if comm.size() < 2 {
+        return;
+    }
+
+    let n_per = 8;
+    let rank = comm.rank();
+    let dist = make_dist_poisson(&comm, n_per);
+    let rhs: Vec<f64> = (0..n_per)
+        .map(|i| 1.0 + (rank * n_per + i) as f64 * 0.125)
+        .collect();
+
+    let mut ksp = KspContext::new();
+    ksp.set_type(SolverType::Pcg).expect("set PCG");
+    ksp.set_from_all_options(
+        &KspOptions {
+            cg_variant: Some(CgVariant::Pipelined),
+            cg_replace_every: Some(8),
+            cg_use_async: Some(false),
+            ..KspOptions::default()
+        },
+        &PcOptions {
+            pc_type: Some("jacobi".to_string()),
+            pc_global: Some("block_jacobi".to_string()),
+            pc_local: Some("jacobi".to_string()),
+            ..PcOptions::default()
+        },
+    )
+    .expect("set pipelined PCG options");
+    ksp.set_tolerances(1e-10, 1e-12, 1e6, 500);
+    ksp.set_operators(Arc::new(dist), None);
+    ksp.setup().expect("distributed PCG setup");
+
+    let mut x = vec![0.0; n_per];
+    let stats = ksp.solve(&rhs, &mut x).expect("pipelined distributed PCG");
+    assert!(
+        stats.reason.is_converged(),
+        "pipelined distributed PCG failed: {stats:?}"
+    );
+    assert!(stats.counters.residual_replacements > 0, "stats={stats:?}");
+    assert_eq!(
+        stats.counters.num_global_reductions,
+        stats.iterations + 1,
+        "a residual refresh must reuse the iteration's fused reduction tuple"
     );
 }
 

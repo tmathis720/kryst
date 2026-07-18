@@ -466,6 +466,8 @@ struct PendingMpiPc {
     mpi_opts: MpiPcOptions,
     #[allow(dead_code)]
     pc_opts: PcOptions,
+    #[cfg(feature = "mpi")]
+    installed: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -912,6 +914,13 @@ impl KspContext {
         pc_type: PcType,
         opts: Option<&PcOptions>,
     ) -> Result<&mut Self, KError> {
+        #[cfg(feature = "backend-faer")]
+        {
+            // An explicit PC selection supersedes any previously staged
+            // distributed-PC configuration. `set_from_all_options` restores
+            // the distributed request immediately after this call.
+            self.pending_mpi_pc = None;
+        }
         let spec = PcFactory::create_deferred_pc(pc_type, opts.cloned())?;
         self.pc_spec = Some(spec.clone());
         match PcFactory::create_preconditioner(pc_type, opts) {
@@ -1834,6 +1843,8 @@ impl KspContext {
             self.pending_mpi_pc = Some(PendingMpiPc {
                 mpi_opts: pc_opts.mpi_pc_options()?,
                 pc_opts: pc_opts.clone(),
+                #[cfg(feature = "mpi")]
+                installed: false,
             });
             self.dist_route_diag = DistRouteDiagnosticsState::default();
         }
@@ -1918,15 +1929,19 @@ impl KspContext {
                 let variant = self.pending_cg.variant.unwrap_or(CgVariant::Classic);
                 let async_enabled = self.pending_cg.use_async.unwrap_or(true);
                 let async_min_n = self.pending_cg.async_min_n.unwrap_or(10_000);
+                let comm_reproducible = self
+                    .bound_comm
+                    .as_ref()
+                    .is_some_and(crate::parallel::UniverseComm::is_reproducible);
                 let async_overlap_safe =
-                    matches!(self.reduction_opts.effective_mode(), ReproMode::Fast);
+                    matches!(self.reduction_opts.effective_mode(), ReproMode::Fast)
+                        && !comm_reproducible;
                 let bound_size = self
                     .bound_comm
                     .as_ref()
                     .map(|comm| comm.size())
                     .unwrap_or(1);
-                let async_effective = matches!(variant, CgVariant::Pipelined)
-                    && async_enabled
+                let async_effective = async_enabled
                     && async_overlap_safe
                     && bound_size > 1
                     && self
@@ -1971,15 +1986,19 @@ impl KspContext {
                 let pipelined = self.pending_pcg.pipelined.unwrap_or(false);
                 let async_enabled = self.pending_pcg.use_async.unwrap_or(true);
                 let async_min_n = self.pending_pcg.async_min_n.unwrap_or(10_000);
+                let comm_reproducible = self
+                    .bound_comm
+                    .as_ref()
+                    .is_some_and(crate::parallel::UniverseComm::is_reproducible);
                 let async_overlap_safe =
-                    matches!(self.reduction_opts.effective_mode(), ReproMode::Fast);
+                    matches!(self.reduction_opts.effective_mode(), ReproMode::Fast)
+                        && !comm_reproducible;
                 let bound_size = self
                     .bound_comm
                     .as_ref()
                     .map(|comm| comm.size())
                     .unwrap_or(1);
-                let async_effective = pipelined
-                    && async_enabled
+                let async_effective = async_enabled
                     && async_overlap_safe
                     && bound_size > 1
                     && self
@@ -2941,26 +2960,32 @@ impl KspContext {
             );
         }
 
-        if self.pc.is_none() {
-            #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
+        #[cfg(all(feature = "backend-faer", not(feature = "complex"), feature = "mpi"))]
+        {
+            let pending = self.pending_mpi_pc.as_ref().cloned();
+            if let Some(pending) = pending
+                && !pending.installed
+                && pending.mpi_opts.global_pc != GlobalPcKind::None
             {
-                if self.pending_pc.is_none() && self.pc_chain_plan.is_none() {
-                    if let Some(ref pending) = self.pending_mpi_pc
-                        && pending.mpi_opts.global_pc != GlobalPcKind::None
-                    {
-                        let dist_op = pmat
-                            .as_any()
-                            .downcast_ref::<DistCsrOp>()
-                            .or_else(|| amat.as_any().downcast_ref::<DistCsrOp>());
-                        if let Some(dist_op) = dist_op
-                            && dist_op.comm().size() > 1
-                        {
-                            let pc = self.build_mpi_global_pc(pending, dist_op)?;
-                            self.pc = Some(pc);
-                        }
+                let dist_op = pmat
+                    .as_any()
+                    .downcast_ref::<DistCsrOp>()
+                    .or_else(|| amat.as_any().downcast_ref::<DistCsrOp>());
+                if let Some(dist_op) = dist_op
+                    && dist_op.comm().size() > 1
+                {
+                    // A local factory PC may already exist (for example,
+                    // `Jacobi`). A requested global route must replace it.
+                    self.pc = Some(self.build_mpi_global_pc(&pending, dist_op)?);
+                    self.pending_pc = None;
+                    if let Some(pending) = self.pending_mpi_pc.as_mut() {
+                        pending.installed = true;
                     }
                 }
             }
+        }
+
+        if self.pc.is_none() {
             if self.pc_chain_plan.is_none() {
                 if let Some(spec) = self.pending_pc.take() {
                     let pc = PcFactory::construct_deferred_preconditioner(spec, pmat.as_ref())?;
@@ -3182,6 +3207,7 @@ impl KspContext {
                         R::default()
                     };
                     let mut stats = SolveStats::new(0, res, reason);
+                    stats.final_true_residual = Some(res);
                     if let Some(failure) =
                         ReasonEmitter::nested_pc_failure(&err, FailureStage::Setup)
                     {
@@ -3292,9 +3318,9 @@ impl KspContext {
             self.last_converged_reason = Some(ConvergedReason::ConvergedAtol);
             self.reason_counters
                 .record_reason(ConvergedReason::ConvergedAtol);
-            return Ok(
-                SolveStats::new(0, res, ConvergedReason::ConvergedAtol).finalize_reason_counters()
-            );
+            let mut stats = SolveStats::new(0, res, ConvergedReason::ConvergedAtol);
+            stats.final_true_residual = Some(res);
+            return Ok(stats.finalize_reason_counters());
         }
 
         let amat_ref = amat.as_ref();
@@ -3346,6 +3372,7 @@ impl KspContext {
                         }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
                         let mut stats = SolveStats::new(0, res, reason);
+                        stats.final_true_residual = Some(res);
                         if let Some(failure) =
                             ReasonEmitter::nested_pc_failure(&err, FailureStage::Solve)
                         {
@@ -3371,6 +3398,7 @@ impl KspContext {
 
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
             stats.final_residual = res;
+            stats.final_true_residual = Some(res);
             self.apply_residual_contract_classification(&mut stats, Some(amat_ref), b, None)?;
             let stats = stats.finalize_reason_counters();
             if let Some(inner) = stats.nested_pc_failure.as_ref() {
@@ -3686,6 +3714,7 @@ impl KspContext {
                         }
                         let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
                         let mut stats = SolveStats::new(0, res, reason);
+                        stats.final_true_residual = Some(res);
                         if let Some(failure) =
                             ReasonEmitter::nested_pc_failure(&err, FailureStage::Solve)
                         {
@@ -3711,6 +3740,7 @@ impl KspContext {
 
             let res = self.true_residual_norm_in_place(amat_ref, b, x)?;
             stats.final_residual = res;
+            stats.final_true_residual = Some(res);
             self.apply_residual_contract_classification(&mut stats, Some(amat_ref), b, None)?;
             let stats = stats.finalize_reason_counters();
             if let Some(inner) = stats.nested_pc_failure.as_ref() {

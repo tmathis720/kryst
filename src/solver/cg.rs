@@ -439,11 +439,31 @@ impl CgSolver {
     }
 
     #[inline]
-    fn should_use_async(&self, comm: &UniverseComm, n: usize, mode: ReproMode) -> bool {
-        self.async_enabled
+    fn async_reductions_eligible(
+        enabled: bool,
+        comm_size: usize,
+        n: usize,
+        min_n: usize,
+        mode: ReproMode,
+        comm_reproducible: bool,
+    ) -> bool {
+        enabled
             && Self::async_reduction_mode_allows_overlap(mode)
-            && comm.size() > 1
-            && n >= self.async_min_n
+            && !comm_reproducible
+            && comm_size > 1
+            && n >= min_n
+    }
+
+    #[inline]
+    fn should_use_async(&self, comm: &UniverseComm, n: usize, mode: ReproMode) -> bool {
+        Self::async_reductions_eligible(
+            self.async_enabled,
+            comm.size(),
+            n,
+            self.async_min_n,
+            mode,
+            comm.is_reproducible(),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1100,6 +1120,14 @@ impl CgSolver {
                 xnorm = red.norm2(x);
             }
 
+            // Refresh before forming the next preconditioned residual tuple.  Doing
+            // this after the recurrence tuple would spend a matvec, PC application,
+            // and collective on values that are immediately discarded.
+            let refresh_due = refresh_every.is_some_and(|every| k % every == 0);
+            if refresh_due {
+                a.matvec_s(x, tmp, scratch);
+                par_residual_from_matvec(b, tmp, r);
+            }
             if let Some(pc) = pc {
                 pc.apply_s(PcSide::Left, r, &mut u[..], scratch)?;
             } else {
@@ -1170,7 +1198,7 @@ impl CgSolver {
 
             let rho_scalar = tuple[rho_idx];
             debug::record_dot(debug::DotKind::Rho, rho_scalar);
-            let rho_new: R = dot_result_to_real(rho_scalar);
+            let mut rho_new: R = dot_result_to_real(rho_scalar);
             if !rho_new.is_finite() {
                 return Err(non_finite_reduction_error("pipelined cg rho_new", rho_new));
             }
@@ -1180,70 +1208,87 @@ impl CgSolver {
 
             let delta_scalar = tuple[delta_idx];
             debug::record_dot(debug::DotKind::PAp, delta_scalar);
-            let delta_new: R = dot_result_to_real(delta_scalar);
+            let mut delta_new: R = dot_result_to_real(delta_scalar);
 
-            let rsq_new = if let Some(idx) = rsq_idx {
+            if let Some(idx) = rsq_idx {
                 let value = tuple[idx];
                 debug::record_dot(debug::DotKind::RNorm, value);
-                Some(dot_result_to_real(value))
-            } else {
-                None
-            };
-            let znorm_new = if let Some(idx) = znorm_idx {
+            }
+            if let Some(idx) = znorm_idx {
                 let value = tuple[idx];
                 debug::record_dot(debug::DotKind::ZNorm, value);
-                Some(dot_result_to_real(value))
-            } else {
-                None
-            };
-
-            let refresh_due = refresh_every.is_some_and(|every| k % every == 0);
-            let (mut rho_new, mut delta_new, _rsq_new, _znorm_new, _refreshed) = if refresh_due {
-                a.matvec_s(x, tmp, scratch);
-                par_residual_from_matvec(b, tmp, r);
-                if let Some(pc) = pc {
-                    pc.apply_s(PcSide::Left, r, &mut u[..], scratch)?;
-                } else {
-                    par_copy(r, u);
-                }
-                a.matvec_s(u, &mut w[..], scratch);
-
-                let mut pairs: SmallVec<[(&[S], &[S]); 4]> = SmallVec::new();
-                pairs.push((&r[..], &u[..]));
-                let rho_idx = 0usize;
-                pairs.push((&u[..], &w[..]));
-                let delta_idx = 1usize;
-                let rsq_idx = if want_unpre {
-                    pairs.push((&r[..], &r[..]));
-                    Some(pairs.len() - 1)
-                } else {
-                    None
-                };
-                let znorm_idx = if want_natural {
-                    pairs.push((&u[..], &u[..]));
-                    Some(pairs.len() - 1)
-                } else {
-                    None
-                };
-                let mut vals: SmallVec<[S; 4]> = SmallVec::new();
-                vals.resize(pairs.len(), S::zero());
-                red.dot_many_into(pairs.as_slice(), vals.as_mut_slice());
-                counters.num_global_reductions += 1;
+            }
+            if refresh_due {
                 counters.residual_replacements += 1;
+            }
 
-                let rho_val = dot_result_to_real(vals[rho_idx]);
-                let delta_val = dot_result_to_real(vals[delta_idx]);
-                let rsq_val = rsq_idx.map(|idx| dot_result_to_real(vals[idx]));
-                let znorm_val = znorm_idx.map(|idx| dot_result_to_real(vals[idx]));
-                (rho_val, delta_val, rsq_val, znorm_val, true)
-            } else {
-                (rho_new, delta_new, rsq_new, znorm_new, false)
-            };
+            // Recomputed residuals invalidate the old pipelined recurrence.
+            // Restart the direction from the refreshed preconditioned residual
+            // so the following step is a valid CG step rather than mixing
+            // vectors built from incompatible residual histories.
+            if refresh_due {
+                let res_reported: R = match self.norm_type {
+                    CgNormType::Preconditioned => rho_new.abs().sqrt(),
+                    CgNormType::Unpreconditioned => red.norm2(r),
+                    CgNormType::Natural => red.norm2(u),
+                    CgNormType::None => R::zero(),
+                };
 
-            // A residual refresh should correct recursively accumulated drift,
-            // but it should not turn pipelined CG into periodic steepest
-            // descent restarts. Keep the usual direction recurrences so we
-            // preserve conjugacy information across refresh points.
+                if let Some(ms) = monitors {
+                    for m in ms {
+                        let _ = m(k, res_reported, 0);
+                    }
+                }
+                if let Some(m) = &self.true_residual_monitor {
+                    let true_res = red.norm2(r);
+                    let _ = m(k, true_res, 0);
+                }
+
+                let (reason, mut s_out) = self.conv.check(res_reported, res0_reported, k);
+                if !matches!(reason, ConvergedReason::Continued) {
+                    s_out.final_residual = red.norm2(r);
+                    let tol = self.conv.atol.max(self.conv.rtol * res0_reported);
+                    if s_out.final_residual <= tol {
+                        if s_out.final_residual <= zero_floor {
+                            s_out.final_residual = R::zero();
+                        }
+                        return Ok(Self::attach_drift_stats(s_out.with_counters(counters)));
+                    }
+                    if k == self.conv.max_iters {
+                        break;
+                    }
+                }
+
+                if !rho_new.is_finite() {
+                    return Err(non_finite_reduction_error(
+                        "pipelined cg refreshed rho_new",
+                        rho_new,
+                    ));
+                }
+                if rho_new < R::zero() {
+                    return Err(KError::IndefinitePreconditioner);
+                }
+                if !delta_new.is_finite() {
+                    return Err(non_finite_reduction_error(
+                        "pipelined cg refreshed delta_new",
+                        delta_new,
+                    ));
+                }
+                if delta_new <= R::zero() {
+                    return Err(KError::IndefiniteMatrix);
+                }
+
+                par_copy(u, p);
+                par_copy(w, s);
+                rho_prev = rho;
+                rho = rho_new;
+                delta = delta_new;
+                alpha = rho / delta;
+                stats.iterations = k;
+                stats.final_residual = res_reported;
+                continue;
+            }
+
             let beta = rho_new / rho;
             let beta_s: S = S::from_real(beta);
             par_cg_recurrence2(u, w, beta_s, p, s);
@@ -1319,6 +1364,9 @@ impl CgSolver {
                     stats.iterations = k;
                     stats.final_residual = s_out.final_residual;
                     continue;
+                }
+                if s_out.final_residual > tol {
+                    break;
                 }
                 if s_out.final_residual <= zero_floor {
                     s_out.final_residual = R::zero();
@@ -1471,6 +1519,50 @@ mod tests {
         ));
         assert!(!CgSolver::async_reduction_mode_allows_overlap(
             ReproMode::DeterministicAccurate
+        ));
+    }
+
+    #[test]
+    fn async_overlap_eligibility_requires_parallel_fast_nonreproducible_execution() {
+        assert!(CgSolver::async_reductions_eligible(
+            true,
+            2,
+            64,
+            64,
+            ReproMode::Fast,
+            false,
+        ));
+        assert!(!CgSolver::async_reductions_eligible(
+            true,
+            2,
+            64,
+            64,
+            ReproMode::Fast,
+            true,
+        ));
+        assert!(!CgSolver::async_reductions_eligible(
+            true,
+            1,
+            64,
+            64,
+            ReproMode::Fast,
+            false,
+        ));
+        assert!(!CgSolver::async_reductions_eligible(
+            true,
+            2,
+            63,
+            64,
+            ReproMode::Fast,
+            false,
+        ));
+        assert!(!CgSolver::async_reductions_eligible(
+            true,
+            2,
+            64,
+            64,
+            ReproMode::Deterministic,
+            false,
         ));
     }
 }

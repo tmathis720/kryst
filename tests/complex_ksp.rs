@@ -267,6 +267,7 @@ fn ksp_pipelined_pcg_complex_generic_csr_route_converges() {
         stats.reason,
         stats.final_residual
     );
+    assert_eq!(stats.final_true_residual, Some(stats.final_residual));
 
     for (xi, xt) in x.iter().zip(x_true.iter()) {
         assert_abs_diff_eq!(xi.real(), xt.real(), epsilon = 1e-9);

@@ -658,12 +658,10 @@ pub fn build_block_jacobi_pc(
                         jacobi,
                         dist_op.local_row_offset(),
                         opts.local_apply_mode,
-                        maybe_native_plan(
-                            dist_op,
-                            opts.local_apply_mode,
-                            local_caps.native_local_apply,
-                            "jacobi",
-                        )?,
+                        // A halo correction changes Jacobi into a generally
+                        // nonsymmetric operator. Keep this route as true
+                        // block Jacobi so CG/PCG retain their SPD contract.
+                        None,
                     ))
                 }
                 LocalPcKind::Fsai => Box::new(build_obj_block_pc(
