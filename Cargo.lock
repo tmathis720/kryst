@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "kryst"
-version = "4.3.0"
+version = "4.6.0"
 dependencies = [
  "approx 0.5.1",
  "bitflags",
