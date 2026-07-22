@@ -24,6 +24,10 @@ jobs:
             cmd: cargo test
           - name: complex
             cmd: cargo test --features complex
+          - name: cuda-cpu-only
+            cmd: cargo test --no-default-features --features cuda --test cuda_feature
+          - name: cuda-complex-cpu-only
+            cmd: cargo test --no-default-features --features "cuda,complex" --test cuda_feature
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

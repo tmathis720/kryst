@@ -1,0 +1,236 @@
+.version 7.0
+.target sm_50
+.address_size 64
+
+.shared .align 8 .b8 kryst_multi_dot_real_smem[2048];
+
+// y = alpha * x + beta * y
+.visible .entry kryst_axpby_f64(
+    .param .u64 x_ptr,
+    .param .u64 y_ptr,
+    .param .f64 alpha,
+    .param .f64 beta,
+    .param .u64 n
+)
+{
+    .reg .pred %pred;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<8>;
+    .reg .f64 %fd<6>;
+
+    ld.param.u64 %rd1, [x_ptr];
+    ld.param.u64 %rd2, [y_ptr];
+    ld.param.u64 %rd3, [n];
+    ld.param.f64 %fd1, [alpha];
+    ld.param.f64 %fd2, [beta];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mad.lo.s32 %r4, %r2, %r3, %r1;
+    cvt.u64.u32 %rd4, %r4;
+    setp.ge.u64 %pred, %rd4, %rd3;
+    @%pred bra AXPBY_DONE;
+    mul.lo.u64 %rd5, %rd4, 8;
+    add.u64 %rd6, %rd1, %rd5;
+    add.u64 %rd7, %rd2, %rd5;
+    ld.global.f64 %fd3, [%rd6];
+    ld.global.f64 %fd4, [%rd7];
+    mul.rn.f64 %fd5, %fd2, %fd4;
+    fma.rn.f64 %fd5, %fd1, %fd3, %fd5;
+    st.global.f64 [%rd7], %fd5;
+AXPBY_DONE:
+    ret;
+}
+
+// x += alpha * p; r -= alpha * ap
+.visible .entry kryst_cg_update_f64(
+    .param .u64 p_ptr,
+    .param .u64 ap_ptr,
+    .param .u64 x_ptr,
+    .param .u64 r_ptr,
+    .param .f64 alpha,
+    .param .u64 n
+)
+{
+    .reg .pred %pred;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<12>;
+    .reg .f64 %fd<9>;
+
+    ld.param.u64 %rd1, [p_ptr];
+    ld.param.u64 %rd2, [ap_ptr];
+    ld.param.u64 %rd3, [x_ptr];
+    ld.param.u64 %rd4, [r_ptr];
+    ld.param.u64 %rd5, [n];
+    ld.param.f64 %fd1, [alpha];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mad.lo.s32 %r4, %r2, %r3, %r1;
+    cvt.u64.u32 %rd6, %r4;
+    setp.ge.u64 %pred, %rd6, %rd5;
+    @%pred bra CG_DONE;
+    mul.lo.u64 %rd7, %rd6, 8;
+    add.u64 %rd8, %rd1, %rd7;
+    add.u64 %rd9, %rd2, %rd7;
+    add.u64 %rd10, %rd3, %rd7;
+    add.u64 %rd11, %rd4, %rd7;
+    ld.global.f64 %fd2, [%rd8];
+    ld.global.f64 %fd3, [%rd9];
+    ld.global.f64 %fd4, [%rd10];
+    ld.global.f64 %fd5, [%rd11];
+    fma.rn.f64 %fd6, %fd1, %fd2, %fd4;
+    neg.f64 %fd7, %fd1;
+    fma.rn.f64 %fd8, %fd7, %fd3, %fd5;
+    st.global.f64 [%rd10], %fd6;
+    st.global.f64 [%rd11], %fd8;
+CG_DONE:
+    ret;
+}
+
+// packed[i] = source[indices[i]]
+.visible .entry kryst_gather_f64(
+    .param .u64 source_ptr,
+    .param .u64 indices_ptr,
+    .param .u64 packed_ptr,
+    .param .u64 n
+)
+{
+    .reg .pred %pred;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<11>;
+    .reg .f64 %fd;
+
+    ld.param.u64 %rd1, [source_ptr];
+    ld.param.u64 %rd2, [indices_ptr];
+    ld.param.u64 %rd3, [packed_ptr];
+    ld.param.u64 %rd4, [n];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mad.lo.s32 %r4, %r2, %r3, %r1;
+    cvt.u64.u32 %rd5, %r4;
+    setp.ge.u64 %pred, %rd5, %rd4;
+    @%pred bra GATHER_DONE;
+    mul.lo.u64 %rd6, %rd5, 8;
+    add.u64 %rd7, %rd2, %rd6;
+    ld.global.u64 %rd8, [%rd7];
+    mul.lo.u64 %rd9, %rd8, 8;
+    add.u64 %rd10, %rd1, %rd9;
+    ld.global.f64 %fd, [%rd10];
+    add.u64 %rd10, %rd3, %rd6;
+    st.global.f64 [%rd10], %fd;
+GATHER_DONE:
+    ret;
+}
+
+// output[blockIdx.x] = dot(basis[blockIdx.x], rhs), with the final
+// block computing dot(rhs, rhs). Each block traverses the complete vector and
+// uses a fixed reduction tree, avoiding global atomics and partial buffers.
+.visible .entry kryst_multi_dot_f64(
+    .param .u64 basis_ptrs,
+    .param .u64 rhs_ptr,
+    .param .u64 output_ptr,
+    .param .u64 basis_count,
+    .param .u64 n
+)
+{
+    .reg .pred %p<5>;
+    .reg .b32 %r<7>;
+    .reg .b64 %rd<18>;
+    .reg .f64 %fd<9>;
+
+    ld.param.u64 %rd1, [basis_ptrs];
+    ld.param.u64 %rd2, [rhs_ptr];
+    ld.param.u64 %rd3, [output_ptr];
+    ld.param.u64 %rd4, [basis_count];
+    ld.param.u64 %rd5, [n];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %ctaid.x;
+    cvt.u64.u32 %rd6, %r3;
+    setp.gt.u64 %p1, %rd6, %rd4;
+    @%p1 bra MULTI_DOT_REAL_DONE;
+
+    // Select basis[block] or rhs for the final norm-squared block.
+    setp.eq.u64 %p2, %rd6, %rd4;
+    mov.u64 %rd7, %rd2;
+    mul.lo.u64 %rd8, %rd6, 8;
+    add.u64 %rd9, %rd1, %rd8;
+    @!%p2 ld.global.u64 %rd7, [%rd9];
+
+    cvt.u64.u32 %rd10, %r1;
+    cvt.u64.u32 %rd11, %r2;
+    mov.f64 %fd1, 0d0000000000000000;
+    mov.f64 %fd2, 0d0000000000000000;
+MULTI_DOT_REAL_LOOP:
+    setp.ge.u64 %p3, %rd10, %rd5;
+    @%p3 bra MULTI_DOT_REAL_LOCAL_DONE;
+    mul.lo.u64 %rd12, %rd10, 8;
+    add.u64 %rd13, %rd7, %rd12;
+    add.u64 %rd14, %rd2, %rd12;
+    ld.global.f64 %fd3, [%rd13];
+    ld.global.f64 %fd4, [%rd14];
+    // Kahan accumulation gives deterministic mode an accurate fixed-order
+    // local sum without requiring a second kernel or global scratch array.
+    mul.rn.f64 %fd5, %fd3, %fd4;
+    sub.rn.f64 %fd6, %fd5, %fd2;
+    add.rn.f64 %fd7, %fd1, %fd6;
+    sub.rn.f64 %fd8, %fd7, %fd1;
+    sub.rn.f64 %fd2, %fd8, %fd6;
+    mov.f64 %fd1, %fd7;
+    add.u64 %rd10, %rd10, %rd11;
+    bra MULTI_DOT_REAL_LOOP;
+
+MULTI_DOT_REAL_LOCAL_DONE:
+    mov.u64 %rd15, kryst_multi_dot_real_smem;
+    cvt.u64.u32 %rd16, %r1;
+    mul.lo.u64 %rd16, %rd16, 8;
+    add.u64 %rd17, %rd15, %rd16;
+    st.shared.f64 [%rd17], %fd1;
+    bar.sync 0;
+
+    setp.ge.u32 %p4, %r1, 128;
+    @!%p4 ld.shared.f64 %fd3, [%rd17+1024];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd3;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 64;
+    @!%p4 ld.shared.f64 %fd3, [%rd17+512];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd3;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 32;
+    @!%p4 ld.shared.f64 %fd3, [%rd17+256];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd3;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 16;
+    @!%p4 ld.shared.f64 %fd3, [%rd17+128];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd3;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 8;
+    @!%p4 ld.shared.f64 %fd3, [%rd17+64];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd3;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 4;
+    @!%p4 ld.shared.f64 %fd3, [%rd17+32];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd3;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 2;
+    @!%p4 ld.shared.f64 %fd3, [%rd17+16];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd3;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 1;
+    @!%p4 ld.shared.f64 %fd3, [%rd17+8];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd3;
+    @!%p4 mul.lo.u64 %rd8, %rd6, 8;
+    @!%p4 add.u64 %rd9, %rd3, %rd8;
+    @!%p4 st.global.f64 [%rd9], %fd1;
+MULTI_DOT_REAL_DONE:
+    ret;
+}

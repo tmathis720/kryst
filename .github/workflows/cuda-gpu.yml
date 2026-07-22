@@ -1,0 +1,58 @@
+name: cuda-gpu
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 6 * * 1"
+
+jobs:
+  gpu:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cuda: "12"
+            runner: cuda-12
+          - cuda: "13"
+            runner: cuda-13
+    runs-on: [self-hosted, linux, x64, "${{ matrix.runner }}"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: CUDA inventory
+        run: nvidia-smi
+      - name: Real CUDA tests
+        run: cargo test --features cuda --test cuda_gpu -- --ignored --test-threads=1
+      - name: Complex CUDA tests
+        run: cargo test --features "cuda,complex" --test cuda_gpu -- --ignored --test-threads=1
+      - name: Distributed CUDA MPI test
+        if: matrix.cuda == '12'
+        shell: bash
+        run: |
+          if command -v mpirun >/dev/null 2>&1; then
+            mpirun -n 2 cargo test --features "cuda,mpi" --test cuda_mpi -- --ignored --test-threads=1
+            if [[ "${KRYST_CUDA_AWARE_MPI:-0}" == "1" ]]; then
+              KRYST_TEST_CUDA_AWARE_MPI=1 mpirun -n 2 cargo test --features "cuda,mpi" --test cuda_mpi -- --ignored --test-threads=1
+            fi
+          else
+            echo "::warning::mpirun is unavailable; distributed CUDA test was skipped"
+          fi
+      - name: CUDA sanitizer smoke
+        if: matrix.cuda == '12'
+        shell: bash
+        run: |
+          if command -v compute-sanitizer >/dev/null 2>&1; then
+            compute-sanitizer --tool memcheck --target-processes all cargo test --features cuda --test cuda_gpu pipelined_gmres_family_uses_one_arnoldi_collective_and_reuses_workspace -- --ignored --test-threads=1
+            compute-sanitizer --tool racecheck --target-processes all cargo test --features cuda --test cuda_gpu pipelined_gmres_family_uses_one_arnoldi_collective_and_reuses_workspace -- --ignored --test-threads=1
+          else
+            echo "::warning::compute-sanitizer is unavailable; sanitizer smoke was skipped"
+          fi
+      - name: CPU-CUDA crossover report
+        shell: bash
+        run: |
+          KRYST_CUDA_BENCH_REPEATS=3 cargo run --release --example cuda_crossover --features cuda -- 16 32 64 > "cuda-crossover-${{ matrix.cuda }}.csv"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cuda-crossover-${{ matrix.cuda }}
+          path: cuda-crossover-${{ matrix.cuda }}.csv

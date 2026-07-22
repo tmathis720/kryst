@@ -1,0 +1,318 @@
+.version 7.0
+.target sm_50
+.address_size 64
+
+.shared .align 16 .b8 kryst_multi_dot_complex_smem[4096];
+
+// Complex double y = alpha * x + beta * y. Scalars are passed as four f64s
+// to keep the host ABI independent of CUDA's double2 declaration.
+.visible .entry kryst_axpby_c64(
+    .param .u64 x_ptr,
+    .param .u64 y_ptr,
+    .param .f64 alpha_re,
+    .param .f64 alpha_im,
+    .param .f64 beta_re,
+    .param .f64 beta_im,
+    .param .u64 n
+)
+{
+    .reg .pred %pred;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<8>;
+    .reg .f64 %fd<24>;
+
+    ld.param.u64 %rd1, [x_ptr];
+    ld.param.u64 %rd2, [y_ptr];
+    ld.param.u64 %rd3, [n];
+    ld.param.f64 %fd1, [alpha_re];
+    ld.param.f64 %fd2, [alpha_im];
+    ld.param.f64 %fd3, [beta_re];
+    ld.param.f64 %fd4, [beta_im];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mad.lo.s32 %r4, %r2, %r3, %r1;
+    cvt.u64.u32 %rd4, %r4;
+    setp.ge.u64 %pred, %rd4, %rd3;
+    @%pred bra AXPBY_DONE;
+    mul.lo.u64 %rd5, %rd4, 16;
+    add.u64 %rd6, %rd1, %rd5;
+    add.u64 %rd7, %rd2, %rd5;
+    ld.global.f64 %fd5, [%rd6];
+    ld.global.f64 %fd6, [%rd6+8];
+    ld.global.f64 %fd7, [%rd7];
+    ld.global.f64 %fd8, [%rd7+8];
+
+    mul.rn.f64 %fd9, %fd1, %fd5;
+    mul.rn.f64 %fd10, %fd2, %fd6;
+    sub.rn.f64 %fd11, %fd9, %fd10;
+    mul.rn.f64 %fd12, %fd1, %fd6;
+    mul.rn.f64 %fd13, %fd2, %fd5;
+    add.rn.f64 %fd14, %fd12, %fd13;
+    mul.rn.f64 %fd15, %fd3, %fd7;
+    mul.rn.f64 %fd16, %fd4, %fd8;
+    sub.rn.f64 %fd17, %fd15, %fd16;
+    mul.rn.f64 %fd18, %fd3, %fd8;
+    mul.rn.f64 %fd19, %fd4, %fd7;
+    add.rn.f64 %fd20, %fd18, %fd19;
+    add.rn.f64 %fd21, %fd11, %fd17;
+    add.rn.f64 %fd22, %fd14, %fd20;
+    st.global.f64 [%rd7], %fd21;
+    st.global.f64 [%rd7+8], %fd22;
+AXPBY_DONE:
+    ret;
+}
+
+// Complex double x += alpha * p; r -= alpha * ap.
+.visible .entry kryst_cg_update_c64(
+    .param .u64 p_ptr,
+    .param .u64 ap_ptr,
+    .param .u64 x_ptr,
+    .param .u64 r_ptr,
+    .param .f64 alpha_re,
+    .param .f64 alpha_im,
+    .param .u64 n
+)
+{
+    .reg .pred %pred;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<12>;
+    .reg .f64 %fd<28>;
+
+    ld.param.u64 %rd1, [p_ptr];
+    ld.param.u64 %rd2, [ap_ptr];
+    ld.param.u64 %rd3, [x_ptr];
+    ld.param.u64 %rd4, [r_ptr];
+    ld.param.u64 %rd5, [n];
+    ld.param.f64 %fd1, [alpha_re];
+    ld.param.f64 %fd2, [alpha_im];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mad.lo.s32 %r4, %r2, %r3, %r1;
+    cvt.u64.u32 %rd6, %r4;
+    setp.ge.u64 %pred, %rd6, %rd5;
+    @%pred bra CG_DONE;
+    mul.lo.u64 %rd7, %rd6, 16;
+    add.u64 %rd8, %rd1, %rd7;
+    add.u64 %rd9, %rd2, %rd7;
+    add.u64 %rd10, %rd3, %rd7;
+    add.u64 %rd11, %rd4, %rd7;
+    ld.global.f64 %fd3, [%rd8];
+    ld.global.f64 %fd4, [%rd8+8];
+    ld.global.f64 %fd5, [%rd9];
+    ld.global.f64 %fd6, [%rd9+8];
+    ld.global.f64 %fd7, [%rd10];
+    ld.global.f64 %fd8, [%rd10+8];
+    ld.global.f64 %fd9, [%rd11];
+    ld.global.f64 %fd10, [%rd11+8];
+
+    mul.rn.f64 %fd11, %fd1, %fd3;
+    mul.rn.f64 %fd12, %fd2, %fd4;
+    sub.rn.f64 %fd13, %fd11, %fd12;
+    mul.rn.f64 %fd14, %fd1, %fd4;
+    mul.rn.f64 %fd15, %fd2, %fd3;
+    add.rn.f64 %fd16, %fd14, %fd15;
+    add.rn.f64 %fd17, %fd7, %fd13;
+    add.rn.f64 %fd18, %fd8, %fd16;
+
+    mul.rn.f64 %fd19, %fd1, %fd5;
+    mul.rn.f64 %fd20, %fd2, %fd6;
+    sub.rn.f64 %fd21, %fd19, %fd20;
+    mul.rn.f64 %fd22, %fd1, %fd6;
+    mul.rn.f64 %fd23, %fd2, %fd5;
+    add.rn.f64 %fd24, %fd22, %fd23;
+    sub.rn.f64 %fd25, %fd9, %fd21;
+    sub.rn.f64 %fd26, %fd10, %fd24;
+    st.global.f64 [%rd10], %fd17;
+    st.global.f64 [%rd10+8], %fd18;
+    st.global.f64 [%rd11], %fd25;
+    st.global.f64 [%rd11+8], %fd26;
+CG_DONE:
+    ret;
+}
+
+// packed[i] = source[indices[i]] for complex double elements.
+.visible .entry kryst_gather_c64(
+    .param .u64 source_ptr,
+    .param .u64 indices_ptr,
+    .param .u64 packed_ptr,
+    .param .u64 n
+)
+{
+    .reg .pred %pred;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<11>;
+    .reg .f64 %fd<3>;
+
+    ld.param.u64 %rd1, [source_ptr];
+    ld.param.u64 %rd2, [indices_ptr];
+    ld.param.u64 %rd3, [packed_ptr];
+    ld.param.u64 %rd4, [n];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ctaid.x;
+    mov.u32 %r3, %ntid.x;
+    mad.lo.s32 %r4, %r2, %r3, %r1;
+    cvt.u64.u32 %rd5, %r4;
+    setp.ge.u64 %pred, %rd5, %rd4;
+    @%pred bra GATHER_DONE;
+    mul.lo.u64 %rd6, %rd5, 8;
+    add.u64 %rd7, %rd2, %rd6;
+    ld.global.u64 %rd8, [%rd7];
+    mul.lo.u64 %rd9, %rd8, 16;
+    add.u64 %rd10, %rd1, %rd9;
+    ld.global.f64 %fd1, [%rd10];
+    ld.global.f64 %fd2, [%rd10+8];
+    mul.lo.u64 %rd9, %rd5, 16;
+    add.u64 %rd10, %rd3, %rd9;
+    st.global.f64 [%rd10], %fd1;
+    st.global.f64 [%rd10+8], %fd2;
+GATHER_DONE:
+    ret;
+}
+
+// Complex conjugating multi-dot: output[i] = basis[i]^H rhs, followed by
+// rhs^H rhs. Each block owns one complete dot and reduces in fixed order.
+.visible .entry kryst_multi_dot_c64(
+    .param .u64 basis_ptrs,
+    .param .u64 rhs_ptr,
+    .param .u64 output_ptr,
+    .param .u64 basis_count,
+    .param .u64 n
+)
+{
+    .reg .pred %p<5>;
+    .reg .b32 %r<7>;
+    .reg .b64 %rd<18>;
+    .reg .f64 %fd<20>;
+
+    ld.param.u64 %rd1, [basis_ptrs];
+    ld.param.u64 %rd2, [rhs_ptr];
+    ld.param.u64 %rd3, [output_ptr];
+    ld.param.u64 %rd4, [basis_count];
+    ld.param.u64 %rd5, [n];
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r2, %ntid.x;
+    mov.u32 %r3, %ctaid.x;
+    cvt.u64.u32 %rd6, %r3;
+    setp.gt.u64 %p1, %rd6, %rd4;
+    @%p1 bra MULTI_DOT_COMPLEX_DONE;
+    setp.eq.u64 %p2, %rd6, %rd4;
+    mov.u64 %rd7, %rd2;
+    mul.lo.u64 %rd8, %rd6, 8;
+    add.u64 %rd9, %rd1, %rd8;
+    @!%p2 ld.global.u64 %rd7, [%rd9];
+
+    cvt.u64.u32 %rd10, %r1;
+    cvt.u64.u32 %rd11, %r2;
+    mov.f64 %fd1, 0d0000000000000000;
+    mov.f64 %fd2, 0d0000000000000000;
+    mov.f64 %fd3, 0d0000000000000000;
+    mov.f64 %fd4, 0d0000000000000000;
+MULTI_DOT_COMPLEX_LOOP:
+    setp.ge.u64 %p3, %rd10, %rd5;
+    @%p3 bra MULTI_DOT_COMPLEX_LOCAL_DONE;
+    mul.lo.u64 %rd12, %rd10, 16;
+    add.u64 %rd13, %rd7, %rd12;
+    add.u64 %rd14, %rd2, %rd12;
+    ld.global.f64 %fd5, [%rd13];
+    ld.global.f64 %fd6, [%rd13+8];
+    ld.global.f64 %fd7, [%rd14];
+    ld.global.f64 %fd8, [%rd14+8];
+    // conj(a) * b = (ar*br + ai*bi) + i(ar*bi - ai*br).
+    mul.rn.f64 %fd9, %fd5, %fd7;
+    fma.rn.f64 %fd9, %fd6, %fd8, %fd9;
+    mul.rn.f64 %fd10, %fd5, %fd8;
+    neg.f64 %fd11, %fd6;
+    fma.rn.f64 %fd10, %fd11, %fd7, %fd10;
+
+    sub.rn.f64 %fd12, %fd9, %fd3;
+    add.rn.f64 %fd13, %fd1, %fd12;
+    sub.rn.f64 %fd14, %fd13, %fd1;
+    sub.rn.f64 %fd3, %fd14, %fd12;
+    mov.f64 %fd1, %fd13;
+    sub.rn.f64 %fd15, %fd10, %fd4;
+    add.rn.f64 %fd16, %fd2, %fd15;
+    sub.rn.f64 %fd17, %fd16, %fd2;
+    sub.rn.f64 %fd4, %fd17, %fd15;
+    mov.f64 %fd2, %fd16;
+    add.u64 %rd10, %rd10, %rd11;
+    bra MULTI_DOT_COMPLEX_LOOP;
+
+MULTI_DOT_COMPLEX_LOCAL_DONE:
+    mov.u64 %rd15, kryst_multi_dot_complex_smem;
+    cvt.u64.u32 %rd16, %r1;
+    mul.lo.u64 %rd16, %rd16, 16;
+    add.u64 %rd17, %rd15, %rd16;
+    st.shared.f64 [%rd17], %fd1;
+    st.shared.f64 [%rd17+8], %fd2;
+    bar.sync 0;
+
+    setp.ge.u32 %p4, %r1, 128;
+    @!%p4 ld.shared.f64 %fd5, [%rd17+2048];
+    @!%p4 ld.shared.f64 %fd6, [%rd17+2056];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd5;
+    @!%p4 add.rn.f64 %fd2, %fd2, %fd6;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    @!%p4 st.shared.f64 [%rd17+8], %fd2;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 64;
+    @!%p4 ld.shared.f64 %fd5, [%rd17+1024];
+    @!%p4 ld.shared.f64 %fd6, [%rd17+1032];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd5;
+    @!%p4 add.rn.f64 %fd2, %fd2, %fd6;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    @!%p4 st.shared.f64 [%rd17+8], %fd2;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 32;
+    @!%p4 ld.shared.f64 %fd5, [%rd17+512];
+    @!%p4 ld.shared.f64 %fd6, [%rd17+520];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd5;
+    @!%p4 add.rn.f64 %fd2, %fd2, %fd6;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    @!%p4 st.shared.f64 [%rd17+8], %fd2;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 16;
+    @!%p4 ld.shared.f64 %fd5, [%rd17+256];
+    @!%p4 ld.shared.f64 %fd6, [%rd17+264];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd5;
+    @!%p4 add.rn.f64 %fd2, %fd2, %fd6;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    @!%p4 st.shared.f64 [%rd17+8], %fd2;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 8;
+    @!%p4 ld.shared.f64 %fd5, [%rd17+128];
+    @!%p4 ld.shared.f64 %fd6, [%rd17+136];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd5;
+    @!%p4 add.rn.f64 %fd2, %fd2, %fd6;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    @!%p4 st.shared.f64 [%rd17+8], %fd2;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 4;
+    @!%p4 ld.shared.f64 %fd5, [%rd17+64];
+    @!%p4 ld.shared.f64 %fd6, [%rd17+72];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd5;
+    @!%p4 add.rn.f64 %fd2, %fd2, %fd6;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    @!%p4 st.shared.f64 [%rd17+8], %fd2;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 2;
+    @!%p4 ld.shared.f64 %fd5, [%rd17+32];
+    @!%p4 ld.shared.f64 %fd6, [%rd17+40];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd5;
+    @!%p4 add.rn.f64 %fd2, %fd2, %fd6;
+    @!%p4 st.shared.f64 [%rd17], %fd1;
+    @!%p4 st.shared.f64 [%rd17+8], %fd2;
+    bar.sync 0;
+    setp.ge.u32 %p4, %r1, 1;
+    @!%p4 ld.shared.f64 %fd5, [%rd17+16];
+    @!%p4 ld.shared.f64 %fd6, [%rd17+24];
+    @!%p4 add.rn.f64 %fd1, %fd1, %fd5;
+    @!%p4 add.rn.f64 %fd2, %fd2, %fd6;
+    @!%p4 mul.lo.u64 %rd8, %rd6, 16;
+    @!%p4 add.u64 %rd9, %rd3, %rd8;
+    @!%p4 st.global.f64 [%rd9], %fd1;
+    @!%p4 st.global.f64 [%rd9+8], %fd2;
+MULTI_DOT_COMPLEX_DONE:
+    ret;
+}

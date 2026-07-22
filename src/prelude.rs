@@ -5,6 +5,11 @@ pub use crate::config::options::{KspOptions, PcOptions};
 pub use crate::context::ksp_context::SolverType;
 pub use crate::context::pc_context::PcType;
 pub use crate::context::{KspContext, MonitorPolicy};
+#[cfg(feature = "cuda")]
+pub use crate::cuda::{
+    CudaBlockJacobi, CudaCgVariant, CudaCsrOp, CudaDenseOp, CudaDistCsrOp, CudaKspContext,
+    CudaOptions, CudaRuntime, CudaVector,
+};
 pub use crate::matrix::LinOp;
 pub use crate::matrix::OpFormat;
 pub use crate::parallel::{Comm, UniverseComm};

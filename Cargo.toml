@@ -56,6 +56,7 @@ num-complex = { version = "0.4", optional = true }
 faer = { version = "0.24.0", optional = true, default-features = false, features = ["std"] }
 nalgebra = { version = "0.34", optional = true }
 sprs = { version = "0.11", optional = true }
+cudarc = { version = "=0.19.8", optional = true, default-features = false, features = ["std", "driver", "nvrtc", "cublas", "cusparse", "dynamic-loading", "cuda-12000"] }
 
 [dev-dependencies]
 approx = "0.5"
@@ -85,6 +86,7 @@ amd = []
 proptest = []
 simd = ["dep:wide"]
 x86_intrinsics = []
+cuda = ["dep:cudarc"]
 
 # Gate top-level re-exports of dense-direct solvers (LU/QR)
 dense-direct = ["backend-faer"]
@@ -134,6 +136,10 @@ harness = false
 [[bench]]
 name = "repeated_solves"
 harness = false
+
+[[example]]
+name = "cuda_crossover"
+required-features = ["cuda", "backend-faer"]
 
 [[bench]]
 name = "gmres_variants"

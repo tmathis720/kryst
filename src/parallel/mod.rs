@@ -79,6 +79,42 @@ pub struct MpiRequest<'a> {
     pub(crate) _marker: std::marker::PhantomData<&'a mut [f64]>,
 }
 
+/// Raw MPI request used internally for CUDA-aware point-to-point transfers.
+///
+/// This is intentionally not part of the public communicator contract: the
+/// caller must keep the corresponding device allocation alive and must know
+/// that the MPI implementation accepts CUDA device pointers.
+#[cfg(all(feature = "mpi", feature = "cuda"))]
+pub(crate) struct CudaMpiRequest {
+    handle: mpi::ffi::MPI_Request,
+}
+
+// Completed requests are stored only to reuse their Vec capacity while the
+// distributed workspace mutex is held.
+#[cfg(all(feature = "mpi", feature = "cuda"))]
+unsafe impl Send for CudaMpiRequest {}
+
+#[cfg(all(feature = "mpi", feature = "cuda"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CudaMpiError {
+    NotMpi,
+    CountOverflow,
+    Call { operation: &'static str, code: i32 },
+}
+
+#[cfg(all(feature = "mpi", feature = "cuda"))]
+impl std::fmt::Display for CudaMpiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotMpi => f.write_str("communicator is not backed by MPI"),
+            Self::CountOverflow => f.write_str("message length exceeds MPI's i32 count limit"),
+            Self::Call { operation, code } => {
+                write!(f, "{operation} returned MPI error code {code}")
+            }
+        }
+    }
+}
+
 /// Abstract communicator for reductions & splits
 pub trait Comm: Send + Sync + 'static {
     type Vec;
@@ -308,6 +344,135 @@ impl PartialEq for UniverseComm {
 impl Eq for UniverseComm {}
 
 impl UniverseComm {
+    /// Post a receive into memory accepted by the active MPI implementation.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must address at least `count` contiguous `f64` values and remain
+    /// alive and exclusively writable until the returned request is waited.
+    #[cfg(all(feature = "mpi", feature = "cuda"))]
+    pub(crate) unsafe fn raw_irecv_f64(
+        &self,
+        ptr: *mut f64,
+        count: usize,
+        source: i32,
+    ) -> Result<CudaMpiRequest, CudaMpiError> {
+        let UniverseComm::Mpi(comm) = self else {
+            return Err(CudaMpiError::NotMpi);
+        };
+        let count = i32::try_from(count).map_err(|_| CudaMpiError::CountOverflow)?;
+        let mut handle: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
+        let code = unsafe {
+            mpi::ffi::MPI_Irecv(
+                ptr.cast::<std::ffi::c_void>(),
+                count,
+                mpi::ffi::RSMPI_DOUBLE,
+                source,
+                0,
+                comm.world.as_raw(),
+                &mut handle,
+            )
+        };
+        if code != 0 {
+            return Err(CudaMpiError::Call {
+                operation: "MPI_Irecv",
+                code,
+            });
+        }
+        Ok(CudaMpiRequest { handle })
+    }
+
+    /// Post a send from memory accepted by the active MPI implementation.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must address at least `count` contiguous `f64` values and remain
+    /// alive and unmodified until the returned request is waited.
+    #[cfg(all(feature = "mpi", feature = "cuda"))]
+    pub(crate) unsafe fn raw_isend_f64(
+        &self,
+        ptr: *const f64,
+        count: usize,
+        destination: i32,
+    ) -> Result<CudaMpiRequest, CudaMpiError> {
+        let UniverseComm::Mpi(comm) = self else {
+            return Err(CudaMpiError::NotMpi);
+        };
+        let count = i32::try_from(count).map_err(|_| CudaMpiError::CountOverflow)?;
+        let mut handle: mpi::ffi::MPI_Request = unsafe { std::mem::zeroed() };
+        let code = unsafe {
+            mpi::ffi::MPI_Isend(
+                ptr.cast::<std::ffi::c_void>(),
+                count,
+                mpi::ffi::RSMPI_DOUBLE,
+                destination,
+                0,
+                comm.world.as_raw(),
+                &mut handle,
+            )
+        };
+        if code != 0 {
+            return Err(CudaMpiError::Call {
+                operation: "MPI_Isend",
+                code,
+            });
+        }
+        Ok(CudaMpiRequest { handle })
+    }
+
+    /// Post a receive into CUDA device memory through a CUDA-aware MPI.
+    ///
+    /// # Safety
+    ///
+    /// `device_ptr` must address at least `count` contiguous `f64` values on a
+    /// device supported by the MPI implementation, and that allocation must
+    /// remain alive and exclusively writable until the request is waited.
+    #[cfg(all(feature = "mpi", feature = "cuda"))]
+    pub(crate) unsafe fn cuda_irecv_f64(
+        &self,
+        device_ptr: u64,
+        count: usize,
+        source: i32,
+    ) -> Result<CudaMpiRequest, CudaMpiError> {
+        unsafe { self.raw_irecv_f64(device_ptr as usize as *mut f64, count, source) }
+    }
+
+    /// Post a send from CUDA device memory through a CUDA-aware MPI.
+    ///
+    /// # Safety
+    ///
+    /// `device_ptr` must address at least `count` contiguous `f64` values on a
+    /// device supported by the MPI implementation, and that allocation must
+    /// remain alive and unmodified until the request is waited.
+    #[cfg(all(feature = "mpi", feature = "cuda"))]
+    pub(crate) unsafe fn cuda_isend_f64(
+        &self,
+        device_ptr: u64,
+        count: usize,
+        destination: i32,
+    ) -> Result<CudaMpiRequest, CudaMpiError> {
+        unsafe { self.raw_isend_f64(device_ptr as usize as *const f64, count, destination) }
+    }
+
+    #[cfg(all(feature = "mpi", feature = "cuda"))]
+    pub(crate) fn wait_cuda_requests(
+        &self,
+        requests: &mut [CudaMpiRequest],
+    ) -> Result<(), CudaMpiError> {
+        let mut first_error = None;
+        for request in requests {
+            let code =
+                unsafe { mpi::ffi::MPI_Wait(&mut request.handle, mpi::ffi::RSMPI_STATUS_IGNORE) };
+            if code != 0 && first_error.is_none() {
+                first_error = Some(CudaMpiError::Call {
+                    operation: "MPI_Wait",
+                    code,
+                });
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
     /// Request deterministic reductions on this communicator.
     pub fn set_reproducible(&self, on: bool) {
         GLOBAL_REPRO_FLAG.store(on, Ordering::Relaxed);

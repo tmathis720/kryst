@@ -84,6 +84,9 @@ pub mod algebra;
 pub mod config;
 pub mod context;
 pub mod core;
+#[cfg(feature = "cuda")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+pub mod cuda;
 pub mod error;
 pub mod matrix;
 pub mod parallel;

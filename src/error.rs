@@ -10,6 +10,19 @@ pub enum NonFiniteKind {
     Inf,
 }
 
+/// Broad category for a CUDA failure without exposing the CUDA binding crate in
+/// kryst's public error API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CudaErrorKind {
+    Unavailable,
+    Driver,
+    Allocation,
+    Library,
+    Kernel,
+    Synchronization,
+    DeviceMismatch,
+}
+
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum KError {
     #[error("help requested")]
@@ -49,6 +62,12 @@ pub enum KError {
     UnrecognizedPcSide(String),
     #[error("not implemented: {0}")]
     NotImplemented(String),
+    #[error("CUDA {kind:?} error during {operation}: {message}")]
+    Cuda {
+        kind: CudaErrorKind,
+        operation: &'static str,
+        message: String,
+    },
 }
 
 #[cfg(test)]

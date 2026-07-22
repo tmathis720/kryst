@@ -62,11 +62,64 @@ Common feature flags:
 | `mpi` | MPI communicator support and distributed operators/preconditioners. |
 | `mpi_examples` | Convenience feature for MPI examples. |
 | `complex` | Uses `num_complex::Complex64` as the library scalar type `S`. |
+| `cuda` | Explicit CUDA 12+ device vectors, CSR/dense operators, and CUDA KSP contexts. CUDA libraries are loaded at runtime. |
 | `dense-direct` | Opt-in dense direct solver and preconditioner modules. Requires `backend-faer`. |
 | `simd` | Enables SIMD-oriented sparse matvec planning through `wide`. |
 | `transpose-cache` | Enables cached transpose support with `parking_lot`. |
 | `logging` | Enables log-oriented instrumentation paths. |
 | `superlu_dist` | Enables SuperLU_DIST-facing code paths where available. |
+
+## CUDA
+
+CUDA support is additive and opt-in; the ordinary `KspContext` host-slice API
+is unchanged. The feature uses dynamically loaded CUDA driver, cuBLAS, and
+cuSPARSE libraries, so enabling it does not require a CUDA toolkit at build
+time:
+
+```toml
+kryst = { version = "4.3", features = ["cuda"] }
+```
+
+The CUDA API currently provides device-resident vectors, CSR SpMV and dense
+GEMV (including transpose/conjugate-transpose), numeric matrix updates,
+None/Jacobi/block-Jacobi/Chebyshev/ILU(0)/AMG preconditioning, and classical or pipelined
+CG/PCG plus CGNR/CR/LSQR/LSMR/QMR/TFQMR/TCQMR, classical or reduced-collective pipelined GMRES/FGMRES, GCR/PipeGCR, BiCGStab/CGS/Richardson/Chebyshev KSP. Checked-in PTX supplies fused vector
+recurrences and distributed halo packing without NVRTC or `nvcc` at runtime.
+Solver workspaces are allocated by `setup()` and reused across solves.
+`solve_host` is the explicit upload/download convenience path; `solve` accepts
+`CudaVector` values and does not transfer full vectors.
+
+```rust,no_run
+use kryst::cuda::{CudaCsrOp, CudaKspContext, CudaRuntime, CudaVector};
+use kryst::matrix::sparse::CsrMatrix;
+use kryst::prelude::*;
+use std::sync::Arc;
+
+let runtime = CudaRuntime::new(0)?;
+let host_a = CsrMatrix::from_csr(
+    2,
+    2,
+    vec![0, 1, 2],
+    vec![0, 1],
+    vec![S::from_real(2.0), S::from_real(4.0)],
+);
+let a = Arc::new(CudaCsrOp::from_host(runtime.clone(), &host_a)?);
+let b = CudaVector::from_host(
+    runtime.clone(),
+    &[S::from_real(2.0), S::from_real(8.0)],
+)?;
+let mut x = CudaVector::zeros(runtime.clone(), 2)?;
+
+let mut ksp = CudaKspContext::new(runtime);
+ksp.set_type(SolverType::Cg)?;
+ksp.set_pc_type(PcType::Jacobi)?;
+ksp.set_operators(a, None)?;
+let _stats = ksp.setup()?.solve(&b, &mut x)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+See [`docs/cuda.md`](docs/cuda.md) for the support matrix, diagnostics, runtime
+requirements, reproducibility contract, and GPU test commands.
 
 ## Quick Start
 
