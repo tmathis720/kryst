@@ -2,6 +2,7 @@ use std::cell::UnsafeCell;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::algebra::scalar::{KrystScalar, R, S};
 use crate::error::KError;
@@ -12,6 +13,19 @@ pub struct HaloReq<'a> {
     pub send_reqs: Vec<<UniverseComm as Comm>::Request<'a>>,
     ctx: Arc<HaloBuffers>,
     slot: usize,
+}
+
+/// Timings for the communication-side phases of one halo exchange.
+///
+/// `communication` measures posting receives and sends. Transfer completion is
+/// reported separately as `wait`, while `unpack` includes copying received
+/// buffers into the flat ghost vector returned to the caller.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HaloPhaseTimings {
+    pub packing: Duration,
+    pub communication: Duration,
+    pub wait: Duration,
+    pub unpack: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -371,7 +385,24 @@ impl HaloPlan {
     }
 
     pub fn post_halo<'a>(&'a self, x_local: &[S]) -> HaloReq<'a> {
+        self.post_halo_impl(x_local, None)
+    }
+
+    /// Post a halo exchange and separately measure packing and request-posting.
+    pub fn post_halo_profiled<'a>(&'a self, x_local: &[S]) -> (HaloReq<'a>, HaloPhaseTimings) {
+        let mut timings = HaloPhaseTimings::default();
+        let request = self.post_halo_impl(x_local, Some(&mut timings));
+        (request, timings)
+    }
+
+    fn post_halo_impl<'a>(
+        &'a self,
+        x_local: &[S],
+        mut timings: Option<&mut HaloPhaseTimings>,
+    ) -> HaloReq<'a> {
         let (slot, ctx) = self.checkout_context();
+
+        let receive_post_start = timings.as_ref().map(|_| Instant::now());
         let mut recv_reqs = Vec::new();
         for item in &self.recv_schedule {
             if let Some(buf_lock) = ctx.recv_buf.get(&item.nbr) {
@@ -384,14 +415,14 @@ impl HaloPlan {
                 recv_reqs.push(req);
             }
         }
+        if let (Some(start), Some(profile)) = (receive_post_start, timings.as_deref_mut()) {
+            profile.communication += start.elapsed();
+        }
 
-        let mut send_reqs = Vec::new();
+        let pack_start = timings.as_ref().map(|_| Instant::now());
         for item in &self.send_schedule {
             if let Some(buf_lock) = ctx.send_buf.get(&item.nbr) {
                 let buf = unsafe { &mut *buf_lock.get() };
-                if buf.is_empty() {
-                    continue;
-                }
                 for op in &item.ops {
                     match *op {
                         PackOp::Scatter { src, dst } => buf[dst] = x_local[src],
@@ -405,10 +436,28 @@ impl HaloPlan {
                         }
                     }
                 }
+            }
+        }
+        if let (Some(start), Some(profile)) = (pack_start, timings.as_deref_mut()) {
+            profile.packing = start.elapsed();
+        }
+
+        let send_post_start = timings.as_ref().map(|_| Instant::now());
+        let mut send_reqs = Vec::new();
+        for item in &self.send_schedule {
+            if let Some(buf_lock) = ctx.send_buf.get(&item.nbr) {
+                let buf = unsafe { &*buf_lock.get() };
+                if buf.is_empty() {
+                    continue;
+                }
                 let slice = halo_slice(buf);
                 let req = self.index.comm.isend_to(slice, item.nbr as i32);
                 send_reqs.push(req);
             }
+        }
+
+        if let (Some(start), Some(profile)) = (send_post_start, timings.as_deref_mut()) {
+            profile.communication += start.elapsed();
         }
 
         HaloReq {
@@ -420,9 +469,29 @@ impl HaloPlan {
     }
 
     pub fn complete_halo(&self, mut req: HaloReq<'_>) -> Vec<S> {
+        self.complete_halo_impl(&mut req, None)
+    }
+
+    /// Complete a halo exchange and separately measure wait and unpack phases.
+    pub fn complete_halo_profiled(&self, mut req: HaloReq<'_>) -> (Vec<S>, HaloPhaseTimings) {
+        let mut timings = HaloPhaseTimings::default();
+        let ghost = self.complete_halo_impl(&mut req, Some(&mut timings));
+        (ghost, timings)
+    }
+
+    fn complete_halo_impl(
+        &self,
+        req: &mut HaloReq<'_>,
+        mut timings: Option<&mut HaloPhaseTimings>,
+    ) -> Vec<S> {
+        let wait_start = timings.as_ref().map(|_| Instant::now());
         self.index.comm.wait_all(&mut req.recv_reqs);
         self.index.comm.wait_all(&mut req.send_reqs);
+        if let (Some(start), Some(profile)) = (wait_start, timings.as_deref_mut()) {
+            profile.wait = start.elapsed();
+        }
 
+        let unpack_start = timings.as_ref().map(|_| Instant::now());
         if self.index.n_ghost > 0 {
             let mut ghost = req.ctx.ghost_flat.write().unwrap();
             for (&nbr, range) in &self.index.ghost_ranges {
@@ -436,9 +505,15 @@ impl HaloPlan {
             }
             let out = ghost.clone();
             self.free_slots.lock().unwrap().push(req.slot);
+            if let (Some(start), Some(profile)) = (unpack_start, timings.as_deref_mut()) {
+                profile.unpack = start.elapsed();
+            }
             out
         } else {
             self.free_slots.lock().unwrap().push(req.slot);
+            if let (Some(start), Some(profile)) = (unpack_start, timings.as_deref_mut()) {
+                profile.unpack = start.elapsed();
+            }
             Vec::new()
         }
     }

@@ -7,13 +7,14 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::algebra::bridge::BridgeScratch;
 use crate::algebra::scalar::{KrystScalar, S};
 use crate::error::KError;
 use crate::matrix::csr::CsrMatrix as PlanCsrMatrix;
 use crate::matrix::dist::csr_types::{DistRowCsr, LocalSquareCsr};
-use crate::matrix::dist::halo::{HaloIndexPlan, HaloPlan, HaloTuning};
+use crate::matrix::dist::halo::{HaloIndexPlan, HaloPhaseTimings, HaloPlan, HaloTuning};
 use crate::matrix::dist::spmv_dist::RowRanges;
 use crate::matrix::op::{ChangeIds, DistLayout, LinOp, StructureId, ValuesId};
 use crate::matrix::parcsr::ParCsrMatrix;
@@ -116,6 +117,30 @@ pub struct DistributedPlanDiagnostics {
     pub halo_send_volume: usize,
     pub expected_communication_fraction: f64,
     pub expected_computation_fraction: f64,
+}
+
+/// Per-phase timings from an explicitly profiled distributed SpMV.
+///
+/// The ordinary [`LinOp::matvec`] path does not collect timestamps. Benchmarks
+/// can call [`DistCsrOp::profile_matvec`] when a phase breakdown is required.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DistSpmvProfile {
+    pub total: Duration,
+    pub local_compute: Duration,
+    pub packing: Duration,
+    /// Time spent posting point-to-point communication requests.
+    pub communication: Duration,
+    pub wait: Duration,
+    pub unpack: Duration,
+}
+
+impl DistSpmvProfile {
+    fn add_halo(&mut self, phase: HaloPhaseTimings) {
+        self.packing += phase.packing;
+        self.communication += phase.communication;
+        self.wait += phase.wait;
+        self.unpack += phase.unpack;
+    }
 }
 
 pub fn choose_distributed_plan(
@@ -470,6 +495,78 @@ impl DistCsrOp {
     /// Number of local rows stored on this rank.
     pub fn local_nrows(&self) -> usize {
         self.n_local
+    }
+
+    /// Compute `y = A x` while recording the major local and halo phases.
+    ///
+    /// This follows the same overlap mode and kernels as `matvec`, but adds
+    /// timestamp collection. It is intended for baselines and diagnostics,
+    /// not steady-state production calls.
+    pub fn profile_matvec(&self, x: &[S], y: &mut [S]) -> Result<DistSpmvProfile, KError> {
+        if x.len() != self.n_local || y.len() != self.n_local {
+            return Err(KError::InvalidInput("dimension mismatch".into()));
+        }
+
+        let total_start = Instant::now();
+        let mut profile = DistSpmvProfile::default();
+        let compute_start = Instant::now();
+        y.fill(S::zero());
+        profile.local_compute += compute_start.elapsed();
+
+        match self.overlap_mode {
+            HaloOverlapMode::Disabled => {
+                let halo_req =
+                    if self.halo.index.n_ghost > 0 || !self.halo.index.send_local_idx.is_empty() {
+                        let (request, phase) = self.halo.post_halo_profiled(x);
+                        profile.add_halo(phase);
+                        Some(request)
+                    } else {
+                        None
+                    };
+                if let Some(request) = halo_req {
+                    let (ghost, phase) = self.halo.complete_halo_profiled(request);
+                    profile.add_halo(phase);
+                    let compute_start = Instant::now();
+                    self.spmv_local_only(x, y);
+                    self.spmv_border(y, &ghost);
+                    profile.local_compute += compute_start.elapsed();
+                } else {
+                    let compute_start = Instant::now();
+                    self.spmv_local_only(x, y);
+                    self.spmv_border(y, &[]);
+                    profile.local_compute += compute_start.elapsed();
+                }
+            }
+            HaloOverlapMode::Interior => {
+                let halo_req =
+                    if self.halo.index.n_ghost > 0 || !self.halo.index.send_local_idx.is_empty() {
+                        let (request, phase) = self.halo.post_halo_profiled(x);
+                        profile.add_halo(phase);
+                        Some(request)
+                    } else {
+                        None
+                    };
+
+                let compute_start = Instant::now();
+                self.spmv_local_only(x, y);
+                profile.local_compute += compute_start.elapsed();
+
+                if let Some(request) = halo_req {
+                    let (ghost, phase) = self.halo.complete_halo_profiled(request);
+                    profile.add_halo(phase);
+                    let compute_start = Instant::now();
+                    self.spmv_border(y, &ghost);
+                    profile.local_compute += compute_start.elapsed();
+                } else {
+                    let compute_start = Instant::now();
+                    self.spmv_border(y, &[]);
+                    profile.local_compute += compute_start.elapsed();
+                }
+            }
+        }
+
+        profile.total = total_start.elapsed();
+        Ok(profile)
     }
 
     fn spmv_local_only(&self, x: &[S], y: &mut [S]) {

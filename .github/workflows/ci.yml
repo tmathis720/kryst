@@ -100,6 +100,15 @@ jobs:
           mpirun -n 2 --oversubscribe \
             cargo test --features "mpi,complex" --test mpi_smoke -- --nocapture --test-threads=1
 
+      - name: DistCSR SpMV baseline smoke (2 ranks)
+        run: |
+          cargo build --features mpi --bin spmv_baseline
+          mpirun -n 2 --oversubscribe \
+            target/debug/spmv_baseline --size 256 --iterations 2 \
+            --cases diagonal,stencil5,empty_rows --distributed-only \
+            > /tmp/kryst-spmv-baseline.jsonl
+          test "$(wc -l < /tmp/kryst-spmv-baseline.jsonl)" -eq 3
+
   invariants:
     runs-on: ubuntu-latest
     steps:

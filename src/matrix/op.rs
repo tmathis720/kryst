@@ -699,7 +699,6 @@ impl LinOpF64 for dyn LinOp<S = f64> + '_ {
 #[cfg(all(feature = "transpose-cache", not(feature = "complex")))]
 impl<Scalar: KrystScalar> CsrOp<Scalar> {
     pub fn ensure_csc_view(&self) -> Option<Arc<CscMatrix<Scalar>>> {
-        use crate::matrix::format::AsFormat;
         let vid = self.values_id();
         {
             let guard = self.t_cache.read();
@@ -709,7 +708,28 @@ impl<Scalar: KrystScalar> CsrOp<Scalar> {
                 }
             }
         }
-        let csc = self.csr.to_csc_cached(Scalar::zero().real());
+        let m = self.csr.nrows();
+        let n = self.csr.ncols();
+        let mut col_ptr = vec![0usize; n + 1];
+        for &column in self.csr.col_idx() {
+            col_ptr[column + 1] += 1;
+        }
+        for column in 0..n {
+            col_ptr[column + 1] += col_ptr[column];
+        }
+        let mut next = col_ptr.clone();
+        let mut row_idx = vec![0usize; self.csr.nnz()];
+        let mut values = vec![Scalar::zero(); self.csr.nnz()];
+        for row in 0..m {
+            for entry in self.csr.row_ptr()[row]..self.csr.row_ptr()[row + 1] {
+                let column = self.csr.col_idx()[entry];
+                let destination = next[column];
+                row_idx[destination] = row;
+                values[destination] = self.csr.values()[entry];
+                next[column] += 1;
+            }
+        }
+        let csc = Arc::new(CscMatrix::from_csc(m, n, col_ptr, row_idx, values));
         {
             let mut guard = self.t_cache.write();
             *guard = Some((vid, csc.clone()));
